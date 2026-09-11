@@ -142,7 +142,7 @@ async fn need_auth(ctx: Context<'_>) -> Result<bool, Error> {
     }
     let u = ctx.author();
     eprintln!("denied: {} (id {})", u.name, u.id.get());
-    ctx.say("Not authorized. Ask the owner to run `$useradd <your discord id>`.")
+    ctx.say("Not authorized. Ask the owner to run `/useradd <your discord id>`.")
         .await?;
     Ok(false)
 }
@@ -486,17 +486,17 @@ const HELP: &str = "\
 **artixy — your Artix VM in your pocket.** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me.\n\
 \n**VM**\n`$ps` — state of the VM\n`$status` — quick state + agent check\n`$start` — power on + wait for guest agent\n`$stop` — graceful shutdown\n`$restart` — reboot\n`$info` — details + agent status\n\
 \n**Who can use me**\n`$users` / `$userlist` — show owner + managers\n`$useradd @user` (prefix only) — owner only: links them and creates their Linux account in Artix (name from discord name).\n`$userdel @user` (prefix only) — owner only\n`$shell [fish|bash]` — your `$` interpreter (default bash)\n`$run <command>` — same as `$`, prefix only\n\
-\nPrefixes start OFF — prefix commands only. Owner turns them on in `$settings` (e.g. `$settings dollar $`).\n\
+\nPrefixes start OFF — slash commands always work. Owner turns them on in `/settings` (e.g. `/settings dollar $`).\n\
 \n**Run real commands in Artix**\n`$<command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `$sudo pacman -Syu`, `$ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`$live <command>` — follows one run live in a single message until it finishes. Starting another run stops it.\n`$shot` — screenshot of the host screen, uploaded here\n`$send <path>` — upload a host file here (absolute path, ~20MB max)\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn help(ctx: Context<'_>) -> Result<(), Error> {
     ctx.say(HELP).await?;
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn ps(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -512,7 +512,7 @@ async fn ps(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn start(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -559,7 +559,7 @@ async fn start(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -591,7 +591,7 @@ async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn restart(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -608,7 +608,7 @@ async fn restart(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn info(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -630,7 +630,7 @@ async fn info(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn shell(
     ctx: Context<'_>,
     #[description = "fish or bash (empty shows current)"] name: Option<String>,
@@ -699,7 +699,7 @@ async fn save_json(path: &str, data: String) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn botrestart(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -753,7 +753,7 @@ async fn botrestart(ctx: Context<'_>) -> Result<(), Error> {
     }
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn colortest(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -762,7 +762,7 @@ async fn colortest(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn run(
     ctx: Context<'_>,
     #[description = "Command to run in the VM"] cmd: String,
@@ -820,7 +820,7 @@ async fn do_live(ctx: Context<'_>, cmd: String) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn live(
     ctx: Context<'_>,
     #[description = "Command to follow live"] cmd: String,
@@ -831,7 +831,7 @@ async fn live(
     do_live(ctx, cmd).await
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn shot(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -868,7 +868,7 @@ async fn shot(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn send(
     ctx: Context<'_>,
     #[description = "Absolute path of a file inside the bot's project dir (max ~20MB)"] path: String,
@@ -929,7 +929,7 @@ async fn send(
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn status(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -950,7 +950,7 @@ async fn status(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn useradd(
     ctx: Context<'_>,
     #[description = "User to authorize"] user: serenity::User,
@@ -958,7 +958,7 @@ async fn useradd(
     do_useradd(ctx, &user).await
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn userdel(
     ctx: Context<'_>,
     #[description = "User to remove"] user: serenity::User,
@@ -972,7 +972,7 @@ fn settings_text(s: &PrefixSettings) -> String {
         None => "OFF".into(),
     };
     format!(
-        "Prefixes (prefix commands only):\n$ slot: {}\n; slot: {}\nChange (owner only): `$settings dollar <off|$|!|…>`, `$settings semicolon <off|;|…>` — 1-2 symbol chars, or `off`.",
+        "Prefixes (slash commands always work):\n$ slot: {}\n; slot: {}\nChange (owner only): `/settings dollar <off|$|!|…>`, `/settings semicolon <off|;|…>` — 1-2 symbol chars, or `off`.",
         show(&s.dollar),
         show(&s.semicolon)
     )
@@ -1017,7 +1017,7 @@ async fn do_settings_set(ctx: Context<'_>, slot: &str, value: String) -> Result<
     Ok(())
 }
 
-#[poise::command(prefix_command, subcommands("dollar", "semicolon"))]
+#[poise::command(slash_command, prefix_command, subcommands("dollar", "semicolon"))]
 async fn settings(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -1027,7 +1027,7 @@ async fn settings(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn dollar(
     ctx: Context<'_>,
     #[description = "off or 1-2 symbol chars"] value: String,
@@ -1035,7 +1035,7 @@ async fn dollar(
     do_settings_set(ctx, "dollar", value).await
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn semicolon(
     ctx: Context<'_>,
     #[description = "off or 1-2 symbol chars"] value: String,
@@ -1043,24 +1043,24 @@ async fn semicolon(
     do_settings_set(ctx, "semicolon", value).await
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn users(ctx: Context<'_>) -> Result<(), Error> {
     do_users(ctx).await
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn userlist(ctx: Context<'_>) -> Result<(), Error> {
     do_users(ctx).await
 }
 
-#[poise::command(prefix_command, subcommands("add", "del"))]
+#[poise::command(slash_command, prefix_command, subcommands("add", "del"))]
 async fn user(ctx: Context<'_>) -> Result<(), Error> {
     ctx.say("Usage: `;user add <discord id> [linuxname]` or `;user del <discord id>`.")
         .await?;
     Ok(())
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn add(
     ctx: Context<'_>,
     #[description = "User to authorize"] user: serenity::User,
@@ -1068,7 +1068,7 @@ async fn add(
     do_useradd(ctx, &user).await
 }
 
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command)]
 async fn del(
     ctx: Context<'_>,
     #[description = "User to remove"] user: serenity::User,
@@ -1102,7 +1102,7 @@ async fn do_users(ctx: Context<'_>) -> Result<(), Error> {
         uname(ctx.http(), owner).await
     );
     if pairs.is_empty() {
-        msg.push_str(" none yet — owner runs `$useradd @user`");
+        msg.push_str(" none yet — owner runs `/useradd @user`");
     } else {
         for (u, n) in pairs {
             let name = uname(ctx.http(), u).await;
