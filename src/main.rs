@@ -443,55 +443,6 @@ fn sanitize_ansi(s: &str) -> String {
     out
 }
 
-/// Strip ALL terminal escape sequences (CSI `ESC[...X`, OSC `ESC]...BEL`
-/// / `ESC\`) plus carriage returns, leaving plain text. Used for `$run` /
-/// `$live` output: piping through Discord mangles raw ESC bytes (control
-/// chars get eaten somewhere between the bot and the client, leaving bare
-/// `[0;32m` salad behind), so plain text in a plain fence is the only thing
-/// that renders identically everywhere. Width math downstream (fit_body)
-/// must run on the stripped text, so strip FIRST, then fit.
-fn strip_sgr(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut it = s.chars().peekable();
-    while let Some(c) = it.next() {
-        if c == '\r' {
-            continue;
-        }
-        if c != '\x1b' {
-            out.push(c);
-            continue;
-        }
-        match it.peek() {
-            Some('[') => {
-                it.next();
-                for ch in it.by_ref() {
-                    // CSI ends at the first byte in @..=~ (the "final byte").
-                    if ('@'..='~').contains(&ch) {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                // OSC ends at BEL or ESC-backslash.
-                it.next();
-                let mut prev = '\0';
-                for ch in it.by_ref() {
-                    if ch == '\x07' || (ch == '\\' && prev == '\x1b') {
-                        break;
-                    }
-                    prev = ch;
-                }
-            }
-            Some(_) => {
-                // Any other ESC-prefixed sequence: drop the introducer too.
-                it.next();
-            }
-            None => {}
-        }
-    }
-    out
-}
-
 fn fit_body(body: &str) -> String {    const MAX: usize = 1790;
     if body.chars().count() <= MAX {
         return body.to_string();
@@ -548,22 +499,6 @@ fn codeblock(s: &str) -> String {
         t = "(empty)".into();
     }
     format!("```ansi\n{}\n```", t)
-}
-
-/// Plain-text variant of `codeblock` for guest command output (`$run` /
-/// `$live`): the caller passes text already stripped by `strip_sgr` (so
-/// `fit_body` width math counted visible chars), and we fence WITHOUT the
-/// `ansi` tag so Discord never tries to interpret leftovers.
-fn codeblock_plain(s: &str) -> String {
-    let mut t = s.trim_end().to_string();
-    if t.len() > 1800 {
-        t = t.chars().take(1790).collect();
-        t.push_str("\n…truncated");
-    }
-    if t.is_empty() {
-        t = "(empty)".into();
-    }
-    format!("```\n{}\n```", t)
 }
 
 const HELP: &str = "\
@@ -916,7 +851,7 @@ async fn run(
     let sh = user_shell(ctx.data(), uid).await;
     let runas = linked_user(ctx.data(), uid).await;
     let (body, code) = run_guest_cmd(&vm, &sh, &cmd, runas.as_deref(), 300).await?;
-    ctx.say(codeblock_plain(&fit_body(&strip_sgr(&body)))).await?;
+    ctx.say(codeblock(&fit_body(&body))).await?;
     eprintln!("run for {}: exit {}", ctx.author().name, code);
     Ok(())
 }
@@ -1538,15 +1473,15 @@ async fn live_run(
                     body.push_str(&format!("\n\u{1b}[0;31mexit {}\u{1b}[0m", code));
                 }
                 let _ = msg
-                    .edit(&http, serenity::EditMessage::new().content(codeblock_plain(&strip_sgr(&body))))
+                    .edit(&http, serenity::EditMessage::new().content(codeblock(&body)))
                     .await;
                 cleanup_live_files(&vm, &out_f, &code_f).await;
                 break;
             }
             None => {
-                body.push_str("\n…live");
+                body.push_str("\n\u{1b}[0;33m…live\u{1b}[0m");
                 if msg
-                    .edit(&http, serenity::EditMessage::new().content(codeblock_plain(&strip_sgr(&body))))
+                    .edit(&http, serenity::EditMessage::new().content(codeblock(&body)))
                     .await
                     .is_err()
                 {
@@ -1773,8 +1708,8 @@ async fn event_handler(
     }
     let runas = linked_user(data, id).await;
     let (body, code) = run_guest_cmd(&vm, &sh, text, runas.as_deref(), 300).await?;
-    if new_message.reply(&ctx.http, codeblock_plain(&fit_body(&strip_sgr(&body)))).await.is_err() {
-        let _ = new_message.channel_id.say(&ctx.http, codeblock_plain(&fit_body(&strip_sgr(&body)))).await;
+    if new_message.reply(&ctx.http, codeblock(&fit_body(&body))).await.is_err() {
+        let _ = new_message.channel_id.say(&ctx.http, codeblock(&fit_body(&body))).await;
     }
     eprintln!(
         "exec for {} (id {}): exit {} runas={:?} cmd={:?}",
@@ -1838,26 +1773,6 @@ mod tests {
         assert!(a.len() >= 8, "got {:?}", a);
         // Very likely unique across two calls (urandom or nanos-based).
         assert_ne!(a, b, "suffix should differ per call");
-    }
-
-    #[test]
-    fn strip_sgr_drops_everything_escapey() {
-        // Plain SGR, bold, reset, truecolor: all gone, text kept.
-        assert_eq!(strip_sgr("\x1b[0;32m$\x1b[0m hi"), "$ hi");
-        assert_eq!(strip_sgr("\x1b[0;1m\x1b[0;36m'\x1b[0m"), "'");
-        assert_eq!(strip_sgr("\x1b[38;2;1;2;3mX\x1b[0m"), "X");
-        assert_eq!(strip_sgr("plain"), "plain");
-        // OSC hyperlink-ish + BEL: gone.
-        assert_eq!(strip_sgr("a\x1b]8;;http://x\x07b"), "ab");
-        // Lone trailing ESC and CR: gone.
-        assert_eq!(strip_sgr("a\x1b"), "a");
-        assert_eq!(strip_sgr("a\rb"), "ab");
-        // A sequence split by truncation (ESC half cut off) leaves no
-        // dangerous remnant behind after a re-strip: bare "[0;32m" is
-        // just text, but a full strip of intact input is always clean.
-        let intact = "\x1b[0;32mok\x1b[0m";
-        assert!(!strip_sgr(intact).contains('\x1b'), "no ESC remains");
-        assert_eq!(strip_sgr(intact), "ok");
     }
 }
 
