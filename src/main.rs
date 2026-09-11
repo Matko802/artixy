@@ -438,7 +438,7 @@ fn codeblock(s: &str) -> String {
     format!("```ansi\n{}\n```", t)
 }
 
-fn fit_bottom_lines(body: &str) -> String {
+fn fit_bottom_lines(body: &str) -> (String, bool) {
     const MAX: usize = 1750;
     let lines: Vec<&str> = body.lines().collect();
     let mut kept: Vec<String> = Vec::new();
@@ -465,21 +465,68 @@ fn fit_bottom_lines(body: &str) -> String {
         len += n;
     }
     kept.reverse();
-    let mut out = kept.join("\n");
-    if truncated {
-        out = format!("…\n{}", out);
-    }
-    out
+    (kept.join("\n"), truncated)
+}
+
+fn fence_inline(fitted: &str) -> String {
+    let t = if fitted.trim().is_empty() {
+        "(empty)".to_string()
+    } else {
+        fitted.to_string()
+    };
+    format!("```ansi\n{}\n```", t)
 }
 
 fn ansi_tail(body: &str) -> String {
-    let t = fit_bottom_lines(&sanitize_ansi(body.trim_end()));
-    let t = if t.trim().is_empty() {
-        "(empty)".to_string()
+    let clean = sanitize_ansi(body.trim_end());
+    let (fitted, truncated) = fit_bottom_lines(&clean);
+    if truncated {
+        return format!("```ansi\n…\n{}\n```", fitted);
+    }
+    fence_inline(&fitted)
+}
+
+fn cap_file_body(clean: &str) -> String {
+    const FILE_MAX: usize = 400_000;
+    if clean.chars().count() <= FILE_MAX {
+        return clean.to_string();
+    }
+    let v: Vec<char> = clean.chars().collect();
+    let start = v.len() - FILE_MAX;
+    format!(
+        "…[showing last {} chars]\n{}",
+        FILE_MAX,
+        v[start..].iter().collect::<String>()
+    )
+}
+
+fn attach_name(cmd: &str) -> String {
+    let w: String = cmd
+        .split_whitespace()
+        .next()
+        .unwrap_or("output")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if w.is_empty() {
+        "output.txt".into()
     } else {
-        t
-    };
-    format!("```ansi\n{}\n```", t)
+        format!("{}.txt", w)
+    }
+}
+
+async fn send_output(ctx: Context<'_>, cmd: &str, body: &str) -> Result<(), Error> {
+    let clean = sanitize_ansi(body.trim_end());
+    let (fitted, truncated) = fit_bottom_lines(&clean);
+    if !truncated {
+        ctx.say(fence_inline(&fitted)).await?;
+        return Ok(());
+    }
+    let preview = format!("```ansi\n…\n{}\n```", fitted);
+    let att = serenity::CreateAttachment::bytes(cap_file_body(&clean).into_bytes(), attach_name(cmd));
+    ctx.send(poise::CreateReply::default().content(preview).attachment(att))
+        .await?;
+    Ok(())
 }
 
 const HELP: &str = "\
@@ -774,7 +821,7 @@ async fn run(
     let sh = user_shell(ctx.data(), uid).await;
     let runas = linked_user(ctx.data(), uid).await;
     let (body, code) = run_guest_cmd(&vm, &sh, &cmd, runas.as_deref(), 300).await?;
-    ctx.say(ansi_tail(&body)).await?;
+    send_output(ctx, &cmd, &body).await?;
     eprintln!("run for {}: exit {}", ctx.author().name, code);
     Ok(())
 }
@@ -1619,8 +1666,26 @@ async fn event_handler(
     }
     let runas = linked_user(data, id).await;
     let (body, code) = run_guest_cmd(&vm, &sh, text, runas.as_deref(), 300).await?;
-    if new_message.reply(&ctx.http, ansi_tail(&body)).await.is_err() {
-        let _ = new_message.channel_id.say(&ctx.http, ansi_tail(&body)).await;
+    let clean = sanitize_ansi(body.trim_end());
+    let (fitted, truncated) = fit_bottom_lines(&clean);
+    if !truncated {
+        let msg = fence_inline(&fitted);
+        if new_message.reply(&ctx.http, msg.clone()).await.is_err() {
+            let _ = new_message.channel_id.say(&ctx.http, msg).await;
+        }
+    } else {
+        let preview = format!("```ansi\n…\n{}\n```", fitted);
+        let att = serenity::CreateAttachment::bytes(
+            cap_file_body(&clean).into_bytes(),
+            attach_name(text),
+        );
+        let _ = new_message
+            .channel_id
+            .send_message(
+                &ctx.http,
+                serenity::CreateMessage::new().content(preview).add_file(att),
+            )
+            .await;
     }
     eprintln!(
         "exec for {} (id {}): exit {} runas={:?} cmd={:?}",
@@ -1686,6 +1751,34 @@ mod tests {
     fn tabs_expand_to_spaces() {
         let out = sanitize_ansi("a\tb");
         assert_eq!(out, "a        b", "got {:?}", out);
+    }
+
+    #[test]
+    fn fit_reports_truncation_flag() {
+        let (_, t) = fit_bottom_lines("short\nlines");
+        assert!(!t);
+        let long = (0..100).map(|i| format!("line {:03} {}", i, "x".repeat(12))).collect::<Vec<_>>().join("\n");
+        let (fitted, t) = fit_bottom_lines(&long);
+        assert!(t, "long output must flag truncated");
+        assert!(fitted.contains("line 099"), "bottom kept");
+        assert!(!fitted.contains("line 000"), "head dropped");
+    }
+
+    #[test]
+    fn file_body_caps_huge_output() {
+        let huge = "y".repeat(500_000);
+        let capped = cap_file_body(&huge);
+        assert!(capped.chars().count() <= 400_100, "got {}", capped.chars().count());
+        assert!(capped.starts_with('…'), "marks truncation");
+        assert_eq!(cap_file_body("small"), "small");
+    }
+
+    #[test]
+    fn attach_name_is_safe_filename() {
+        assert_eq!(attach_name("jefetch --static"), "jefetch.txt");
+        assert_eq!(attach_name(""), "output.txt");
+        assert_eq!(attach_name("../../../etc/passwd"), "etcpasswd.txt");
+        assert_eq!(attach_name("sudo pacman -Syu"), "sudo.txt");
     }
 
     #[test]
