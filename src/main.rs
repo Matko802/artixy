@@ -346,6 +346,14 @@ fn sanitize_ansi(s: &str) -> String {
         if c == '\r' {
             continue;
         }
+        if c == '\t' {
+            // Terminals advance tabs to 8-cell stops; Discord has no tab
+            // stops, so expand to spaces for identical alignment. Breaks
+            // any bg-swatch run: a tab is a gap, not 8 bg cells.
+            swatch = None;
+            out.push_str("        ");
+            continue;
+        }
         if c != '\x1b' {
             if c == ' ' {
                 if let Some(fg) = swatch {
@@ -443,52 +451,6 @@ fn sanitize_ansi(s: &str) -> String {
     out
 }
 
-fn fit_body(body: &str) -> String {    const MAX: usize = 1790;
-    if body.chars().count() <= MAX {
-        return body.to_string();
-    }
-    let lines: Vec<&str> = body.split('\n').collect();
-    if lines.len() < 2 {
-        return body.chars().take(MAX).collect();
-    }
-    let mut head_len = 0usize;
-    let mut head_n = 0usize;
-    for l in &lines {
-        let n = l.chars().count() + 1;
-        if head_len + n > 700 {
-            break;
-        }
-        head_len += n;
-        head_n += 1;
-    }
-    let mut tail_parts: Vec<String> = vec![];
-    for l in lines.iter().rev() {
-        if tail_parts.len() >= lines.len().saturating_sub(head_n).max(1) {
-            break;
-        }
-        let n = l.chars().count() + 1;
-        if tail_parts.iter().map(|s: &String| s.chars().count() + 1).sum::<usize>() + n > 900 {
-            break;
-        }
-        tail_parts.push(l.to_string());
-    }
-    if tail_parts.is_empty() {
-        if let Some(last) = lines.last() {
-            tail_parts.push(last.chars().take(900).collect());
-        }
-    }
-    tail_parts.reverse();
-    let tail = tail_parts.join("\n");
-    let omitted = body
-        .chars()
-        .count()
-        .saturating_sub(head_len + tail.chars().count());
-    let mut out = lines[..head_n].join("\n");
-    out.push_str(&format!("\n…[{} chars omitted]…\n", omitted));
-    out.push_str(&tail);
-    out
-}
-
 fn codeblock(s: &str) -> String {
     let mut t = sanitize_ansi(s.trim_end());
     if t.len() > 1800 {
@@ -499,6 +461,54 @@ fn codeblock(s: &str) -> String {
         t = "(empty)".into();
     }
     format!("```ansi\n{}\n```", t)
+}
+
+/// Split guest output into line-boundary chunks where each fenced chunk
+/// fits one Discord message (2000-char hard limit). Long output (e.g.
+/// jefetch at ~2.4k chars) arrives as several `ansi` fences instead of
+/// being cut off at the bottom. Each chunk is sanitized separately;
+/// chunks never split a line (except pathological >MAX single lines),
+/// so escape sequences are never cut in half.
+fn ansi_chunks(body: &str) -> Vec<String> {
+    const MAX: usize = 1780;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_len = 0usize;
+    for line in body.lines() {
+        let n = line.chars().count();
+        if cur_len > 0 && cur_len + n + 1 > MAX && n + 1 <= MAX {
+            // Whole line doesn't fit the current chunk: start a fresh
+            // one so lines (and their escape sequences) never split.
+            chunks.push(std::mem::take(&mut cur));
+            cur_len = 0;
+        }
+        if n + 1 > MAX {
+            // Pathological oversize single line: hard-cut it across
+            // chunks rather than dropping it or blowing the limit.
+            let v: Vec<char> = line.chars().collect();
+            for piece in v.chunks(MAX - 1) {
+                if !cur.is_empty() {
+                    chunks.push(std::mem::take(&mut cur));
+                }
+                cur.push_str(&piece.iter().collect::<String>());
+                cur.push('\n');
+                cur_len = piece.len() + 1;
+            }
+            continue;
+        }
+        cur.push_str(line);
+        cur.push('\n');
+        cur_len += n + 1;
+    }
+    if !cur.trim().is_empty() {
+        chunks.push(cur);
+    } else if chunks.is_empty() {
+        chunks.push("(empty)".to_string());
+    }
+    chunks
+        .into_iter()
+        .map(|c| format!("```ansi\n{}\n```", sanitize_ansi(c.trim_end())))
+        .collect()
 }
 
 const HELP: &str = "\
@@ -851,7 +861,9 @@ async fn run(
     let sh = user_shell(ctx.data(), uid).await;
     let runas = linked_user(ctx.data(), uid).await;
     let (body, code) = run_guest_cmd(&vm, &sh, &cmd, runas.as_deref(), 300).await?;
-    ctx.say(codeblock(&fit_body(&body))).await?;
+    for chunk in ansi_chunks(&body) {
+        ctx.say(chunk).await?;
+    }
     eprintln!("run for {}: exit {}", ctx.author().name, code);
     Ok(())
 }
@@ -1708,8 +1720,16 @@ async fn event_handler(
     }
     let runas = linked_user(data, id).await;
     let (body, code) = run_guest_cmd(&vm, &sh, text, runas.as_deref(), 300).await?;
-    if new_message.reply(&ctx.http, codeblock(&fit_body(&body))).await.is_err() {
-        let _ = new_message.channel_id.say(&ctx.http, codeblock(&fit_body(&body))).await;
+    let mut chunks = ansi_chunks(&body).into_iter();
+    if let Some(first) = chunks.next() {
+        // Prefer a reply for the first chunk so it threads under the
+        // invoking message; follow-ups are plain sends.
+        if new_message.reply(&ctx.http, first.clone()).await.is_err() {
+            let _ = new_message.channel_id.say(&ctx.http, first).await;
+        }
+    }
+    for chunk in chunks {
+        let _ = new_message.channel_id.say(&ctx.http, chunk).await;
     }
     eprintln!(
         "exec for {} (id {}): exit {} runas={:?} cmd={:?}",
@@ -1735,13 +1755,45 @@ mod tests {
     }
 
     #[test]
-    fn middle_cut_keeps_edges() {
-        let body = format!("$ cmd\n{}\nexit 0", "x".repeat(3000));
-        let out = fit_body(&body);
-        assert!(out.starts_with("$ cmd"), "keeps prompt");
-        assert!(out.ends_with("exit 0"), "keeps exit line");
-        assert!(out.contains("chars omitted"), "marks omission");
-        assert!(out.chars().count() <= 1790, "fits");
+    fn ansi_chunks_split_long_output_on_lines() {
+        // ~2400 chars over ~30 lines (like jefetch): must arrive whole,
+        // split into several fenced chunks, none over the Discord limit.
+        let lines: Vec<String> = (0..30).map(|i| format!("line {:02} {}", i, "x".repeat(70))).collect();
+        let body = lines.join("\n");
+        assert!(body.chars().count() > 2000);
+        let chunks = ansi_chunks(&body);
+        assert!(chunks.len() >= 2, "long output must split, got {}", chunks.len());
+        for c in &chunks {
+            assert!(c.starts_with("```ansi\n"), "ansi fence {:?}", &c[..20.min(c.len())]);
+            assert!(c.ends_with("\n```"), "closed fence");
+            assert!(c.chars().count() <= 2000, "fits Discord limit, got {}", c.chars().count());
+        }
+        // Reassembly preserves every line in order (strip fences).
+        let mut rejoined = String::new();
+        for c in &chunks {
+            let inner = c.strip_prefix("```ansi\n").unwrap().strip_suffix("\n```").unwrap();
+            // sanitize_ansi is identity on plain text without escapes.
+            rejoined.push_str(inner);
+            rejoined.push('\n');
+        }
+        assert_eq!(rejoined.trim_end(), body);
+    }
+
+    #[test]
+    fn ansi_chunks_short_output_single_fence() {
+        let chunks = ansi_chunks("\x1b[0;32m$ cmd\x1b[0m\nok");
+        assert_eq!(chunks.len(), 1);
+        // Colors normalized through the ansi fence, ESC bytes intact.
+        assert!(chunks[0].contains("\x1b[0;32m$ cmd\x1b[0m"), "got {:?}", chunks[0]);
+        let empty = ansi_chunks("");
+        assert_eq!(empty.len(), 1);
+        assert!(empty[0].contains("(empty)"));
+    }
+
+    #[test]
+    fn tabs_expand_to_spaces() {
+        let out = sanitize_ansi("a\tb");
+        assert_eq!(out, "a        b", "got {:?}", out);
     }
 
     #[test]
