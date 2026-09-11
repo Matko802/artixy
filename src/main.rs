@@ -25,13 +25,9 @@ type LiveMap = std::sync::Arc<
     tokio::sync::Mutex<std::collections::HashMap<serenity::ChannelId, LiveEntry>>,
 >;
 
-/// Max wall-clock time for a `$live` session before we stop polling.
 const LIVE_TIMEOUT_SECS: u64 = 600;
 const LIVE_POLL_SECS: u64 = 2;
 
-/// Only allow safe unprivileged linux account names. Rejects `root` and
-/// anything outside `[a-z_][a-z0-9_-]{0,31}` so a poisoned `users.json`
-/// can't turn `su <name>` into `su root`.
 fn valid_runas(name: &str) -> bool {
     if name.is_empty() || name.len() > 32 || name == "root" {
         return false;
@@ -44,10 +40,6 @@ fn valid_runas(name: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-/// Read exactly `n` bytes from /dev/urandom. Never use `fs::read` here:
-/// urandom has no EOF, so "read it all" allocates forever until the
-/// OOM-killer SIGKILLs the process (this actually killed the Nix build's
-/// checkPhase). Returns None when urandom is unavailable.
 fn urandom_bytes(n: usize) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut f = std::fs::File::open("/dev/urandom").ok()?;
@@ -64,8 +56,6 @@ fn hex_bytes(bytes: &[u8]) -> String {
     s
 }
 
-/// Cryptographically random 32-char hex password for new Linux accounts.
-/// 128 bits from /dev/urandom; falls back to time+pid when unavailable.
 fn random_password() -> String {
     if let Some(bytes) = urandom_bytes(16) {
         return hex_bytes(&bytes);
@@ -73,14 +63,10 @@ fn random_password() -> String {
     random_suffix().repeat(2)
 }
 
-/// Unpredictable hex suffix so guest `/tmp` paths can't be pre-created /
-/// symlinked by another guest user. Reads /dev/urandom, falls back to
-/// time+pid when unavailable (e.g. tests).
 fn random_suffix() -> String {
     if let Some(bytes) = urandom_bytes(8) {
         return hex_bytes(&bytes);
     }
-    // Fallback: not cryptographically strong, but still per-run unique.
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -88,8 +74,6 @@ fn random_suffix() -> String {
     format!("{:x}-{}", nanos, std::process::id())
 }
 
-/// Abort any live task in `channel`, returning its entry so the caller can
-/// clean up guest /tmp files. Never panics on missing entry.
 async fn abort_live_for_channel(
     live_map: &LiveMap,
     channel: serenity::ChannelId,
@@ -101,8 +85,6 @@ async fn abort_live_for_channel(
     old
 }
 
-/// Only remove the live entry if `tag` still matches. Prevents a naturally
-/// finishing old task from deleting a newer session in the same channel.
 async fn remove_live_if_tag(live_map: &LiveMap, channel: serenity::ChannelId, tag: u64) {
     let mut m = live_map.lock().await;
     if m.get(&channel).map(|e| e.tag) == Some(tag) {
@@ -338,8 +320,6 @@ async fn guest_launch_raw(vm: &str, path: &str, args: &[&str], capture: bool) ->
 
 fn sanitize_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    // Background colors don't exist in Discord: turn `BG + spaces`
-    // swatches into foreground-colored blocks instead.
     let mut swatch: Option<i32> = None;
     let mut it = s.chars().peekable();
     while let Some(c) = it.next() {
@@ -347,9 +327,6 @@ fn sanitize_ansi(s: &str) -> String {
             continue;
         }
         if c == '\t' {
-            // Terminals advance tabs to 8-cell stops; Discord has no tab
-            // stops, so expand to spaces for identical alignment. Breaks
-            // any bg-swatch run: a tab is a gap, not 8 bg cells.
             swatch = None;
             out.push_str("        ");
             continue;
@@ -416,8 +393,6 @@ fn sanitize_ansi(s: &str) -> String {
                     }
                     swatch = bg;
                     if !kept.is_empty() || params.is_empty() {
-                        // Discord only renders the two-part form: normalize
-                        // bare `40m` -> `0;40m` and bare `m` -> `0m`.
                         if kept.is_empty() {
                             out.push_str("\x1b[0m");
                         } else if kept.len() == 1 && kept[0] != "0" {
@@ -463,12 +438,6 @@ fn codeblock(s: &str) -> String {
     format!("```ansi\n{}\n```", t)
 }
 
-/// Single-message view of guest output: sanitize first (sequences are
-/// intact in the full body, so nothing splits), then keep whole trailing
-/// lines that fit one Discord message (2000-char hard limit) — like a
-/// terminal showing the bottom. Lines never split, so sanitize_ansi output
-/// stays valid. A leading "…" marks dropped head lines. This also fixes
-/// the live path, where `tail -c` could cut a sequence in half mid-line.
 fn fit_bottom_lines(body: &str) -> String {
     const MAX: usize = 1750;
     let lines: Vec<&str> = body.lines().collect();
@@ -476,8 +445,6 @@ fn fit_bottom_lines(body: &str) -> String {
     let mut len = 0usize;
     let mut truncated = false;
     for l in lines.iter().rev() {
-        // Hard-cut a pathological single line longer than a whole message
-        // (normal lines always fit whole; jefetch lines are <200 chars).
         if l.chars().count() + 1 > MAX {
             if kept.is_empty() {
                 let v: Vec<char> = l.chars().collect();
@@ -489,7 +456,7 @@ fn fit_bottom_lines(body: &str) -> String {
             truncated = true;
             break;
         }
-        let n = l.chars().count() + 1; // + newline
+        let n = l.chars().count() + 1;
         if len + n > MAX {
             truncated = true;
             break;
@@ -505,8 +472,6 @@ fn fit_bottom_lines(body: &str) -> String {
     out
 }
 
-/// One fenced message: sanitize → bottom lines → `ansi` fence. Total is
-/// bounded by fit_bottom_lines, so unlike codeblock() nothing re-cuts it.
 fn ansi_tail(body: &str) -> String {
     let t = fit_bottom_lines(&sanitize_ansi(body.trim_end()));
     let t = if t.trim().is_empty() {
@@ -701,11 +666,6 @@ async fn shell(
     Ok(())
 }
 
-/// True when the running binary lives under `/nix/store`, i.e. it was
-/// deployed via Nix rather than built locally with `cargo`. In that case the
-/// self-restart command is meaningless: the store is immutable and
-/// read-only, so re-exec would go nowhere. It no-ops instead of failing
-/// and confusing everyone.
 fn deployed_via_nix() -> bool {
     std::env::current_exe()
         .map(|p| p.starts_with("/nix/store/"))
@@ -727,8 +687,6 @@ fn project_dir() -> PathBuf {
 }
 
 async fn save_json(path: &str, data: String) -> Result<(), Error> {
-    // Unique tmp so concurrent saves of different files can't clobber each
-    // other; 0600 so tokens / ids aren't world-readable via the tmp window.
     let tmp = format!("{}.{}.tmp", path, random_suffix());
     let mut opts = tokio::fs::OpenOptions::new();
     opts.write(true).create_new(true).mode(0o600);
@@ -756,8 +714,6 @@ async fn botrestart(ctx: Context<'_>) -> Result<(), Error> {
     }
     ctx.say("Restarting…").await?;
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("target/debug/artixy"));
-    // Don't follow a pre-created symlink at the fixed log path (appending
-    // as the bot user could otherwise clobber an arbitrary file).
     let log_path = "/tmp/artixy.log";
     if std::fs::symlink_metadata(log_path)
         .map(|m| m.file_type().is_symlink())
@@ -822,7 +778,6 @@ async fn run(
     let vm = ctx.data().vm.clone();
     let uid = ctx.author().id.get();
     if let Some(old) = abort_live_for_channel(&ctx.data().live, ctx.channel_id()).await {
-        // Best-effort: aborted task can't clean up after itself.
         cleanup_live_files(&vm, &old.out_f, &old.code_f).await;
     }
     let sh = user_shell(ctx.data(), uid).await;
@@ -882,8 +837,6 @@ async fn shot(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     }
     maybe_defer(ctx).await;
-    // Unique path so concurrent `$shot` calls can't overwrite / delete each
-    // other's file via the fixed /tmp name.
     let path = format!("/tmp/artixy-shot-{}-{}.png", std::process::id(), random_suffix());
     let out = tokio::process::Command::new("grim")
         .arg(&path)
@@ -929,8 +882,6 @@ async fn send(
         ctx.say("Absolute path only.").await?;
         return Ok(());
     }
-    // Resolve symlinks on both sides so a link inside the project dir can't
-    // point at a file somewhere else on the host.
     let root = match tokio::fs::canonicalize(project_dir()).await {
         Ok(r) => r,
         Err(e) => {
@@ -1315,7 +1266,6 @@ async fn begin_live(
     runas: Option<String>,
     live_map: LiveMap,
 ) {
-    // Fail closed on a poisoned mapping instead of `su root`.
     if let Some(ref u) = runas {
         if !valid_runas(u) {
             let _ = ack
@@ -1327,7 +1277,6 @@ async fn begin_live(
     }
     let channel = ack.channel_id;
     let tag = ack.id.get();
-    // Unpredictable paths: a guest user can't pre-create / symlink these.
     let rand = random_suffix();
     let out_f = format!("/tmp/podbot-live-{}-{}.out", tag, rand);
     let code_f = format!("/tmp/podbot-live-{}-{}.code", tag, rand);
@@ -1385,7 +1334,6 @@ async fn live_run(
         "echo {} | base64 -d | bash -c 'export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH; eval \"$(cat)\"' > {} 2>&1; echo $? > {}",
         b64, out_f, code_f
     );
-    // Fallback script for `su ... -s /bin/sh` when bash is missing.
     let script_sh = format!(
         "echo {} | base64 -d | sh -c 'export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH; eval \"$(cat)\"' > {} 2>&1; echo $? > {}",
         b64, out_f, code_f
@@ -1396,8 +1344,6 @@ async fn live_run(
     };
     let launched = guest_launch_raw(&vm, lpath, &largs, false).await;
     let launched = match launched {
-        // Fail closed: never drop `su <user>` and run as the agent user
-        // (often root). Retry with the SAME privilege via /bin/sh.
         Err(e) if e.to_string().contains("No such file") => match &runas {
             Some(u) => {
                 guest_launch_raw(&vm, "su", &[u.as_str(), "-s", "/bin/sh", "-c", &script_sh], false)
@@ -1519,9 +1465,6 @@ async fn run_guest_cmd(vm: &str, shell: &str, cmd_text: &str, runas: Option<&str
     };
     let run = guest_exec(vm, lpath, &largs, true, timeout_s).await;
     let run = match run {
-        // Fail closed: retry with the SAME privilege (same `runas`) via
-        // /bin/bash. Never fall back from `su <user>` to bare `/bin/bash`
-        // (which runs as the agent user, often root).
         Err(e) if e.to_string().contains("No such file") && sh_path != "/bin/bash" => {
             let fallback =
                 format!("export SHELL=/bin/bash; {}; exit $?", inner);
@@ -1713,8 +1656,6 @@ mod tests {
 
     #[test]
     fn ansi_tail_shows_bottom_in_one_message() {
-        // ~2400 chars over 30 lines (like jefetch): ONE fenced message,
-        // bottom lines kept, head dropped with a marker, fits Discord.
         let lines: Vec<String> = (0..30).map(|i| format!("line {:02} {}", i, "x".repeat(70))).collect();
         let body = lines.join("\n");
         assert!(body.chars().count() > 2000);
@@ -1737,12 +1678,9 @@ mod tests {
 
     #[test]
     fn ansi_tail_never_splits_a_line() {
-        // Escape sequences survive even when truncation cuts near them:
-        // no dangling "[0;32m" remnants without ESC.
         let lines: Vec<String> = (0..40).map(|i| format!("\x1b[0;3{}mline {:02}\x1b[0m {}", i % 8, i, "y".repeat(60))).collect();
         let out = ansi_tail(&lines.join("\n"));
         assert!(out.chars().count() <= 2000);
-        // Every '[' that opens an SGR remnant must be preceded by ESC.
         let b = out.as_bytes();
         let mut i = 0;
         while i < b.len() {
@@ -1784,9 +1722,7 @@ mod tests {
         let a = random_suffix();
         let b = random_suffix();
         assert!(!a.is_empty());
-        // /dev/urandom path yields 16 hex chars; fallback still non-empty.
         assert!(a.len() >= 8, "got {:?}", a);
-        // Very likely unique across two calls (urandom or nanos-based).
         assert_ne!(a, b, "suffix should differ per call");
     }
 }
