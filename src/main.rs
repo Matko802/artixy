@@ -754,15 +754,6 @@ async fn botrestart(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 #[poise::command(slash_command, prefix_command)]
-async fn colortest(ctx: Context<'_>) -> Result<(), Error> {
-    if !need_auth(ctx).await? {
-        return Ok(());
-    }
-    ctx.say("```ansi\n1 plain\n\u{1b}[0;31m2 red 0;31\u{1b}[0m\n\u{1b}[1;32m3 bold-green 1;32\u{1b}[0m\n\u{1b}[4;34m4 underline-blue 4;34\u{1b}[0m\n\u{1b}[0;37m5 white 0;37\u{1b}[0m\n\u{1b}[0;40m6 bg-black 0;40\u{1b}[0m\n\u{1b}[0;41m7 bg-red 0;41\u{1b}[0m\n```\nTell me which numbered lines show color.").await?;
-    Ok(())
-}
-
-#[poise::command(slash_command, prefix_command)]
 async fn run(
     ctx: Context<'_>,
     #[description = "Command to run in the VM"] cmd: String,
@@ -1252,7 +1243,7 @@ async fn do_userdel(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error
 const COMMANDS: &[&str] = &[
     "help", "ps", "status", "start", "stop", "restart", "info", "users", "user",
     "add", "del", "useradd", "userdel", "userlist", "shell",
-    "botrestart", "colortest", "run", "live",
+    "botrestart", "run", "live",
     "shot", "send",
     "settings", "dollar", "semicolon",
 ];
@@ -1792,7 +1783,6 @@ async fn main() {
                 shot(),
                 send(),
                 settings(),
-                colortest(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: None,
