@@ -1298,8 +1298,8 @@ async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error
         .is_ok();
     if pw_ok {
         ctx.say(format!(
-            "added user \"{}\" linked to `{}` — account created, they log in as themselves everywhere. Set them a known password yourself (`virsh set-user-password <vm> {} <pw>`); the generated one is not shown.",
-            name, uid, name
+            "added user \"{}\" linked to `{}` — account created.",
+            name, uid
         ))
         .await?;
     } else {
