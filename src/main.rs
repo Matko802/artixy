@@ -568,6 +568,7 @@ async fn start(ctx: Context<'_>) -> Result<(), Error> {
     let vm = ctx.data().vm.clone();
     let state = virsh(&["domstate", &vm]).await.unwrap_or_default();
     let mut started_here = false;
+    let mut boot_t0: Option<std::time::Instant> = None;
     if state.trim() == "running" {
         ctx.say(format!(
             "`{}` is already on. Waiting for the guest agent…",
@@ -578,6 +579,7 @@ async fn start(ctx: Context<'_>) -> Result<(), Error> {
         match virsh(&["start", &vm]).await {
             Ok(_) => {
                 started_here = true;
+                boot_t0 = Some(std::time::Instant::now());
                 ctx.say(format!(
                     "`{}` starting. Waiting for the guest agent…",
                     vm
@@ -592,7 +594,13 @@ async fn start(ctx: Context<'_>) -> Result<(), Error> {
     }
     if wait_agent(&vm, 90).await {
         if started_here {
-            ctx.say(format!("{} has started.", vm)).await?;
+            let secs = boot_t0.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+            let took = if secs >= 60 {
+                format!("{}m {}s", secs / 60, secs % 60)
+            } else {
+                format!("{}s", secs)
+            };
+            ctx.say(format!("{} booted in {} (guest agent up).", vm, took)).await?;
         } else {
             ctx.say(format!(
                 "`{}` is on and the guest agent answers.",
