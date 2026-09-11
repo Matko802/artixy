@@ -463,52 +463,58 @@ fn codeblock(s: &str) -> String {
     format!("```ansi\n{}\n```", t)
 }
 
-/// Split guest output into line-boundary chunks where each fenced chunk
-/// fits one Discord message (2000-char hard limit). Long output (e.g.
-/// jefetch at ~2.4k chars) arrives as several `ansi` fences instead of
-/// being cut off at the bottom. Each chunk is sanitized separately;
-/// chunks never split a line (except pathological >MAX single lines),
-/// so escape sequences are never cut in half.
-fn ansi_chunks(body: &str) -> Vec<String> {
-    const MAX: usize = 1780;
-    let mut chunks: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut cur_len = 0usize;
-    for line in body.lines() {
-        let n = line.chars().count();
-        if cur_len > 0 && cur_len + n + 1 > MAX && n + 1 <= MAX {
-            // Whole line doesn't fit the current chunk: start a fresh
-            // one so lines (and their escape sequences) never split.
-            chunks.push(std::mem::take(&mut cur));
-            cur_len = 0;
-        }
-        if n + 1 > MAX {
-            // Pathological oversize single line: hard-cut it across
-            // chunks rather than dropping it or blowing the limit.
-            let v: Vec<char> = line.chars().collect();
-            for piece in v.chunks(MAX - 1) {
-                if !cur.is_empty() {
-                    chunks.push(std::mem::take(&mut cur));
-                }
-                cur.push_str(&piece.iter().collect::<String>());
-                cur.push('\n');
-                cur_len = piece.len() + 1;
+/// Single-message view of guest output: sanitize first (sequences are
+/// intact in the full body, so nothing splits), then keep whole trailing
+/// lines that fit one Discord message (2000-char hard limit) — like a
+/// terminal showing the bottom. Lines never split, so sanitize_ansi output
+/// stays valid. A leading "…" marks dropped head lines. This also fixes
+/// the live path, where `tail -c` could cut a sequence in half mid-line.
+fn fit_bottom_lines(body: &str) -> String {
+    const MAX: usize = 1750;
+    let lines: Vec<&str> = body.lines().collect();
+    let mut kept: Vec<String> = Vec::new();
+    let mut len = 0usize;
+    let mut truncated = false;
+    for l in lines.iter().rev() {
+        // Hard-cut a pathological single line longer than a whole message
+        // (normal lines always fit whole; jefetch lines are <200 chars).
+        if l.chars().count() + 1 > MAX {
+            if kept.is_empty() {
+                let v: Vec<char> = l.chars().collect();
+                let start = v.len().saturating_sub(MAX - 1);
+                let mut s: String = v[start..].iter().collect();
+                s.push('\n');
+                kept.push(s);
             }
-            continue;
+            truncated = true;
+            break;
         }
-        cur.push_str(line);
-        cur.push('\n');
-        cur_len += n + 1;
+        let n = l.chars().count() + 1; // + newline
+        if len + n > MAX {
+            truncated = true;
+            break;
+        }
+        kept.push(l.to_string());
+        len += n;
     }
-    if !cur.trim().is_empty() {
-        chunks.push(cur);
-    } else if chunks.is_empty() {
-        chunks.push("(empty)".to_string());
+    kept.reverse();
+    let mut out = kept.join("\n");
+    if truncated {
+        out = format!("…\n{}", out);
     }
-    chunks
-        .into_iter()
-        .map(|c| format!("```ansi\n{}\n```", sanitize_ansi(c.trim_end())))
-        .collect()
+    out
+}
+
+/// One fenced message: sanitize → bottom lines → `ansi` fence. Total is
+/// bounded by fit_bottom_lines, so unlike codeblock() nothing re-cuts it.
+fn ansi_tail(body: &str) -> String {
+    let t = fit_bottom_lines(&sanitize_ansi(body.trim_end()));
+    let t = if t.trim().is_empty() {
+        "(empty)".to_string()
+    } else {
+        t
+    };
+    format!("```ansi\n{}\n```", t)
 }
 
 const HELP: &str = "\
@@ -822,9 +828,7 @@ async fn run(
     let sh = user_shell(ctx.data(), uid).await;
     let runas = linked_user(ctx.data(), uid).await;
     let (body, code) = run_guest_cmd(&vm, &sh, &cmd, runas.as_deref(), 300).await?;
-    for chunk in ansi_chunks(&body) {
-        ctx.say(chunk).await?;
-    }
+    ctx.say(ansi_tail(&body)).await?;
     eprintln!("run for {}: exit {}", ctx.author().name, code);
     Ok(())
 }
@@ -1446,7 +1450,7 @@ async fn live_run(
                     body.push_str(&format!("\n\u{1b}[0;31mexit {}\u{1b}[0m", code));
                 }
                 let _ = msg
-                    .edit(&http, serenity::EditMessage::new().content(codeblock(&body)))
+                    .edit(&http, serenity::EditMessage::new().content(ansi_tail(&body)))
                     .await;
                 cleanup_live_files(&vm, &out_f, &code_f).await;
                 break;
@@ -1454,7 +1458,7 @@ async fn live_run(
             None => {
                 body.push_str("\n\u{1b}[0;33m…live\u{1b}[0m");
                 if msg
-                    .edit(&http, serenity::EditMessage::new().content(codeblock(&body)))
+                    .edit(&http, serenity::EditMessage::new().content(ansi_tail(&body)))
                     .await
                     .is_err()
                 {
@@ -1681,16 +1685,8 @@ async fn event_handler(
     }
     let runas = linked_user(data, id).await;
     let (body, code) = run_guest_cmd(&vm, &sh, text, runas.as_deref(), 300).await?;
-    let mut chunks = ansi_chunks(&body).into_iter();
-    if let Some(first) = chunks.next() {
-        // Prefer a reply for the first chunk so it threads under the
-        // invoking message; follow-ups are plain sends.
-        if new_message.reply(&ctx.http, first.clone()).await.is_err() {
-            let _ = new_message.channel_id.say(&ctx.http, first).await;
-        }
-    }
-    for chunk in chunks {
-        let _ = new_message.channel_id.say(&ctx.http, chunk).await;
+    if new_message.reply(&ctx.http, ansi_tail(&body)).await.is_err() {
+        let _ = new_message.channel_id.say(&ctx.http, ansi_tail(&body)).await;
     }
     eprintln!(
         "exec for {} (id {}): exit {} runas={:?} cmd={:?}",
@@ -1716,39 +1712,45 @@ mod tests {
     }
 
     #[test]
-    fn ansi_chunks_split_long_output_on_lines() {
-        // ~2400 chars over ~30 lines (like jefetch): must arrive whole,
-        // split into several fenced chunks, none over the Discord limit.
+    fn ansi_tail_shows_bottom_in_one_message() {
+        // ~2400 chars over 30 lines (like jefetch): ONE fenced message,
+        // bottom lines kept, head dropped with a marker, fits Discord.
         let lines: Vec<String> = (0..30).map(|i| format!("line {:02} {}", i, "x".repeat(70))).collect();
         let body = lines.join("\n");
         assert!(body.chars().count() > 2000);
-        let chunks = ansi_chunks(&body);
-        assert!(chunks.len() >= 2, "long output must split, got {}", chunks.len());
-        for c in &chunks {
-            assert!(c.starts_with("```ansi\n"), "ansi fence {:?}", &c[..20.min(c.len())]);
-            assert!(c.ends_with("\n```"), "closed fence");
-            assert!(c.chars().count() <= 2000, "fits Discord limit, got {}", c.chars().count());
-        }
-        // Reassembly preserves every line in order (strip fences).
-        let mut rejoined = String::new();
-        for c in &chunks {
-            let inner = c.strip_prefix("```ansi\n").unwrap().strip_suffix("\n```").unwrap();
-            // sanitize_ansi is identity on plain text without escapes.
-            rejoined.push_str(inner);
-            rejoined.push('\n');
-        }
-        assert_eq!(rejoined.trim_end(), body);
+        let out = ansi_tail(&body);
+        assert!(out.starts_with("```ansi\n"), "ansi fence");
+        assert!(out.ends_with("\n```"), "closed fence");
+        assert!(out.chars().count() <= 2000, "fits Discord limit, got {}", out.chars().count());
+        assert!(out.contains("line 29"), "bottom kept");
+        assert!(!out.contains("line 00"), "head dropped");
+        assert!(out.contains('…'), "truncation marked");
     }
 
     #[test]
-    fn ansi_chunks_short_output_single_fence() {
-        let chunks = ansi_chunks("\x1b[0;32m$ cmd\x1b[0m\nok");
-        assert_eq!(chunks.len(), 1);
-        // Colors normalized through the ansi fence, ESC bytes intact.
-        assert!(chunks[0].contains("\x1b[0;32m$ cmd\x1b[0m"), "got {:?}", chunks[0]);
-        let empty = ansi_chunks("");
-        assert_eq!(empty.len(), 1);
-        assert!(empty[0].contains("(empty)"));
+    fn ansi_tail_short_output_unchanged_no_marker() {
+        let out = ansi_tail("\x1b[0;32m$ cmd\x1b[0m\nok");
+        assert!(out.contains("\x1b[0;32m$ cmd\x1b[0m"), "colors intact, got {:?}", out);
+        assert!(!out.contains('…'), "no marker when nothing dropped");
+        assert_eq!(ansi_tail(""), "```ansi\n(empty)\n```");
+    }
+
+    #[test]
+    fn ansi_tail_never_splits_a_line() {
+        // Escape sequences survive even when truncation cuts near them:
+        // no dangling "[0;32m" remnants without ESC.
+        let lines: Vec<String> = (0..40).map(|i| format!("\x1b[0;3{}mline {:02}\x1b[0m {}", i % 8, i, "y".repeat(60))).collect();
+        let out = ansi_tail(&lines.join("\n"));
+        assert!(out.chars().count() <= 2000);
+        // Every '[' that opens an SGR remnant must be preceded by ESC.
+        let b = out.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'[' {
+                assert!(i > 0 && b[i - 1] == 0x1b, "bare SGR remnant at byte {}", i);
+            }
+            i += 1;
+        }
     }
 
     #[test]
