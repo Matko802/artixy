@@ -44,17 +44,31 @@ fn valid_runas(name: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
+/// Read exactly `n` bytes from /dev/urandom. Never use `fs::read` here:
+/// urandom has no EOF, so "read it all" allocates forever until the
+/// OOM-killer SIGKILLs the process (this actually killed the Nix build's
+/// checkPhase). Returns None when urandom is unavailable.
+fn urandom_bytes(n: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open("/dev/urandom").ok()?;
+    let mut buf = vec![0u8; n];
+    f.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
 /// Cryptographically random 32-char hex password for new Linux accounts.
 /// 128 bits from /dev/urandom; falls back to time+pid when unavailable.
 fn random_password() -> String {
-    if let Ok(bytes) = std::fs::read("/dev/urandom") {
-        if bytes.len() >= 16 {
-            let mut s = String::with_capacity(32);
-            for b in bytes.iter().take(16) {
-                s.push_str(&format!("{:02x}", b));
-            }
-            return s;
-        }
+    if let Some(bytes) = urandom_bytes(16) {
+        return hex_bytes(&bytes);
     }
     random_suffix().repeat(2)
 }
@@ -63,14 +77,8 @@ fn random_password() -> String {
 /// symlinked by another guest user. Reads /dev/urandom, falls back to
 /// time+pid when unavailable (e.g. tests).
 fn random_suffix() -> String {
-    if let Ok(bytes) = std::fs::read("/dev/urandom") {
-        if bytes.len() >= 8 {
-            let mut s = String::with_capacity(16);
-            for b in bytes.iter().take(8) {
-                s.push_str(&format!("{:02x}", b));
-            }
-            return s;
-        }
+    if let Some(bytes) = urandom_bytes(8) {
+        return hex_bytes(&bytes);
     }
     // Fallback: not cryptographically strong, but still per-run unique.
     let nanos = std::time::SystemTime::now()
