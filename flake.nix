@@ -8,7 +8,7 @@
   outputs =
     { self, nixpkgs }:
     let
-      systems = [ "x86_64-linux" ];
+      systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f (nixpkgs.legacyPackages.${system}));
 
       artixy =
@@ -28,18 +28,33 @@
         };
     in
     {
-      packages = forAllSystems (pkgs: {
-        default = artixy { pkgs = pkgs; };
-        artixy = artixy { pkgs = pkgs; };
-      });
+      # Fully static musl build: no glibc, no dynamic linking. Runtime
+      # control of the VM goes through external tools (virsh, grim) found
+      # on PATH, so static linking changes nothing at runtime.
+      packages = forAllSystems (pkgs:
+        let
+          staticBuild = artixy { pkgs = pkgs.pkgsStatic; };
+        in
+        {
+          # pkgsStatic appends "-static-<target>" to the derivation name; wrap
+          # the binary in a native derivation so the store name is just "artixy".
+          default = pkgs.runCommand "artixy" { } ''
+            mkdir -p $out/bin
+            install -Dm755 ${staticBuild}/bin/artixy $out/bin/artixy
+          '';
+          artixy = pkgs.runCommand "artixy" { } ''
+            mkdir -p $out/bin
+            install -Dm755 ${staticBuild}/bin/artixy $out/bin/artixy
+          '';
+        });
 
       overlays.default = final: _prev: {
-        artixy = artixy { pkgs = final; };
+        artixy = artixy { pkgs = final.pkgsStatic; };
       };
 
       devShells = forAllSystems (pkgs:
         pkgs.mkShell {
-          buildInputs = with pkgs; [ cargo rustc ];
+          buildInputs = [ pkgs.pkgsMusl.cargo pkgs.pkgsMusl.rustc ];
         });
     };
 }
