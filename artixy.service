@@ -1,0 +1,14 @@
+[Unit]
+Description=artixy - Artix VM Discord bot
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/artixy
+EnvironmentFile=%h/artixy/.env
+ExecStart=%h/artixy/target/release/artixy
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
