@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::{
     scrub::scrub_public_ip,
-    util::{ansi_tail, attach_name, cap_file_body, codeblock, fit_ansi_tail, random_suffix, strip_sgr, valid_runas},
+    util::{ansi_tail, attach_name, cap_file_body, codeblock, fence_inline, fit_bottom_lines, random_suffix, sanitize_ansi, strip_sgr, valid_runas},
     vm::{guest_exec, guest_launch_raw, guest_status},
     webhook::{edit_posted, resolve_poster, Poster},
 };
@@ -188,14 +188,29 @@ pub(crate) async fn live_run(
                 if code != 0 {
                     body.push_str(&format!("\n\u{1b}[0;31mexit {}\u{1b}[0m", code));
                 }
-                let (text, truncated) = fit_ansi_tail(&body);
+                let fetched = guest_exec(&vm, "/bin/cat", &[&out_f], true, 30)
+                    .await
+                    .map(|(_, o, _)| o)
+                    .unwrap_or_default();
+                let fetched = if scrub_ip { scrub_public_ip(&fetched) } else { fetched };
+                let mut full_body = format!(
+                    "\u{1b}[0;32m$ {}\u{1b}[0m\n{}",
+                    cmd,
+                    fetched.trim_end()
+                );
+                if code != 0 {
+                    full_body.push_str(&format!("\n\u{1b}[0;31mexit {}\u{1b}[0m", code));
+                }
+                let view = if fetched.trim().is_empty() { &body } else { &full_body };
+                let clean = sanitize_ansi(view.trim_end());
+                let (fitted, truncated) = fit_bottom_lines(&clean);
+                let text = if truncated {
+                    format!("```ansi\n…\n{}\n```", fitted)
+                } else {
+                    fence_inline(&fitted)
+                };
                 let files = if truncated {
-                    let full = guest_exec(&vm, "/bin/cat", &[&out_f], true, 30)
-                        .await
-                        .map(|(_, o, _)| o)
-                        .unwrap_or_default();
-                    let full = if scrub_ip { scrub_public_ip(&full) } else { full };
-                    vec![(attach_name(&cmd), cap_file_body(&strip_sgr(&full)).into_bytes())]
+                    vec![(attach_name(&cmd), cap_file_body(&strip_sgr(&clean)).into_bytes())]
                 } else {
                     Vec::new()
                 };
