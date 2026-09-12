@@ -498,12 +498,150 @@ fn utf8_len(first: u8) -> usize {
     }
 }
 
+fn parse_quad(s: &str) -> Option<[u8; 4]> {
+    let p: Vec<&str> = s.split('.').collect();
+    if p.len() != 4 {
+        return None;
+    }
+    let mut o = [0u8; 4];
+    for (k, g) in p.iter().enumerate() {
+        if g.is_empty() || g.len() > 3 {
+            return None;
+        }
+        let mut v: u16 = 0;
+        for d in g.bytes() {
+            if !d.is_ascii_digit() {
+                return None;
+            }
+            v = v * 10 + (d - b'0') as u16;
+        }
+        if v > 255 {
+            return None;
+        }
+        o[k] = v as u8;
+    }
+    Some(o)
+}
+
+fn valid_groups(parts: &[&str]) -> bool {
+    parts
+        .iter()
+        .all(|p| !p.is_empty() && p.len() <= 4 && p.bytes().all(|c| c.is_ascii_hexdigit()))
+}
+
+fn classify_ipv6(tok: &str) -> Option<bool> {
+    let (head, tail) = if tok.contains('.') {
+        let cut = tok.rfind(':')?;
+        (tok[..cut].to_string(), Some(parse_quad(&tok[cut + 1..])?))
+    } else {
+        (tok.to_string(), None)
+    };
+    if head.matches("::").count() > 1 {
+        return None;
+    }
+    let has_dbl = head.contains("::");
+    let need = if tail.is_some() { 2 } else { 0 };
+    let explicit: Vec<&str> = if has_dbl {
+        let p = head.find("::").unwrap_or(0);
+        let l: Vec<&str> = if head[..p].is_empty() {
+            Vec::new()
+        } else {
+            head[..p].split(':').collect()
+        };
+        let r: Vec<&str> = if head[p + 2..].is_empty() {
+            Vec::new()
+        } else {
+            head[p + 2..].split(':').collect()
+        };
+        if !valid_groups(&l) || !valid_groups(&r) {
+            return None;
+        }
+        if l.len() + r.len() + need > 7 {
+            return None;
+        }
+        l.into_iter().chain(r).collect()
+    } else {
+        let g: Vec<&str> = head.split(':').collect();
+        if !valid_groups(&g) || g.len() + need != 8 {
+            return None;
+        }
+        g
+    };
+    let vals: Vec<u16> = explicit
+        .iter()
+        .map(|g| u16::from_str_radix(g, 16).unwrap_or(0))
+        .collect();
+    if vals.iter().all(|v| *v == 0) {
+        return match tail {
+            Some(q) => Some(public_ipv4(q)),
+            None => Some(false),
+        };
+    }
+    let loopback = if has_dbl {
+        vals.iter().skip_while(|v| **v == 0).copied().collect::<Vec<u16>>() == [1]
+    } else {
+        vals.len() == 8 && vals[..7].iter().all(|v| *v == 0) && vals[7] == 1
+    };
+    if loopback {
+        return Some(false);
+    }
+    let g0 = vals[0];
+    if (0xfe80..=0xfebf).contains(&g0) || (0xfc00..=0xfdff).contains(&g0) {
+        return Some(false);
+    }
+    Some(true)
+}
+
+fn scan_ipv6(s: &str, i: usize) -> Option<(usize, bool)> {
+    let b = s.as_bytes();
+    let c = b[i];
+    if !(c.is_ascii_hexdigit() || c == b':') {
+        return None;
+    }
+    if i > 0 {
+        let p = b[i - 1];
+        if p.is_ascii_hexdigit() || p == b':' || p == b'.' {
+            return None;
+        }
+    }
+    let mut j = i;
+    let mut colons = 0usize;
+    while j < b.len() && (b[j].is_ascii_hexdigit() || b[j] == b':' || b[j] == b'.') {
+        if b[j] == b':' {
+            colons += 1;
+        }
+        j += 1;
+    }
+    if colons < 2 {
+        return None;
+    }
+    let mut tok = &s[i..j];
+    while tok.ends_with(':') && !tok.ends_with("::") {
+        tok = &tok[..tok.len() - 1];
+        j -= 1;
+    }
+    let public = classify_ipv6(tok)?;
+    Some((j, public))
+}
+
 fn scrub_public_ip(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i].is_ascii_digit() {
+        let c = b[i];
+        if c.is_ascii_hexdigit() || c == b':' {
+            if let Some((end, public)) = scan_ipv6(s, i) {
+                if public {
+                    out.push_str("[redacted]");
+                } else {
+                    out.push_str(&s[i..end]);
+                }
+                i = end;
+                continue;
+            }
+        }
+        if c.is_ascii_digit() {
             if let Some((o, end)) = scan_ipv4(b, i) {
                 if public_ipv4(o) {
                     out.push_str("[redacted]");
@@ -1867,6 +2005,27 @@ mod tests {
         assert_eq!(scrub_public_ip("see 1.2.3.4."), "see [redacted].");
         assert_eq!(scrub_public_ip("v1.2.3.4 out"), "v1.2.3.4 out");
         assert_eq!(scrub_public_ip("1.2.3.4.5 out"), "1.2.3.4.5 out");
+    }
+
+    #[test]
+    fn scrub_redacts_public_ipv6_only() {
+        assert_eq!(scrub_public_ip("ip 2001:db8::1 ok"), "ip [redacted] ok");
+        assert_eq!(scrub_public_ip("full 2001:db8:0:0:0:0:0:1"), "full [redacted]");
+        assert_eq!(scrub_public_ip("ll fe80::1"), "ll fe80::1");
+        assert_eq!(scrub_public_ip("ll FE80::A"), "ll FE80::A");
+        assert_eq!(scrub_public_ip("ula fd00::5"), "ula fd00::5");
+        assert_eq!(scrub_public_ip("ula fc12::9"), "ula fc12::9");
+        assert_eq!(scrub_public_ip("lo ::1"), "lo ::1");
+        assert_eq!(scrub_public_ip("lo 0:0:0:0:0:0:0:1"), "lo 0:0:0:0:0:0:0:1");
+        assert_eq!(scrub_public_ip("x :: y"), "x :: y");
+        assert_eq!(scrub_public_ip("mac aa:bb:cc:dd:ee:ff"), "mac aa:bb:cc:dd:ee:ff");
+        assert_eq!(scrub_public_ip("at 12:34:56"), "at 12:34:56");
+        assert_eq!(scrub_public_ip("mapped ::ffff:203.0.113.7"), "mapped [redacted]");
+        assert_eq!(scrub_public_ip("mc ff02::1"), "mc [redacted]");
+        assert_eq!(scrub_public_ip("bracketed [2001:db8::1]"), "bracketed [[redacted]]");
+        assert_eq!(scrub_public_ip("port [2001:db8::1]:443"), "port [[redacted]]:443");
+        assert_eq!(scrub_public_ip("v4 still 8.8.8.8 ok"), "v4 still [redacted] ok");
+        assert_eq!(scrub_public_ip("v4 local 192.168.0.1 ok"), "v4 local 192.168.0.1 ok");
     }
 
     #[test]
