@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::{util::random_suffix, Error};
+use crate::{live::LiveMap, util::random_suffix, Error};
 
 fn war_default_off() -> bool {
     false
@@ -27,6 +27,7 @@ impl Default for BotSettings {
 pub(crate) struct Data {
     pub(crate) allowed: tokio::sync::RwLock<Allowed>,
     pub(crate) vm: String,
+    pub(crate) live: LiveMap,
     pub(crate) settings: tokio::sync::RwLock<BotSettings>,
     pub(crate) shells: tokio::sync::RwLock<std::collections::HashMap<String, String>>,
 }

@@ -200,6 +200,21 @@ pub(crate) fn fence_inline(fitted: &str) -> String {
     format!("```ansi\n{}\n```", t)
 }
 
+pub(crate) fn plain_tail(body: &str) -> String {
+    let clean = strip_sgr(body.trim_end());
+    let (fitted, truncated) = fit_bottom_lines(&clean);
+    let t = if fitted.trim().is_empty() {
+        "(empty)".to_string()
+    } else {
+        fitted
+    };
+    if truncated {
+        format!("```\n…\n{}\n```", t)
+    } else {
+        format!("```\n{}\n```", t)
+    }
+}
+
 pub(crate) fn cap_file_body(clean: &str) -> String {
     const FILE_MAX: usize = 400_000;
     if clean.chars().count() <= FILE_MAX {

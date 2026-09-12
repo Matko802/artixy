@@ -50,10 +50,13 @@ impl PostedRegistry {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) enum Poster {
     Direct,
-    Hook,
+    Hook {
+        id: serenity::WebhookId,
+        token: String,
+    },
 }
 
 static WEBHOOK_URLS: OnceLock<Vec<String>> = OnceLock::new();
@@ -228,7 +231,12 @@ pub(crate) async fn resolve_poster(
     if pool.is_empty() {
         return Poster::Direct;
     }
-    Poster::Hook
+    let n = NEXT_HOOK.fetch_add(1, Ordering::Relaxed);
+    let (id, token) = &pool[n % pool.len()];
+    Poster::Hook {
+        id: *id,
+        token: token.clone(),
+    }
 }
 
 async fn direct_send(
@@ -290,6 +298,38 @@ pub(crate) async fn post_message(
     }
 }
 
+pub(crate) async fn edit_posted(
+    poster: &Poster,
+    http: &std::sync::Arc<serenity::Http>,
+    channel: serenity::ChannelId,
+    target: serenity::MessageId,
+    content: String,
+) -> bool {
+    match poster {
+        Poster::Direct => channel
+            .edit_message(http, target, serenity::EditMessage::new().content(content))
+            .await
+            .is_ok(),
+        Poster::Hook { id, token } => {
+            let url = hook_url(*id, token);
+            match serenity::model::webhook::Webhook::from_url(http, &url).await {
+                Ok(wh) => wh
+                    .edit_message(
+                        http,
+                        target,
+                        serenity::EditWebhookMessage::new().content(content),
+                    )
+                    .await
+                    .is_ok(),
+                Err(_) => {
+                    evict_channel(&channel);
+                    false
+                }
+            }
+        }
+    }
+}
+
 pub(crate) async fn post_text(ctx: Context<'_>, content: impl Into<String>) -> Result<serenity::Message, Error> {
     post_response(ctx, content.into(), Vec::new()).await
 }
@@ -302,7 +342,7 @@ pub(crate) async fn post_response(
     let http = ctx.serenity_context().http.clone();
     let channel = ctx.channel_id();
     let _ = ctx.defer().await;
-    if let Poster::Hook = resolve_poster(&http, channel).await {
+    if let Poster::Hook { .. } = resolve_poster(&http, channel).await {
         if let Some(msg) = post_message(&http, channel, content.clone(), files.clone()).await {
             if let poise::Context::Application(actx) = ctx {
                 let _ = actx.interaction.delete_response(&http).await;

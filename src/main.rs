@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod events;
+mod live;
 mod scrub;
 mod util;
 mod vm;
@@ -9,7 +10,7 @@ mod webhook;
 use poise::serenity_prelude as serenity;
 
 use crate::commands::{
-    botrestart, help, info, notify, ps, purge_replies, restart, run, send, shell, shot,
+    botrestart, help, info, live, notify, ps, purge_replies, restart, run, send, shell, shot,
     start, status, stop, user, useradd, userdel, userlist, users, warmode,
 };
 use crate::commands::BOOT_ART;
@@ -29,6 +30,28 @@ mod tests {
         assert!(out.contains("\x1b[0;30m███\x1b[0m"), "got {:?}", out);
         assert!(out.contains("\x1b[0;31m███\x1b[0m"), "got {:?}", out);
         assert!(!out.contains("40m"), "got {:?}", out);
+    }
+
+    #[test]
+    fn plain_tail_strips_colors_and_fits() {
+        let out = plain_tail("\x1b[0;32m$ cmd\x1b[0m\nok");
+        assert!(!out.contains('\x1b'), "no escapes, got {:?}", out);
+        assert!(out.starts_with("```\n"), "plain fence, got {:?}", out);
+        assert!(out.contains("$ cmd"), "content kept");
+        assert!(!out.contains('…'), "no marker when nothing dropped");
+        assert_eq!(plain_tail(""), "```\n(empty)\n```");
+    }
+
+    #[test]
+    fn plain_tail_truncates_long_output() {
+        let lines: Vec<String> = (0..30).map(|i| format!("line {:02} {}", i, "x".repeat(70))).collect();
+        let body = lines.join("\n");
+        assert!(body.chars().count() > 2000);
+        let out = plain_tail(&body);
+        assert!(out.chars().count() <= 2000, "fits Discord limit, got {}", out.chars().count());
+        assert!(out.contains("line 29"), "bottom kept");
+        assert!(!out.contains("line 00"), "head dropped");
+        assert!(out.contains('…'), "truncation marked");
     }
 
     #[test]
@@ -247,6 +270,7 @@ async fn main() {
             blocked: file_config.blocked_ids.clone(),
         }),
         vm,
+        live: Default::default(),
         settings: tokio::sync::RwLock::new(BotSettings {
             notify_channel: file_config.notify_channel,
             war_mode: file_config.war_mode,
@@ -272,6 +296,7 @@ async fn main() {
                 shell(),
                 botrestart(),
                 run(),
+                live(),
                 shot(),
                 send(),
                 notify(),

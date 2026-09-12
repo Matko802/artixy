@@ -41,6 +41,33 @@ pub(crate) async fn wait_agent(vm: &str, secs: u64) -> bool {
     agent_ping(vm).await
 }
 
+pub(crate) async fn guest_status(vm: &str, pid: i64) -> Result<Option<i64>, Error> {
+    let st = tokio::process::Command::new("virsh")
+        .args([
+            "--connect",
+            "qemu:///system",
+            "qemu-agent-command",
+            vm,
+            &serde_json::json!({"execute":"guest-exec-status","arguments":{"pid":pid}})
+                .to_string(),
+        ])
+        .output()
+        .await?;
+    if !st.status.success() {
+        return Ok(None);
+    }
+    if st.stdout.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok(None);
+    }
+    let s: serde_json::Value = serde_json::from_slice(&st.stdout)
+        .map_err(|e| format!("status poll: {}", e))?;
+    if s["return"]["exited"].as_bool().unwrap_or(false) {
+        Ok(Some(s["return"]["exitcode"].as_i64().unwrap_or(-1)))
+    } else {
+        Ok(None)
+    }
+}
+
 pub(crate) async fn guest_exec(
     vm: &str,
     path: &str,
