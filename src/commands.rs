@@ -564,13 +564,17 @@ pub(crate) async fn warmode(
     }
     ctx.data().settings.write().await.war_mode = enabled;
     save_settings(ctx.data()).await?;
-    post_text(
+    if enabled {
+        post_text(ctx, "War mode on! >:3").await?;
+        return Ok(());
+    }
+    post_response(
         ctx,
-        if enabled {
-            "War mode on! >:3"
-        } else {
-            "war mode disabled, peace?"
-        },
+        "war mode disabled, peace?".to_string(),
+        vec![(
+            "lapeace.jpg".to_string(),
+            include_bytes!("../lapeace.jpg").to_vec(),
+        )],
     )
     .await?;
     Ok(())
