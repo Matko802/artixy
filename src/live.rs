@@ -2,7 +2,8 @@ use poise::serenity_prelude as serenity;
 
 use crate::{
     scrub::scrub_public_ip,
-    util::{after_last_clear, current_frame, frame_text, plain_tail, random_suffix, tool_path, valid_runas},
+    termrender::TermFonts,
+    util::{plain_tail, random_suffix, valid_runas},
     vm::{guest_exec, guest_launch_raw, guest_status},
     webhook::{edit_posted, resolve_poster, Poster},
 };
@@ -36,12 +37,12 @@ const GUEST_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH";
 /// stdout/stderr stay on the pty. Falls back to a plain shell when `script`
 /// is missing. Returns exit code via the code file.
 pub(crate) fn build_runner(shell: &str, b64: &str, out_f: &str, code_f: &str) -> String {
-    use crate::util::{LIVE_IMG_MAX_COLS, LIVE_IMG_MAX_ROWS};
+    use crate::termrender::{TERM_COLS, TERM_ROWS};
     format!(
         "export CMD_DATA=\"$(echo {b64} | base64 -d)\"; if command -v script >/dev/null 2>&1; then script -qec 'export TERM=xterm-256color; stty cols {cols} rows {rows} -echo; {shell} -c '\\''export PATH={path}; eval \"$CMD_DATA\"'\\'' </dev/null' /dev/null </dev/null; else {shell} -c 'export PATH={path}; eval \"$CMD_DATA\"'; fi > {out_f} 2>&1; echo $? > {code_f}",
         b64 = b64,
-        cols = LIVE_IMG_MAX_COLS,
-        rows = LIVE_IMG_MAX_ROWS,
+        cols = TERM_COLS,
+        rows = TERM_ROWS,
         shell = shell,
         path = GUEST_PATH,
         out_f = out_f,
@@ -70,107 +71,24 @@ pub(crate) async fn cleanup_live_files(vm: &str, out_f: &str, code_f: &str) {
     let _ = guest_exec(vm, "/bin/rm", &["-f", out_f, code_f], false, 10).await;
 }
 
-/// Locate a monospace font for frame rendering.
-async fn mono_font() -> Option<String> {
-    let fc = tool_path("fc-match")?;
-    for fam in ["DejaVu Sans Mono", "Liberation Mono"] {
-        let out = tokio::process::Command::new(&fc)
-            .args([fam, "--format=%{file}"])
-            .output()
-            .await
-            .ok()?;
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !p.is_empty() && std::path::Path::new(&p).exists() {
-                return Some(p);
-            }
-        }
-    }
-    None
+/// Load monospace font bytes (regular + bold) for terminal rendering.
+fn load_terminal_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
+    let reg = crate::termrender::system_font_bytes("DejaVu Sans Mono")?;
+    let bold = crate::termrender::system_font_bytes("DejaVu Sans Mono:weight=bold")
+        .unwrap_or_else(|| reg.clone());
+    Some((reg, bold))
 }
 
-fn esc_filter_arg(s: &str) -> String {
-    s.replace('\\', "\\\\").replace(':', "\\:").replace(',', "\\,")
-}
-
-/// Render stripped terminal text to a PNG via ffmpeg drawtext, sized to fit
-/// the text. Returns PNG bytes, or None when rendering is unavailable
-/// (caller falls back to text).
-async fn render_frame(font: Option<&str>, text: &str, w: u32, h: u32, y: u32) -> Option<Vec<u8>> {
-    let font = match font {
-        Some(f) => f,
-        None => return None,
-    };
-    let ffmpeg = match tool_path("ffmpeg") {
-        Some(p) => p,
-        None => {
-            eprintln!("live: ffmpeg not found; text fallback");
-            return None;
-        }
-    };
-    let tag = random_suffix();
-    let dir = std::env::temp_dir();
-    let txt = dir.join(format!("artixy-live-{}-{}.txt", std::process::id(), tag));
-    let png = dir.join(format!("artixy-live-{}-{}.png", std::process::id(), tag));
-    tokio::fs::write(&txt, text).await.ok()?;
-    let input = format!("color=c=#0b0e14:s={}x{}", w, h);
-    let vf = format!(
-        "drawtext=fontfile={}:textfile={}:expansion=none:fontcolor=#e6e6e6:fontsize=32:x=20:y={}",
-        esc_filter_arg(&font),
-        esc_filter_arg(&txt.to_string_lossy()),
-        y,
-    );
-    let png_s = png.to_string_lossy().to_string();
-    let run = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        tokio::process::Command::new(&ffmpeg)
-            .args([
-                "-y", "-v", "error", "-f", "lavfi", "-i", &input, "-vf", &vf, "-frames:v",
-                "1", "-c:v", "png", &png_s,
-            ])
-            .output(),
-    )
-    .await;
-    let ok = match run {
-        Ok(Ok(ref o)) if o.status.success() => true,
-        Ok(Ok(ref o)) => {
-            eprintln!(
-                "live: ffmpeg failed; text fallback ({}).",
-                String::from_utf8_lossy(&o.stderr).trim().chars().take(300).collect::<String>()
-            );
-            false
-        }
-        Ok(Err(e)) => {
-            eprintln!("live: ffmpeg spawn failed ({}); text fallback", e);
-            false
-        }
-        Err(_) => {
-            eprintln!("live: ffmpeg timed out; text fallback");
-            false
-        }
-    };
-    let _ = tokio::fs::remove_file(&txt).await;
-    if !ok {
-        let _ = tokio::fs::remove_file(&png).await;
-        return None;
-    }
-    let bytes = tokio::fs::read(&png).await.ok()?;
-    let _ = tokio::fs::remove_file(&png).await;
-    if bytes.is_empty() { None } else { Some(bytes) }
-}
-
-/// Build the live message: `$ cmd` as plain text, picture of the output
-/// alone underneath. Falls back to a fenced plain-text block (with the
-/// header for context) when rendering is unavailable.
+/// Build the live message: `$ cmd` as plain text, full-page terminal
+/// screenshot of the output underneath. Falls back to a fenced plain-text
+/// block (with the header for context) when rendering is unavailable.
 async fn live_message(
-    font: Option<&str>,
+    fonts: Option<&TermFonts>,
     cmd: &str,
     output: &str,
 ) -> (String, Vec<(String, Vec<u8>)>) {
-    let output = after_last_clear(output);
     let caption = format!("$ {}", cmd);
-    let (img_text, w, h, y) = frame_text(output);
-    match render_frame(font, &img_text, w, h, y).await {
+    match fonts.and_then(|f| crate::termrender::render_terminal(f, output.as_bytes())) {
         Some(png) => (caption, vec![("live.png".to_string(), png)]),
         None => {
             let mut combined = caption.clone();
@@ -302,9 +220,9 @@ pub(crate) async fn live_run(
         }
     };
     let started = std::time::Instant::now();
-    // Font lookup once per run (spawning fc-match every second would be waste).
-    let font = match mono_font().await {
-        Some(f) => Some(f),
+    // Fonts load once per run; without them the whole run falls back to text.
+    let fonts = match load_terminal_fonts() {
+        Some((reg, bold)) => TermFonts::load(&reg, &bold),
         None => {
             eprintln!("live: no monospace font found (fc-match missing?); text fallback");
             None
@@ -364,7 +282,7 @@ pub(crate) async fn live_run(
                     edit_posted(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await;
                 } else {
                     let (text, files) =
-                        live_message(font.as_deref(), &cmd, &output).await;
+                        live_message(fonts.as_ref(), &cmd, &output).await;
                     edit_posted(&poster, &http, channel, msg.id, text, files).await;
                 }
                 cleanup_live_files(&vm, &out_f, &code_f).await;
@@ -383,11 +301,10 @@ pub(crate) async fn live_run(
                 }
                 last_hash = digest;
                 hashed_once = true;
-                // Current frame, not raw scrollback: a poll landing right
-                // after a clear shows the previous frame instead of nothing.
-                let frame = current_frame(fetched.trim_end());
+                // Raw bytes: the emulator handles clears, redraws and
+                // scrollback natively, so no text preprocessing here.
                 let (text, files) =
-                    live_message(font.as_deref(), &cmd, frame).await;
+                    live_message(fonts.as_ref(), &cmd, &fetched).await;
                 if !edit_posted(&poster, &http, channel, msg.id, text, files).await {
                     cleanup_live_files(&vm, &out_f, &code_f).await;
                     break;

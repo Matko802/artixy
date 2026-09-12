@@ -213,16 +213,6 @@ pub(crate) fn plain_tail(body: &str) -> String {
     }
 }
 
-pub(crate) const LIVE_IMG_MAX_COLS: usize = 120;
-pub(crate) const LIVE_IMG_MAX_ROWS: usize = 80;
-// 2x supersampled metrics (32px font): big and crisp in chat.
-// Floor keeps tiny outputs from rendering as thumbnails.
-const LIVE_IMG_COL_PX: u32 = 22;
-const LIVE_IMG_ROW_PX: u32 = 48;
-const LIVE_IMG_PAD_PX: u32 = 20;
-const LIVE_IMG_MIN_W: u32 = 640;
-const LIVE_IMG_MIN_H: u32 = 400;
-
 /// Byte spans (start, end) of terminal clear-screen sequences: CSI J
 /// (erase display), CSI H/f (cursor home/position), ESC c (full reset).
 /// The spans are ASCII-only, so both ends are always char boundaries.
@@ -265,68 +255,7 @@ pub(crate) fn after_last_clear(s: &str) -> &str {
     }
 }
 
-/// Like after_last_clear, but if the current frame is blank (a poll landed
-/// right after a clear while the program is still redrawing), fall back to
-/// the newest non-blank frame instead of flashing empty. Returned slices
-/// never contain a clear sequence, so feeding them through after_last_clear
-/// again is a safe no-op. For finished output prefer after_last_clear (a
-/// trailing clear there is the genuine final state).
-pub(crate) fn current_frame(s: &str) -> &str {
-    let cuts = clear_cuts(s);
-    // Content runs between the clear sequences (seq bytes excluded).
-    let mut segs: Vec<(usize, usize)> = Vec::with_capacity(cuts.len() + 1);
-    let mut start = 0;
-    for &(st, en) in &cuts {
-        segs.push((start, st));
-        start = en;
-    }
-    segs.push((start, s.len()));
-    for &(a, b) in segs.iter().rev() {
-        if !s[a..b].trim().is_empty() {
-            return &s[a..b];
-        }
-    }
-    ""
-}
-
-/// Prepare terminal output for image rendering: turn carriage returns into
-/// newlines (so progress-bar redraws become lines instead of glued text),
-/// strip colors, expand tabs, keep the last MAX_ROWS lines, truncate lines
-/// to MAX_COLS chars, drop leading/trailing blank rows.
-/// Returns (renderable text, image width, image height, text y offset) —
-/// short content is vertically centered instead of hugging the top edge.
-pub(crate) fn frame_text(body: &str) -> (String, u32, u32, u32) {
-    let cr = normalize_nl(body);
-    let clean = strip_sgr(after_last_clear(&cr));
-    let lines: Vec<&str> = clean.lines().collect();
-    let start = lines.len().saturating_sub(LIVE_IMG_MAX_ROWS);
-    let mut out: Vec<String> = Vec::new();
-    let mut cols: usize = 0;
-    for l in &lines[start..] {
-        let expanded: Vec<char> = l.replace('\t', "        ").chars().collect();
-        let len = expanded.len().min(LIVE_IMG_MAX_COLS);
-        cols = cols.max(len);
-        out.push(expanded[..len].iter().collect());
-    }
-    while out.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
-        out.remove(0);
-    }
-    while out.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
-        out.pop();
-    }
-    if out.is_empty() {
-        out.push("(empty)".to_string());
-        cols = cols.max(7);
-    }
-    let content_h = out.len() as u32 * LIVE_IMG_ROW_PX;
-    let w = (cols as u32 * LIVE_IMG_COL_PX + LIVE_IMG_PAD_PX * 2).max(LIVE_IMG_MIN_W);
-    let h = (content_h + LIVE_IMG_PAD_PX * 2).max(LIVE_IMG_MIN_H);
-    let y = LIVE_IMG_PAD_PX + h.saturating_sub(content_h + LIVE_IMG_PAD_PX * 2) / 2;
-    (out.join("\n"), w, h, y)
-}
-
-pub(crate) fn cap_file_body(clean: &str) -> String {
-    const FILE_MAX: usize = 400_000;
+pub(crate) fn cap_file_body(clean: &str) -> String {    const FILE_MAX: usize = 400_000;
     if clean.chars().count() <= FILE_MAX {
         return clean.to_string();
     }

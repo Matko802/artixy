@@ -3,6 +3,7 @@ mod config;
 mod events;
 mod live;
 mod scrub;
+mod termrender;
 mod util;
 mod vm;
 mod webhook;
@@ -117,52 +118,6 @@ mod tests {
     }
 
     #[test]
-    fn frame_text_caps_rows_cols_and_sizes_image() {
-        let (text, w, h, y) = frame_text("ab\ncde");
-        assert_eq!(text, "ab\ncde");
-        assert_eq!((w, h), (640, 400), "tiny content hits the floor, got {}x{}", w, h);
-        assert_eq!(y, 20 + (400 - 2 * 48 - 40) / 2, "centered, got {}", y);
-        let (text, w, _, _) = frame_text(&"x".repeat(40));
-        assert_eq!(text.chars().count(), 40);
-        assert_eq!(w, 40 * 22 + 40, "cols drive width past the floor");
-        let tall = (0..30).map(|i| format!("l{}", i)).collect::<Vec<_>>().join("\n");
-        let (_, _, h, y) = frame_text(&tall);
-        assert_eq!(h, 30 * 48 + 40, "rows drive height past the floor");
-        assert_eq!(y, 20, "no centering once past the floor");
-        let (empty_text, _, _, _) = frame_text("");
-        assert_eq!(empty_text, "(empty)");
-        let long = (0..100).map(|i| format!("line {:03}", i)).collect::<Vec<_>>().join("\n");
-        let (text, _, h, _) = frame_text(&long);
-        assert!(text.contains("line 099"), "bottom kept");
-        assert!(!text.contains("line 000\n"), "head dropped");
-        assert_eq!(h, 80 * 48 + 40, "rows capped at 80");
-        let wide = "x".repeat(200);
-        let (text, w, _, _) = frame_text(&wide);
-        assert_eq!(text.chars().count(), 120, "cols capped at 120");
-        assert_eq!(w, 120 * 22 + 40);
-    }
-
-    #[test]
-    fn frame_text_trims_blank_edges_but_keeps_middle() {
-        assert_eq!(frame_text("\n\nab\ncde\n\n\n").0, "ab\ncde", "edges trimmed");
-        assert_eq!(frame_text("   \n  \n").0, "(empty)", "all-blank stays placeholder");
-        assert_eq!(
-            frame_text("a\n\n\nb").0,
-            "a\n\n\nb",
-            "interior spacing kept"
-        );
-    }
-
-    #[test]
-    fn frame_text_strips_ansi_expands_tabs_splits_cr() {
-        let (text, _, _, _) = frame_text("\x1b[0;32m$ cmd\x1b[0m\na\tb");
-        assert!(!text.contains('\x1b'), "no escapes, got {:?}", text);
-        assert!(text.contains("a        b"), "tabs expanded, got {:?}", text);
-        let (text, _, _, _) = frame_text("10%\r20%\r30%");
-        assert_eq!(text, "10%\n20%\n30%", "progress redraws become lines, got {:?}", text);
-    }
-
-    #[test]
     fn after_last_clear_keeps_current_frame() {
         assert_eq!(after_last_clear("a\nb"), "a\nb");
         assert_eq!(after_last_clear("old\n\x1b[2Jnew"), "new");
@@ -183,41 +138,9 @@ mod tests {
     }
 
     #[test]
-    fn frame_text_collapses_redraw_loops() {
-        // jefetch-style: full block, clear, full block again.
-        let (text, _, _, _) = frame_text("block1\n\x1b[J\x1b[Hblock2");
-        assert!(!text.contains("block1"), "stale frame dropped, got {:?}", text);
-        assert!(text.contains("block2"), "current frame kept");
-    }
-
-    #[test]
-    fn current_frame_falls_back_to_previous_when_blank() {
-        assert_eq!(current_frame("a\nb"), "a\nb", "no clears: unchanged");
-        assert_eq!(current_frame(""), "");
-        assert_eq!(
-            current_frame("frame1\n\x1b[J\x1b[Hframe2"),
-            "frame2",
-            "non-blank current frame"
-        );
-        assert_eq!(
-            current_frame("frame1\n\x1b[J\x1b[H"),
-            "frame1\n",
-            "blank tail: previous frame instead of nothing"
-        );
-        assert_eq!(
-            current_frame("\x1b[2J"),
-            "",
-            "nothing before the clear: genuinely empty"
-        );
-        // Feeding the result through after_last_clear again must not eat it.
-        let f = current_frame("frame1\n\x1b[J\x1b[H");
-        assert_eq!(after_last_clear(f), f, "no clear seq leaks into the frame");
-    }
-
-    #[test]
     fn build_runner_wraps_pty_matching_render_window() {
         let s = crate::live::build_runner("bash", "QkI2NA==", "/tmp/o.out", "/tmp/o.code");
-        assert!(s.contains("stty cols 120 rows 80"), "pty matches render window");
+        assert!(s.contains("stty cols 120 rows 40"), "pty matches render window");
         assert!(s.contains("TERM=xterm-256color"), "terminfo set");
         assert!(s.contains("CMD_DATA"), "command travels via env, not text");
         assert!(s.contains("script -qec"), "pty path first");
@@ -228,7 +151,6 @@ mod tests {
         assert!(!s.contains("$(cat)"), "no pipe-through-pty (EOF would hang)");
         let sh = crate::live::build_runner("sh", "QkI2NA==", "/tmp/o.out", "/tmp/o.code");
         assert!(sh.contains("else sh -c"), "sh fallback mirrors bash");
-        eprintln!("RUNNER=<<{}>>", s);
     }
 
     #[test]
@@ -236,6 +158,64 @@ mod tests {
         assert_eq!(crate::util::normalize_nl("a\r\nb"), "a\nb", "no doubling");
         assert_eq!(crate::util::normalize_nl("a\rb"), "a\nb", "lone CR");
         assert_eq!(crate::util::normalize_nl("a\nb"), "a\nb", "LF untouched");
+    }
+
+    #[test]
+    fn terminal_emulator_feeds_text_and_colors() {
+        use alacritty_terminal::{
+            index::{Column, Line},
+            vte::ansi::{Color, NamedColor},
+        };
+        use crate::termrender::*;
+        let term = emulate_output(b"hello");
+        let grid = term.grid();
+        assert_eq!(grid[Line(0)][Column(0)].c, 'h');
+        assert_eq!(grid[Line(0)][Column(4)].c, 'o');
+        assert_eq!(grid[Line(0)][Column(5)].c, ' ');
+        let term = emulate_output(b"\x1b[31mR\x1b[0mN");
+        let grid = term.grid();
+        assert_eq!(grid[Line(0)][Column(0)].c, 'R');
+        assert_eq!(grid[Line(0)][Column(0)].fg, Color::Named(NamedColor::Red));
+        assert_eq!(grid[Line(0)][Column(1)].c, 'N');
+        assert_eq!(grid[Line(0)][Column(1)].fg, Color::Named(NamedColor::Foreground));
+        // Clear wipes scrollback like a real terminal: no stacking.
+        let term = emulate_output(b"stale\n\x1b[2J\x1b[Hfresh");
+        let grid = term.grid();
+        assert_eq!(grid[Line(0)][Column(0)].c, 'f');
+        let row: String = (0..5).map(|c| grid[Line(0)][Column(c)].c).collect();
+        assert_eq!(row, "fresh");
+    }
+
+    #[test]
+    fn terminal_colors_resolve_sanely() {
+        use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
+        use crate::termrender::*;
+        assert_eq!(resolve_color(Color::Named(NamedColor::Red)), [0xcd, 0x00, 0x00]);
+        assert_eq!(resolve_color(Color::Named(NamedColor::Foreground)), [0xe6, 0xe6, 0xe6]);
+        assert_eq!(resolve_color(Color::Named(NamedColor::Background)), [0x0b, 0x0e, 0x14]);
+        assert_eq!(resolve_color(Color::Spec(Rgb { r: 1, g: 2, b: 3 })), [1, 2, 3]);
+        assert_eq!(indexed_color(0), [0x00, 0x00, 0x00]);
+        assert_eq!(indexed_color(196), [0xff, 0x00, 0x00]);
+        assert_eq!(indexed_color(231), [0xff, 0xff, 0xff]);
+        assert_eq!(indexed_color(232), [8, 8, 8]);
+        assert_eq!(dim([0xff, 0x30, 0x0c]), [0xaa, 0x20, 0x08]);
+    }
+
+    #[test]
+    #[ignore]
+    fn terminal_renders_real_jefetch_bytes() {
+        // Needs system fonts + a capture file: run locally, never in sandbox.
+        use crate::termrender::*;
+        let raw = std::fs::read("/tmp/termproof.bin").expect("capture first");
+        let reg = crate::termrender::system_font_bytes("DejaVu Sans Mono").expect("regular font");
+        let bold =
+            crate::termrender::system_font_bytes("DejaVu Sans Mono:weight=bold").unwrap_or_else(|| reg.clone());
+        let fonts = TermFonts::load(&reg, &bold).expect("fonts parse");
+        let png = render_terminal(&fonts, &raw).expect("renders");
+        std::fs::write("/tmp/termproof.png", &png).unwrap();
+        let (w, h) = fonts.canvas();
+        eprintln!("rendered {}x{} ({} bytes)", w, h, png.len());
+        assert!(png.len() > 20_000, "a real frame is not tiny");
     }
 
     #[test]
