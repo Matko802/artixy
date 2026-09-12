@@ -293,6 +293,25 @@ mod tests {
     }
 
     #[test]
+    fn pending_queries_fires_once_in_order() {
+        use crate::live::pending_queries;
+        assert!(pending_queries("plain output", false, false).is_empty());
+        assert_eq!(pending_queries("\x1b[?u", false, false), vec!["\x1b[?0u"]);
+        assert_eq!(pending_queries("\x1b[c", false, false), vec!["\x1b[?1;2c"]);
+        assert!(pending_queries("\x1b[?u", true, false).is_empty(), "answered: silent");
+        assert!(pending_queries("\x1b[c", false, true).is_empty(), "answered: silent");
+        assert_eq!(
+            pending_queries("x\x1b[c...\x1b[?u", false, false),
+            vec!["\x1b[?1;2c", "\x1b[?0u"],
+            "asked order preserved"
+        );
+        assert!(
+            pending_queries("\x1b[?25l\x1b[38;5;1m\x1b[?1000h", false, false).is_empty(),
+            "lookalikes (cursor-hide, colors, mouse) must not fire"
+        );
+    }
+
+    #[test]
     fn tool_path_finds_shell_and_rejects_junk() {
         let sh = tool_path("sh");
         assert!(sh.is_some(), "sh must resolve even with a minimal PATH");

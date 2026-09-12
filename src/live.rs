@@ -95,7 +95,36 @@ pub(crate) async fn cleanup_live_files(vm: &str, out_f: &str, code_f: &str, in_f
     }
 }
 
-/// Type one message into a live session: appends the text plus Enter to the
+/// Canned answers to terminal capability queries. Fullscreen apps (helix et
+/// al.) ask these on startup and hang forever when nobody answers, since our
+/// pipeline is output-only. Answering kitty-keyboard + primary-DA was proven
+/// to unblock helix into drawing its full UI.
+const KITTY_QUERY: &str = "\x1b[?u";
+const KITTY_ANSWER: &str = "\x1b[?0u";
+const DA_QUERY: &str = "\x1b[c";
+const DA_ANSWER: &str = "\x1b[?1;2c";
+/// Give up answering a query type after this many failed writes (dead reader).
+const ANSWER_ATTEMPTS: u8 = 3;
+
+/// Which canned answers the current output still asks for, given what was
+/// already answered. Pure scan over the latest tail: a waiting app always
+/// has its unanswered query at the end of its output. Answers come back in
+/// the order the queries were last asked.
+pub(crate) fn pending_queries(output: &str, answered_kitty: bool, answered_da: bool) -> Vec<&'static str> {
+    let mut found: Vec<(usize, &'static str)> = Vec::new();
+    if !answered_kitty {
+        if let Some(pos) = output.rfind(KITTY_QUERY) {
+            found.push((pos, KITTY_ANSWER));
+        }
+    }
+    if !answered_da {
+        if let Some(pos) = output.rfind(DA_QUERY) {
+            found.push((pos, DA_ANSWER));
+        }
+    }
+    found.sort();
+    found.into_iter().map(|(_, answer)| answer).collect()
+}
 /// session fifo. The open blocks (up to the timeout) when nothing is reading,
 /// which is how a finished session reports itself. The write runs as the
 /// typist's linked account (root if unlinked), so it only succeeds on a
@@ -347,6 +376,10 @@ pub(crate) async fn live_run(
     // Render region locked by the first frame: same picture size for the
     // whole run (grows only if content outgrows it), so updates never jitter.
     let mut region: Option<(u32, u32)> = None;
+    // Query answers already delivered + failed attempts (give up quietly).
+    let mut answered_kitty = false;
+    let mut answered_da = false;
+    let mut answer_fails: u8 = 0;
     let mut last_hash: u64 = 0;
     let mut hashed_once = false;
     loop {
@@ -428,6 +461,27 @@ pub(crate) async fn live_run(
                 break;
             }
             None => {
+                // Answer terminal capability queries first: fullscreen apps
+                // hang waiting for replies nobody sends. Independent of the
+                // hash-skip below so a stuck query is retried every poll
+                // (up to the cap), and answered as the session owner.
+                if let Some(ref fifo) = in_f {
+                    if answer_fails < ANSWER_ATTEMPTS * 2 {
+                        for answer in pending_queries(&fetched, answered_kitty, answered_da) {
+                            let is_kitty = answer == KITTY_ANSWER;
+                            if forward_terminal_input(&vm, fifo, runas.as_deref(), answer).await {
+                                eprintln!("live: answered a terminal query in {}", out_f);
+                                if is_kitty {
+                                    answered_kitty = true;
+                                } else {
+                                    answered_da = true;
+                                }
+                            } else {
+                                answer_fails += 1;
+                            }
+                        }
+                    }
+                }
                 // Skip render + edit entirely when nothing changed: keeps the
                 // 1s cadence cheap and stays clear of Discord rate limits.
                 use std::hash::{Hash, Hasher};
