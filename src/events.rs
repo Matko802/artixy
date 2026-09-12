@@ -8,12 +8,16 @@ fn is_boo_message(s: &str) -> bool {
         .any(|w| w == "boo")
 }
 
-fn strip_artixy_suffix(s: &str) -> Option<String> {
-    let text = s.trim_end().strip_suffix(".artixy")?.trim().to_string();
-    if text.is_empty() || text.chars().count() > 2000 {
+fn artixy_fenced(s: &str) -> Option<String> {
+    let text = s.trim_end().strip_suffix(".artixy")?.trim();
+    if text.is_empty() {
         return None;
     }
-    Some(text)
+    let fenced = format!("```ansi\n{}\n```", text);
+    if fenced.chars().count() > 2000 {
+        return None;
+    }
+    Some(fenced)
 }
 
 pub(crate) async fn event_handler(
@@ -35,12 +39,12 @@ pub(crate) async fn event_handler(
         }
         return Ok(());
     }
-    let Some(text) = strip_artixy_suffix(&new_message.content) else {
+    let Some(fenced) = artixy_fenced(&new_message.content) else {
         return Ok(());
     };
     let posted_ok = match &new_message.referenced_message {
-        Some(target) => target.reply(&ctx.http, &text).await.is_ok(),
-        None => new_message.channel_id.say(&ctx.http, &text).await.is_ok(),
+        Some(target) => target.reply(&ctx.http, &fenced).await.is_ok(),
+        None => new_message.channel_id.say(&ctx.http, &fenced).await.is_ok(),
     };
     if posted_ok {
         if let Err(e) = new_message.delete(&ctx.http).await {
@@ -68,15 +72,23 @@ mod tests {
     }
 
     #[test]
-    fn artixy_suffix_strips_only_at_end() {
-        assert_eq!(strip_artixy_suffix("hello .artixy"), Some("hello".into()));
-        assert_eq!(strip_artixy_suffix("hello .artixy   "), Some("hello".into()));
-        assert_eq!(strip_artixy_suffix("a.artixy"), Some("a".into()));
-        assert_eq!(strip_artixy_suffix(".artixy"), None);
-        assert_eq!(strip_artixy_suffix("   .artixy  "), None);
-        assert_eq!(strip_artixy_suffix(".artixy hello"), None);
-        assert_eq!(strip_artixy_suffix("hello"), None);
-        assert_eq!(strip_artixy_suffix(""), None);
-        assert_eq!(strip_artixy_suffix(".ARTIXY"), None);
+    fn artixy_suffix_fences_ansi() {
+        assert_eq!(
+            artixy_fenced("hello .artixy"),
+            Some("```ansi\nhello\n```".into())
+        );
+        assert_eq!(
+            artixy_fenced("hello .artixy   "),
+            Some("```ansi\nhello\n```".into())
+        );
+        assert_eq!(artixy_fenced("a.artixy"), Some("```ansi\na\n```".into()));
+        assert_eq!(artixy_fenced(".artixy"), None);
+        assert_eq!(artixy_fenced("   .artixy  "), None);
+        assert_eq!(artixy_fenced(".artixy hello"), None);
+        assert_eq!(artixy_fenced("hello"), None);
+        assert_eq!(artixy_fenced(""), None);
+        assert_eq!(artixy_fenced(".ARTIXY"), None);
+        assert_eq!(artixy_fenced(&format!("{}.artixy", "y".repeat(1990))), None);
+        assert!(artixy_fenced(&format!("{}.artixy", "y".repeat(1980))).is_some());
     }
 }
