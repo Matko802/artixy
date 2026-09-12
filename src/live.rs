@@ -135,24 +135,36 @@ async fn render_frame(font: Option<&str>, text: &str, w: u32, h: u32) -> Option<
     if bytes.is_empty() { None } else { Some(bytes) }
 }
 
-/// Build the live message: short status text plus a rendered image of the
-/// output. Falls back to plain text when rendering is unavailable.
+/// Build the live message: short plain caption plus a rendered image of the
+/// output (the image carries the $ cmd header itself). Falls back to a
+/// fenced plain-text block when rendering is unavailable.
 async fn live_message(
     font: Option<&str>,
-    header: &str,
+    cmd: &str,
+    status: Option<&str>,
     output: &str,
 ) -> (String, Vec<(String, Vec<u8>)>) {
-    // Collapse clear-screen redraws before adding our header, so the $ cmd
-    // line survives programs that clear the screen every frame.
+    // Collapse clear-screen redraws first, so the $ cmd line we add below
+    // survives programs that clear the screen every frame.
     let output = after_last_clear(output);
-    let combined = if output.trim().is_empty() {
-        header.to_string()
-    } else {
-        format!("{}\n{}", header, output.trim_end())
-    };
+    let mut combined = format!("$ {}", cmd);
+    if let Some(s) = status {
+        combined.push('\n');
+        combined.push_str(s);
+    }
+    if !output.trim().is_empty() {
+        combined.push('\n');
+        combined.push_str(output.trim_end());
+    }
     let (img_text, w, h) = frame_text(&combined);
     match render_frame(font, &img_text, w, h).await {
-        Some(png) => (plain_tail(header), vec![("live.png".to_string(), png)]),
+        Some(png) => {
+            let caption = match status {
+                Some(s) => format!("`{}` {}", cmd, s),
+                None => format!("`{}`", cmd),
+            };
+            (caption, vec![("live.png".to_string(), png)])
+        }
         None => (plain_tail(&combined), Vec::new()),
     }
 }
@@ -328,13 +340,10 @@ pub(crate) async fn live_run(
                     .map(|(_, o, _)| o)
                     .unwrap_or(fetched);
                 let full = if scrub_ip { scrub_public_ip(&full) } else { full };
-                let mut output = full.trim_end().to_string();
-                if code != 0 {
-                    output.push_str(&format!("\nexit {}", code));
-                }
                 let header = format!("$ {}", cmd);
                 if first {
                     // Fast command: plain truncated text, no image, no file.
+                    let output = after_last_clear(full.trim_end());
                     let combined = if output.trim().is_empty() {
                         header.clone()
                     } else {
@@ -342,7 +351,13 @@ pub(crate) async fn live_run(
                     };
                     edit_posted(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await;
                 } else {
-                    let (text, files) = live_message(font.as_deref(), &header, &output).await;
+                    let status = if code != 0 {
+                        Some(format!("exit {}", code))
+                    } else {
+                        None
+                    };
+                    let (text, files) =
+                        live_message(font.as_deref(), &cmd, status.as_deref(), full.trim_end()).await;
                     edit_posted(&poster, &http, channel, msg.id, text, files).await;
                 }
                 cleanup_live_files(&vm, &out_f, &code_f).await;
@@ -361,8 +376,8 @@ pub(crate) async fn live_run(
                 }
                 last_hash = digest;
                 hashed_once = true;
-                let header = format!("$ {}\n…live", cmd);
-                let (text, files) = live_message(font.as_deref(), &header, fetched.trim_end()).await;
+                let (text, files) =
+                    live_message(font.as_deref(), &cmd, Some("…live"), fetched.trim_end()).await;
                 if !edit_posted(&poster, &http, channel, msg.id, text, files).await {
                     cleanup_live_files(&vm, &out_f, &code_f).await;
                     break;
