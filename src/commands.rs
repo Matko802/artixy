@@ -362,8 +362,6 @@ pub(crate) async fn run(
     Ok(())
 }
 
-/// Parse a reply target: either a bare message ID (resolved in the current
-/// channel) or a full message link. Returns (channel_id, message_id).
 pub(crate) fn parse_message_ref(s: &str, current_channel: u64) -> Option<(u64, u64)> {
     let t = s.trim().trim_matches(|c| c == '<' || c == '>').trim();
     let t = t.split('?').next().unwrap_or(t).trim();
@@ -408,7 +406,6 @@ pub(crate) async fn say(
     let http = ctx.serenity_context().http.clone();
     let channel = ctx.channel_id();
     if let poise::Context::Prefix(pctx) = ctx {
-        // Parity with .ar: remove the invoking message (best effort; impossible in DMs).
         let _ = pctx.msg.delete(&http).await;
     }
     if let Some(target) = reply_to {

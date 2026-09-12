@@ -23,29 +23,15 @@ pub(crate) type LiveMap = std::sync::Arc<
 
 pub(crate) const LIVE_TIMEOUT_SECS: u64 = 600;
 pub(crate) const LIVE_POLL_SECS: u64 = 1;
-/// First poll comes sooner: commands finishing inside this window get a plain
-/// text reply instead of the live image feed.
 pub(crate) const LIVE_QUICK_SECS: u64 = 1;
-/// Guest output fetched per poll for the image frame (bytes, not chars).
 const LIVE_FRAME_BYTES: &str = "200000";
 
-/// PATH exported inside the guest before running user commands.
 const GUEST_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH";
 
-/// Build the guest runner script. The user command travels base64-encoded in
-/// CMD_DATA (never embedded in the script text, so quotes in it are safe) and
-/// runs under `script(1)` on a pty sized exactly like our render window, so
-/// programs wrap and format for what the picture shows and switch to
-/// line-buffered streaming output. Child stdin comes from `input`: a fifo for
-/// interactive runs (replies to the live message are typed into it), or
-/// /dev/null for instant EOF. The fifo is opened read-write (`<>`) so the
-/// command starts immediately with no writer present; reads then block until
-/// someone types, and never see spurious EOF. Stdout/stderr stay on the pty.
-/// Falls back to a plain shell when `script` is missing. Exit code via file.
 pub(crate) fn build_runner(shell: &str, b64: &str, out_f: &str, code_f: &str, input: &str) -> String {
     use crate::termrender::{TERM_COLS, TERM_ROWS};
     format!(
-        "export CMD_DATA=\"$(echo {b64} | base64 -d)\"; if command -v script >/dev/null 2>&1; then script -qec 'export TERM=xterm-256color; stty cols {cols} rows {rows} -echo; {shell} -c '\\''export PATH={path}; eval \"$CMD_DATA\"'\\'' <> {input}' /dev/null </dev/null; else {shell} -c 'export PATH={path}; eval \"$CMD_DATA\"' <> {input}; fi > {out_f} 2>&1; echo $? > {code_f}",
+        "export CMD_DATA=\"$(echo {b64} | base64 -d)\"; if command -v script >/dev/null 2>&1; then script -qec \"export TERM=xterm-256color; stty cols {cols} rows {rows}; {shell} -c 'export PATH={path}; eval \\\"\\$CMD_DATA\\\"'\" /dev/null <> {input}; else {shell} -c 'export PATH={path}; eval \"$CMD_DATA\"' <> {input}; fi > {out_f} 2>&1; echo $? > {code_f}",
         b64 = b64,
         cols = TERM_COLS,
         rows = TERM_ROWS,
@@ -56,10 +42,6 @@ pub(crate) fn build_runner(shell: &str, b64: &str, out_f: &str, code_f: &str, in
         code_f = code_f,
     )
 }
-/// Shell snippet creating the input fifo owned by whoever will read it.
-/// Root (the writer side) bypasses permission checks, so 600 is enough —
-/// importantly the reader must own it, since opening read-write requires
-/// write permission too.
 pub(crate) fn mkfifo_script(path: &str, runas: Option<&str>) -> String {
     match runas {
         Some(u) => format!("rm -f {path} && mkfifo -m 600 {path} && chown {u} {path}"),
@@ -95,21 +77,12 @@ pub(crate) async fn cleanup_live_files(vm: &str, out_f: &str, code_f: &str, in_f
     }
 }
 
-/// Canned answers to terminal capability queries. Fullscreen apps (helix et
-/// al.) ask these on startup and hang forever when nobody answers, since our
-/// pipeline is output-only. Answering kitty-keyboard + primary-DA was proven
-/// to unblock helix into drawing its full UI.
 const KITTY_QUERY: &str = "\x1b[?u";
 const KITTY_ANSWER: &str = "\x1b[?0u";
 const DA_QUERY: &str = "\x1b[c";
 const DA_ANSWER: &str = "\x1b[?1;2c";
-/// Give up answering a query type after this many failed writes (dead reader).
 const ANSWER_ATTEMPTS: u8 = 3;
 
-/// Which canned answers the current output still asks for, given what was
-/// already answered. Pure scan over the latest tail: a waiting app always
-/// has its unanswered query at the end of its output. Answers come back in
-/// the order the queries were last asked.
 pub(crate) fn pending_queries(output: &str, answered_kitty: bool, answered_da: bool) -> Vec<&'static str> {
     let mut found: Vec<(usize, &'static str)> = Vec::new();
     if !answered_kitty {
@@ -125,11 +98,6 @@ pub(crate) fn pending_queries(output: &str, answered_kitty: bool, answered_da: b
     found.sort();
     found.into_iter().map(|(_, answer)| answer).collect()
 }
-/// session fifo. The open blocks (up to the timeout) when nothing is reading,
-/// which is how a finished session reports itself. The write runs as the
-/// typist's linked account (root if unlinked), so it only succeeds on a
-/// session they started themselves — typing into someone else's session is
-/// refused rather than escalated. Returns true on delivery.
 pub(crate) async fn forward_terminal_input(
     vm: &str,
     fifo: &str,
@@ -157,9 +125,6 @@ pub(crate) async fn forward_terminal_input(
     }
 }
 
-/// Best-effort purge of this bot's spool files and wrapper processes left
-/// behind by a previous bot process (e.g. killed mid-run by a restart).
-/// Only touches our own podbot-live-* names.
 pub(crate) async fn cleanup_stale_live_files(vm: &str) {
     let _ = guest_exec(
         vm,
@@ -171,7 +136,6 @@ pub(crate) async fn cleanup_stale_live_files(vm: &str) {
     .await;
 }
 
-/// Load monospace font bytes (regular + bold) for terminal rendering.
 fn load_terminal_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
     let reg = crate::termrender::system_font_bytes("DejaVu Sans Mono")?;
     let bold = crate::termrender::system_font_bytes("DejaVu Sans Mono:weight=bold")
@@ -179,9 +143,6 @@ fn load_terminal_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
     Some((reg, bold))
 }
 
-/// Build the live message: `$ cmd` as plain text, full-page terminal
-/// screenshot of the output underneath. Falls back to a fenced plain-text
-/// block (with the header for context) when rendering is unavailable.
 async fn live_message(
     fonts: Option<&TermFonts>,
     cmd: &str,
@@ -232,8 +193,6 @@ pub(crate) async fn begin_run(
     let rand = random_suffix();
     let out_f = format!("/tmp/podbot-live-{}-{}.out", tag, rand);
     let code_f = format!("/tmp/podbot-live-{}-{}.code", tag, rand);
-    // Fifo for typed input (replies to the live message). Without it the run
-    // still works, just not interactively.
     let in_f = format!("/tmp/podbot-live-{}-{}.in", tag, rand);
     let in_opt = match guest_exec(
         &vm,
@@ -250,8 +209,6 @@ pub(crate) async fn begin_run(
     if let Some(old) = abort_live_for_channel(&live_map, channel).await {
         let vm_clone = vm.clone();
         tokio::spawn(async move {
-            // Stop the superseded guest tree too, or it spews into a deleted
-            // file forever (invisible disk leak).
             if let Some(pid) = old.pid {
                 crate::vm::guest_kill_tree(&vm_clone, pid).await;
             }
@@ -353,8 +310,6 @@ pub(crate) async fn live_run(
             return;
         }
     };
-    // Remember the guest pid so a superseding run (or timeout) can stop the
-    // whole process tree instead of orphaning it.
     {
         let mut m = live_map.lock().await;
         if let Some(e) = m.get_mut(&channel) {
@@ -364,7 +319,6 @@ pub(crate) async fn live_run(
         }
     }
     let started = std::time::Instant::now();
-    // Fonts load once per run; without them the whole run falls back to text.
     let fonts = match load_terminal_fonts() {
         Some((reg, bold)) => TermFonts::load(&reg, &bold),
         None => {
@@ -373,10 +327,7 @@ pub(crate) async fn live_run(
         }
     };
     let mut first = true;
-    // Render region locked by the first frame: same picture size for the
-    // whole run (grows only if content outgrows it), so updates never jitter.
     let mut region: Option<(u32, u32)> = None;
-    // Query answers already delivered + failed attempts (give up quietly).
     let mut answered_kitty = false;
     let mut answered_da = false;
     let mut answer_fails: u8 = 0;
@@ -386,8 +337,6 @@ pub(crate) async fn live_run(
         let wait = if first { LIVE_QUICK_SECS } else { LIVE_POLL_SECS };
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
         if started.elapsed().as_secs() > LIVE_TIMEOUT_SECS {
-            // Runaway spew (megabytes of output) gets its tree stopped so it
-            // can't fill the guest disk; ordinary long runs are left alone.
             let huge = guest_exec(&vm, "/usr/bin/wc", &["-c", &out_f], true, 10)
                 .await
                 .map(|(_, o, _)| {
@@ -422,7 +371,6 @@ pub(crate) async fn live_run(
             cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
             break;
         }
-        // One generous fetch serves both the fallback text and the image frame.
         let fetched = guest_exec(&vm, "/usr/bin/tail", &["-c", LIVE_FRAME_BYTES, &out_f], true, 15)
             .await
             .map(|(_, o, _)| o)
@@ -431,21 +379,17 @@ pub(crate) async fn live_run(
         let done = guest_status(&vm, pid).await.unwrap_or(None);
         match done {
             Some(code) => {
-                // Capped tail, not full cat: a runaway command could have
-                // megabytes in the file; both consumers only keep the bottom.
                 let full = guest_exec(&vm, "/usr/bin/tail", &["-c", "500000", &out_f], true, 30)
                     .await
                     .map(|(_, o, _)| o)
                     .unwrap_or(fetched);
                 let full = if scrub_ip { scrub_public_ip(&full) } else { full };
                 let header = format!("$ {}", cmd);
-                // Exit status lives in the output itself (caption is bare `$ cmd`).
                 let mut output = full.trim_end().to_string();
                 if code != 0 {
                     output.push_str(&format!("\nexit {}", code));
                 }
                 if first {
-                    // Fast command: plain truncated text, no image, no file.
                     let combined = if output.trim().is_empty() {
                         header.clone()
                     } else {
@@ -461,10 +405,6 @@ pub(crate) async fn live_run(
                 break;
             }
             None => {
-                // Answer terminal capability queries first: fullscreen apps
-                // hang waiting for replies nobody sends. Independent of the
-                // hash-skip below so a stuck query is retried every poll
-                // (up to the cap), and answered as the session owner.
                 if let Some(ref fifo) = in_f {
                     if answer_fails < ANSWER_ATTEMPTS * 2 {
                         for answer in pending_queries(&fetched, answered_kitty, answered_da) {
@@ -482,8 +422,6 @@ pub(crate) async fn live_run(
                         }
                     }
                 }
-                // Skip render + edit entirely when nothing changed: keeps the
-                // 1s cadence cheap and stays clear of Discord rate limits.
                 use std::hash::{Hash, Hasher};
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 fetched.hash(&mut hasher);
@@ -494,8 +432,6 @@ pub(crate) async fn live_run(
                 }
                 last_hash = digest;
                 hashed_once = true;
-                // Raw bytes: the emulator handles clears, redraws and
-                // scrollback natively, so no text preprocessing here.
                 let (text, files) =
                     live_message(fonts.as_ref(), &cmd, &fetched, &mut region).await;
                 if !edit_posted(&poster, &http, channel, msg.id, text, files).await {

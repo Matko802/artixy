@@ -192,8 +192,6 @@ pub(crate) fn fit_bottom_lines(body: &str) -> (String, bool) {
 }
 
 pub(crate) fn normalize_nl(s: &str) -> String {
-    // Pty output uses CRLF; lone CRs (progress redraws) become lines too.
-    // Order matters: collapse CRLF first so it doesn't double up.
     s.replace("\r\n", "\n").replace('\r', "\n")
 }
 
@@ -213,9 +211,6 @@ pub(crate) fn plain_tail(body: &str) -> String {
     }
 }
 
-/// Byte spans (start, end) of terminal clear-screen sequences: CSI J
-/// (erase display), CSI H/f (cursor home/position), ESC c (full reset).
-/// The spans are ASCII-only, so both ends are always char boundaries.
 fn clear_cuts(s: &str) -> Vec<(usize, usize)> {
     let b = s.as_bytes();
     let mut cuts = Vec::new();
@@ -244,10 +239,6 @@ fn clear_cuts(s: &str) -> Vec<(usize, usize)> {
     cuts
 }
 
-/// Terminal emulators replace the screen on clear/home sequences instead of
-/// appending. Return everything after the last such sequence so animated
-/// redraws (clear + redraw loops) show the current frame, not stacked history.
-/// Must run on the raw text, before strip_sgr removes the sequences.
 pub(crate) fn after_last_clear(s: &str) -> &str {
     match clear_cuts(s).last() {
         Some(&(_, end)) => &s[end..],
@@ -282,8 +273,6 @@ pub(crate) fn attach_name(cmd: &str) -> String {
     }
 }
 
-/// Locate a helper binary without relying on PATH (systemd services run with
-/// a minimal PATH that often lacks ffmpeg/fontconfig on NixOS).
 pub(crate) fn tool_path(name: &str) -> Option<std::path::PathBuf> {
     if name.is_empty() || name.contains('/') {
         return None;

@@ -106,9 +106,6 @@ pub(crate) async fn event_handler(
     if new_message.author.bot {
         return Ok(());
     }
-    // Terminal input: a reply to the active live message is typed into the
-    // running command (the reply itself is deleted). Empty or attachment-only
-    // replies, strangers, and replies to anything else fall through below.
     if new_message.attachments.is_empty() && !new_message.content.trim().is_empty() {
         if let Some(refd) = new_message.referenced_message.as_ref() {
             let target: Option<(serenity::MessageId, String)> = {

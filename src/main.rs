@@ -27,9 +27,6 @@ mod tests {
 
     #[test]
     fn slash_commands_allow_user_install_everywhere() {
-        // Mirrors the framework command list below: every slash command must
-        // be registered for guild+user installs and usable in guilds + DMs,
-        // or the app is dead outside servers.
         let cmds = vec![
             help(),
             ps(),
@@ -106,8 +103,6 @@ mod tests {
 
     #[test]
     fn plain_tail_counts_chars_not_bytes() {
-        // jefetch-style wide Unicode: 3 bytes/char; a byte-starved tail would
-        // show almost nothing, but plain_tail fits by chars.
         let line = "▗▒▓▓▓▓▓▒▒▒▄▄░▒▒▒▓▒ CPU-> AMD Ryzen 5 5600G (2) @ 3.89 GHz";
         let body = (0..60).map(|i| format!("{} {}", line, i)).collect::<Vec<_>>().join("\n");
         let out = plain_tail(&body);
@@ -145,7 +140,8 @@ mod tests {
         assert!(s.contains("CMD_DATA"), "command travels via env, not text");
         assert!(s.contains("script -qec"), "pty path first");
         assert!(s.contains("else bash -c"), "plain fallback");
-        assert!(s.contains("<> /tmp/o.in"), "fifo opens read-write (never blocks)");
+        assert!(s.contains("/dev/null <> /tmp/o.in"), "script relays the fifo");
+        assert!(!s.contains("</dev/null"), "app stdin is the pty, not null");
         assert!(s.contains("> /tmp/o.out 2>&1"), "output captured");
         assert!(s.contains("echo $? > /tmp/o.code"), "exit code kept");
         assert!(!s.contains("$(cat)"), "no pipe-through-pty (EOF would hang)");
@@ -180,7 +176,6 @@ mod tests {
         assert_eq!(grid[Line(0)][Column(0)].fg, Color::Named(NamedColor::Red));
         assert_eq!(grid[Line(0)][Column(1)].c, 'N');
         assert_eq!(grid[Line(0)][Column(1)].fg, Color::Named(NamedColor::Foreground));
-        // Clear wipes scrollback like a real terminal: no stacking.
         let term = emulate_output(b"stale\n\x1b[2J\x1b[Hfresh");
         let grid = term.grid();
         assert_eq!(grid[Line(0)][Column(0)].c, 'f');
@@ -192,15 +187,12 @@ mod tests {
     fn terminal_viewport_shows_latest_after_scroll() {
         use alacritty_terminal::index::{Column, Line};
         use crate::termrender::*;
-        // Real pty output uses CRLF (ONLCR); bare LF alone drifts right.
         let body: String = (0..100).map(|i| format!("line {:03}\r\n", i)).collect();
         let term = emulate_output(body.as_bytes());
         let grid = term.grid();
         let top: String = (0..8).map(|c| grid[Line(0)][Column(c)].c).collect();
         let bottom: String = (0..8).map(|c| grid[Line(39)][Column(c)].c).collect();
         eprintln!("top={:?} bottom={:?}", top, bottom);
-        // Trailing newline leaves the cursor on its own blank row, like a
-        // real terminal; the newest content sits right above it.
         assert_eq!(top, "line 061", "viewport top follows scroll");
         assert_eq!(bottom, "        ", "cursor row is blank");
     }
@@ -223,7 +215,6 @@ mod tests {
     #[test]
     #[ignore]
     fn terminal_renders_real_jefetch_bytes() {
-        // Needs system fonts + a capture file: run locally, never in sandbox.
         use crate::termrender::*;
         let raw = std::fs::read("/tmp/termproof.bin").expect("capture first");
         let reg = crate::termrender::system_font_bytes("DejaVu Sans Mono").expect("regular font");
@@ -243,13 +234,11 @@ mod tests {
         use crate::termrender::*;
         assert_eq!(content_region(&emulate_output(b"hi")), (0, 1, 2));
         assert_eq!(content_region(&emulate_output(b"")), (0, 0, 0));
-        // CRLF like real pty output (bare LF would drift right, no CR).
         assert_eq!(
             content_region(&emulate_output(b"\r\n\r\nab\r\ncde\r\n\r\n\r\n")),
             (2, 2, 3),
             "blank edges are outside the box"
         );
-        // Bg-colored blanks count (palette swatches), glyph-less rows don't.
         let term = emulate_output(b"\x1b[41m   \x1b[0m\r\nplain\r\n\r\n\r\n");
         assert_eq!(content_region(&term), (0, 2, 5));
     }
@@ -613,8 +602,6 @@ async fn main() {
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                // Drop spool files / wrapper processes orphaned by a previous
-                // bot process (e.g. restarted mid-run) so they can't pile up.
                 crate::live::cleanup_stale_live_files(&data.vm).await;
                 if let Some(ch) = data.settings.read().await.notify_channel {
                     let _ = crate::webhook::post_message(

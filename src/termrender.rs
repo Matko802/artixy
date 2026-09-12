@@ -1,13 +1,3 @@
-//! Full-page terminal screenshots.
-//!
-//! Raw program output is fed through a real VT emulator (Alacritty's) and the
-//! resulting fixed grid is rasterized to PNG with fontdue. This replaces the
-//! old hand-rolled ANSI stripper + ffmpeg text renderer: escape sequences,
-//! colors, clears, redraws and the alt screen all behave exactly like on a
-//! real terminal, and the picture size never changes mid-run.
-//!
-//! Deliberately not rendered: cursor, underline/strikeout styles, zerowidth
-//! combining marks, runtime OSC palette changes.
 
 use std::collections::HashMap;
 
@@ -22,15 +12,10 @@ use alacritty_terminal::{
     },
 };
 
-/// Fixed terminal page: also used for the guest pty size so programs format
-/// for exactly what the picture shows.
 pub(crate) const TERM_COLS: usize = 120;
 pub(crate) const TERM_ROWS: usize = 40;
 const FONT_PX: f32 = 28.0;
 const PAD: u32 = 10;
-// Rendered region buckets: coarse enough that growing output resizes rarely,
-// fine enough that small output isn't a thumbnail. Plus a floor and the
-// per-run grow-only lock (see quantize_region).
 const COL_STEP: usize = 20;
 const ROW_STEP: usize = 8;
 const MIN_COLS: u32 = 60;
@@ -64,8 +49,6 @@ pub(crate) struct TermFonts {
     ascent: i32,
 }
 
-/// Resolve a fontconfig pattern (e.g. "DejaVu Sans Mono") to TTF bytes,
-/// without relying on PATH (systemd services run with a minimal one).
 pub(crate) fn system_font_bytes(spec: &str) -> Option<Vec<u8>> {
     let fc = crate::util::tool_path("fc-match")?;
     let out = std::process::Command::new(&fc)
@@ -216,7 +199,6 @@ fn blit(
     }
 }
 
-/// Feed raw program output through a fresh terminal emulator.
 pub(crate) fn emulate_output(output: &[u8]) -> Term<VoidListener> {
     let mut term: Term<VoidListener> = Term::new(
         Config { scrolling_history: TERM_ROWS, ..Default::default() },
@@ -228,10 +210,6 @@ pub(crate) fn emulate_output(output: &[u8]) -> Term<VoidListener> {
     term
 }
 
-/// Visible content bounding box of the viewport: (first_row, rows, cols).
-/// A cell counts as content when it holds a glyph or a non-default
-/// background (e.g. palette swatches); empty rows above/below are dropped so
-/// sparse output doesn't render as a giant dark rectangle.
 pub(crate) fn content_region(term: &Term<VoidListener>) -> (usize, usize, usize) {
     let grid = term.grid();
     let mut first: Option<usize> = None;
@@ -260,9 +238,6 @@ pub(crate) fn content_region(term: &Term<VoidListener>) -> (usize, usize, usize)
     }
 }
 
-/// Snap a content box to bucket boundaries with a floor and the full page as
-/// ceiling; `lock` (earlier frame of the same run) wins upward so the picture
-/// never shrinks mid-run. Returns cell counts (cols, rows).
 pub(crate) fn quantize_region(cols: usize, rows: usize, lock: Option<(u32, u32)>) -> (u32, u32) {
     let bucket_cols = ((cols + COL_STEP - 1) / COL_STEP * COL_STEP) as u32;
     let bucket_rows = ((rows + ROW_STEP - 1) / ROW_STEP * ROW_STEP) as u32;
@@ -275,7 +250,6 @@ pub(crate) fn quantize_region(cols: usize, rows: usize, lock: Option<(u32, u32)>
     (w, h)
 }
 
-/// Rasterize one full terminal page to PNG bytes.
 pub(crate) fn render_terminal(
     fonts: &TermFonts,
     output: &[u8],
@@ -287,8 +261,6 @@ pub(crate) fn render_terminal(
     *region = Some((cols_q, rows_q));
     let w = cols_q * fonts.cell_w + PAD * 2;
     let h = rows_q * fonts.cell_h + PAD * 2;
-    // Center leftover slack under the content (matches the old behavior for
-    // small frames); content itself starts at `first`.
     let content_h = rows.min(rows_q as usize) as u32 * fonts.cell_h;
     let y0 = PAD as i32 + (h.saturating_sub(content_h + PAD * 2) / 2) as i32;
     let mut img = vec![0u8; (w * h * 3) as usize];

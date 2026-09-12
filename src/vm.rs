@@ -77,8 +77,6 @@ pub(crate) async fn guest_exec(
 ) -> Result<(i64, String, String), Error> {
     use base64::Engine as _;
     let pid = guest_launch_raw(vm, path, args, capture).await?;
-    // Check-first loop with a deadline: instant commands (tail, rm, cat)
-    // return without the old mandatory 1s sleep, slow ones poll every 1s.
     let deadline = std::time::Instant::now()
         + std::time::Duration::from_secs(timeout_s.max(1));
     loop {
@@ -171,9 +169,6 @@ pub(crate) async fn linked_user(data: &Data, uid: u64) -> Option<String> {
         .cloned()
 }
 
-/// Shell snippet stopping a guest process tree bottom-up (children first so
-/// nothing gets reparented and left behind). Best effort: missing pgrep or
-/// already-dead processes are fine.
 pub(crate) fn kill_tree_script(pid: i64) -> String {
     format!(
         "killtree() {{ for c in $(pgrep -P \"$1\"); do killtree \"$c\"; done; kill \"$1\" 2>/dev/null; }}; killtree {pid}",
@@ -181,8 +176,6 @@ pub(crate) fn kill_tree_script(pid: i64) -> String {
     )
 }
 
-/// Stop a guest process and all of its descendants (e.g. a superseded or
-/// runaway live command). Best effort.
 pub(crate) async fn guest_kill_tree(vm: &str, pid: i64) {
     let snippet = kill_tree_script(pid);
     let _ = guest_exec(vm, "/bin/bash", &["-c", &snippet], false, 15).await;
