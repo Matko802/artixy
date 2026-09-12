@@ -71,19 +71,24 @@ mod tests {
     fn frame_text_caps_rows_cols_and_sizes_image() {
         let (text, w, h) = frame_text("ab\ncde");
         assert_eq!(text, "ab\ncde");
-        assert_eq!(w, 3 * 10 + 20, "cols drive width");
-        assert_eq!(h, 2 * 20 + 20, "rows drive height");
+        assert_eq!((w, h), (640, 400), "tiny content hits the floor, got {}x{}", w, h);
+        let (text, w, _) = frame_text(&"x".repeat(40));
+        assert_eq!(text.chars().count(), 40);
+        assert_eq!(w, 40 * 22 + 40, "cols drive width past the floor");
+        let tall = (0..30).map(|i| format!("l{}", i)).collect::<Vec<_>>().join("\n");
+        let (_, _, h) = frame_text(&tall);
+        assert_eq!(h, 30 * 48 + 40, "rows drive height past the floor");
         let (empty_text, _, _) = frame_text("");
         assert_eq!(empty_text, "(empty)");
         let long = (0..100).map(|i| format!("line {:03}", i)).collect::<Vec<_>>().join("\n");
         let (text, _, h) = frame_text(&long);
         assert!(text.contains("line 099"), "bottom kept");
         assert!(!text.contains("line 000\n"), "head dropped");
-        assert_eq!(h, 80 * 20 + 20, "rows capped at 80");
+        assert_eq!(h, 80 * 48 + 40, "rows capped at 80");
         let wide = "x".repeat(200);
         let (text, w, _) = frame_text(&wide);
         assert_eq!(text.chars().count(), 120, "cols capped at 120");
-        assert_eq!(w, 120 * 10 + 20);
+        assert_eq!(w, 120 * 22 + 40);
     }
 
     #[test]

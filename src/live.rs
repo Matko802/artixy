@@ -92,7 +92,7 @@ async fn render_frame(font: Option<&str>, text: &str, w: u32, h: u32) -> Option<
     tokio::fs::write(&txt, text).await.ok()?;
     let input = format!("color=c=#0b0e14:s={}x{}", w, h);
     let vf = format!(
-        "drawtext=fontfile={}:textfile={}:expansion=none:fontcolor=#e6e6e6:fontsize=16:x=10:y=10",
+        "drawtext=fontfile={}:textfile={}:expansion=none:fontcolor=#e6e6e6:fontsize=32:x=20:y=20",
         esc_filter_arg(&font),
         esc_filter_arg(&txt.to_string_lossy()),
     );

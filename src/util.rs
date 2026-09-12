@@ -209,9 +209,13 @@ pub(crate) fn plain_tail(body: &str) -> String {
 
 pub(crate) const LIVE_IMG_MAX_COLS: usize = 120;
 pub(crate) const LIVE_IMG_MAX_ROWS: usize = 80;
-const LIVE_IMG_COL_PX: u32 = 10;
-const LIVE_IMG_ROW_PX: u32 = 20;
-const LIVE_IMG_PAD_PX: u32 = 10;
+// 2x supersampled metrics (32px font): big and crisp in chat.
+// Floor keeps tiny outputs from rendering as thumbnails.
+const LIVE_IMG_COL_PX: u32 = 22;
+const LIVE_IMG_ROW_PX: u32 = 48;
+const LIVE_IMG_PAD_PX: u32 = 20;
+const LIVE_IMG_MIN_W: u32 = 640;
+const LIVE_IMG_MIN_H: u32 = 400;
 
 /// Terminal emulators replace the screen on clear/home sequences instead of
 /// appending. Return everything after the last such sequence so animated
@@ -269,8 +273,8 @@ pub(crate) fn frame_text(body: &str) -> (String, u32, u32) {
         out.push("(empty)".to_string());
         cols = cols.max(7);
     }
-    let w = cols as u32 * LIVE_IMG_COL_PX + LIVE_IMG_PAD_PX * 2;
-    let h = out.len() as u32 * LIVE_IMG_ROW_PX + LIVE_IMG_PAD_PX * 2;
+    let w = (cols as u32 * LIVE_IMG_COL_PX + LIVE_IMG_PAD_PX * 2).max(LIVE_IMG_MIN_W);
+    let h = (out.len() as u32 * LIVE_IMG_ROW_PX + LIVE_IMG_PAD_PX * 2).max(LIVE_IMG_MIN_H);
     (out.join("\n"), w, h)
 }
 
