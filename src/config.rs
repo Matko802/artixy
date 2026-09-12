@@ -132,6 +132,9 @@ fn normalize_file_config(mut cfg: FileConfig) -> FileConfig {
             *slot = None;
         }
     }
+    if cfg.owner_id == Some(0) {
+        cfg.owner_id = None;
+    }
     cfg
 }
 
@@ -157,7 +160,7 @@ pub(crate) fn lock_config_private() {
     }
 }
 
-pub(crate) fn ensure_config_template(owner_id: u64) {
+pub(crate) fn ensure_config_template() {
     let path = config_file_path();
     if path.exists() {
         return;
@@ -167,15 +170,11 @@ pub(crate) fn ensure_config_template(owner_id: u64) {
             return;
         }
     }
-    let token = std::env::var("DISCORD_TOKEN").unwrap_or_default();
-    let vm = std::env::var("VM_NAME").unwrap_or_default();
-    let template = format!(
-        "owner_id = {}\ndiscord_token = \"{}\"\nvm_name = \"{}\"\nblocked_ids = []\nwebhook_urls = []\n",
-        owner_id, token, vm
-    );
-    let _ = std::fs::write(path, template);
+    let _ = std::fs::write(path, CONFIG_TEMPLATE);
     lock_config_private();
 }
+
+const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwebhook_urls = []\nwar_mode = false\nmanagers = []\n\n[linux]\n\n[shells]\n";
 
 pub(crate) async fn save_json(path: &str, data: String) -> Result<(), Error> {
     let tmp = format!("{}.{}.tmp", path, random_suffix());
@@ -222,6 +221,21 @@ mod tests {
         let c = normalize_file_config(parse("discord_token = \"tok\"\nvm_name = \"v\"\n"));
         assert_eq!(c.discord_token.as_deref(), Some("tok"));
         assert_eq!(c.vm_name.as_deref(), Some("v"));
+    }
+
+    #[test]
+    fn template_is_empty_by_default() {
+        let c = normalize_file_config(parse(CONFIG_TEMPLATE));
+        assert_eq!(c.owner_id, None);
+        assert_eq!(c.discord_token, None);
+        assert_eq!(c.vm_name, None);
+        assert!(c.blocked_ids.is_empty());
+        assert!(c.webhook_urls.is_empty());
+        assert!(!c.war_mode);
+        assert!(c.managers.is_empty());
+        assert!(c.linux.is_empty());
+        assert!(c.shells.is_empty());
+        assert_eq!(c.notify_channel, None);
     }
 
     #[test]

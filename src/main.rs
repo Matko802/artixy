@@ -239,7 +239,7 @@ async fn main() {
             .parse()
             .expect("OWNER_ID must be a number"),
     };
-    ensure_config_template(owner);
+    ensure_config_template();
     if fresh_config {
         let legacy_users: AllowedFile = tokio::fs::read_to_string("users.json")
             .await
