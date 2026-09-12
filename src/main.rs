@@ -267,12 +267,16 @@ async fn main() {
     }
     crate::webhook::init_webhook_urls(file_config.webhook_urls);
     let _ = std::env::set_current_dir(project_dir());
-    let vm = file_config
+    let vm: String = file_config
         .vm_name
         .clone()
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("VM_NAME").ok())
-        .unwrap_or_else(|| "voidvm".into());
+        .or_else(|| {
+            std::env::var("VM_NAME")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .expect("set vm_name in ~/.config/artixy/config.toml or VM_NAME env");
     let data = Data {
         allowed: tokio::sync::RwLock::new(Allowed {
             owner,

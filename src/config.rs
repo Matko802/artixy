@@ -168,7 +168,7 @@ pub(crate) fn ensure_config_template(owner_id: u64) {
         }
     }
     let token = std::env::var("DISCORD_TOKEN").unwrap_or_default();
-    let vm = std::env::var("VM_NAME").unwrap_or_else(|_| "voidvm".into());
+    let vm = std::env::var("VM_NAME").unwrap_or_default();
     let template = format!(
         "owner_id = {}\ndiscord_token = \"{}\"\nvm_name = \"{}\"\nblocked_ids = []\nwebhook_urls = []\n",
         owner_id, token, vm
