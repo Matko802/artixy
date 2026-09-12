@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::{
     scrub::scrub_public_ip,
-    util::{ansi_tail, codeblock, random_suffix, valid_runas},
+    util::{ansi_tail, attach_name, cap_file_body, codeblock, fit_ansi_tail, random_suffix, strip_sgr, valid_runas},
     vm::{guest_exec, guest_launch_raw, guest_status},
     webhook::{edit_posted, resolve_poster, Poster},
 };
@@ -115,7 +115,7 @@ pub(crate) async fn live_run(
         if !valid_runas(u) {
             edit_posted(&poster, &http, channel, msg.id, codeblock(
                 "linked linux account is invalid; ask the owner to re-add you.",
-            ))
+            ), Vec::new())
             .await;
             remove_live_if_tag(&live_map, channel, tag).await;
             return;
@@ -148,7 +148,7 @@ pub(crate) async fn live_run(
     let pid = match launched {
         Ok(p) => p,
         Err(e) => {
-            edit_posted(&poster, &http, channel, msg.id, codeblock(&e.to_string())).await;
+            edit_posted(&poster, &http, channel, msg.id, codeblock(&e.to_string()), Vec::new()).await;
             remove_live_if_tag(&live_map, channel, tag).await;
             return;
         }
@@ -166,6 +166,7 @@ pub(crate) async fn live_run(
                     "$ {}\n…stopped after {}s timeout; output truncated, process may still run in guest",
                     cmd, LIVE_TIMEOUT_SECS
                 )),
+                Vec::new(),
             )
             .await;
             cleanup_live_files(&vm, &out_f, &code_f).await;
@@ -187,13 +188,24 @@ pub(crate) async fn live_run(
                 if code != 0 {
                     body.push_str(&format!("\n\u{1b}[0;31mexit {}\u{1b}[0m", code));
                 }
-                edit_posted(&poster, &http, channel, msg.id, ansi_tail(&body)).await;
+                let (text, truncated) = fit_ansi_tail(&body);
+                let files = if truncated {
+                    let full = guest_exec(&vm, "/bin/cat", &[&out_f], true, 30)
+                        .await
+                        .map(|(_, o, _)| o)
+                        .unwrap_or_default();
+                    let full = if scrub_ip { scrub_public_ip(&full) } else { full };
+                    vec![(attach_name(&cmd), cap_file_body(&strip_sgr(&full)).into_bytes())]
+                } else {
+                    Vec::new()
+                };
+                edit_posted(&poster, &http, channel, msg.id, text, files).await;
                 cleanup_live_files(&vm, &out_f, &code_f).await;
                 break;
             }
             None => {
                 body.push_str("\n\u{1b}[0;33m…live\u{1b}[0m");
-                if !edit_posted(&poster, &http, channel, msg.id, ansi_tail(&body)).await {
+                if !edit_posted(&poster, &http, channel, msg.id, ansi_tail(&body), Vec::new()).await {
                     cleanup_live_files(&vm, &out_f, &code_f).await;
                     break;
                 }

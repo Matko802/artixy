@@ -304,23 +304,26 @@ pub(crate) async fn edit_posted(
     channel: serenity::ChannelId,
     target: serenity::MessageId,
     content: String,
+    files: Vec<(String, Vec<u8>)>,
 ) -> bool {
     match poster {
-        Poster::Direct => channel
-            .edit_message(http, target, serenity::EditMessage::new().content(content))
-            .await
-            .is_ok(),
+        Poster::Direct => {
+            let mut builder = serenity::EditMessage::new().content(content);
+            for (name, bytes) in files {
+                builder = builder.new_attachment(serenity::CreateAttachment::bytes(bytes, name));
+            }
+            channel.edit_message(http, target, builder).await.is_ok()
+        }
         Poster::Hook { id, token } => {
             let url = hook_url(*id, token);
             match serenity::model::webhook::Webhook::from_url(http, &url).await {
-                Ok(wh) => wh
-                    .edit_message(
-                        http,
-                        target,
-                        serenity::EditWebhookMessage::new().content(content),
-                    )
-                    .await
-                    .is_ok(),
+                Ok(wh) => {
+                    let mut builder = serenity::EditWebhookMessage::new().content(content);
+                    for (name, bytes) in files {
+                        builder = builder.new_attachment(serenity::CreateAttachment::bytes(bytes, name));
+                    }
+                    wh.edit_message(http, target, builder).await.is_ok()
+                }
                 Err(_) => {
                     evict_channel(&channel);
                     false

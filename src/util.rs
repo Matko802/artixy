@@ -201,12 +201,17 @@ pub(crate) fn fence_inline(fitted: &str) -> String {
 }
 
 pub(crate) fn ansi_tail(body: &str) -> String {
+    let (text, _) = fit_ansi_tail(body);
+    text
+}
+
+pub(crate) fn fit_ansi_tail(body: &str) -> (String, bool) {
     let clean = sanitize_ansi(body.trim_end());
     let (fitted, truncated) = fit_bottom_lines(&clean);
     if truncated {
-        return format!("```ansi\n…\n{}\n```", fitted);
+        return (format!("```ansi\n…\n{}\n```", fitted), true);
     }
-    fence_inline(&fitted)
+    (fence_inline(&fitted), false)
 }
 
 pub(crate) fn cap_file_body(clean: &str) -> String {
