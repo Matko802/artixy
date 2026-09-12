@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::{
     scrub::scrub_public_ip,
-    util::{plain_tail, random_suffix, valid_runas},
+    util::{frame_text, plain_tail, random_suffix, valid_runas},
     vm::{guest_exec, guest_launch_raw, guest_status},
     webhook::{edit_posted, resolve_poster, Poster},
 };
@@ -18,7 +18,9 @@ pub(crate) type LiveMap = std::sync::Arc<
 >;
 
 pub(crate) const LIVE_TIMEOUT_SECS: u64 = 600;
-pub(crate) const LIVE_POLL_SECS: u64 = 2;
+pub(crate) const LIVE_POLL_SECS: u64 = 5;
+/// Guest output fetched per poll for the image frame (bytes, not chars).
+const LIVE_FRAME_BYTES: &str = "200000";
 
 pub(crate) async fn abort_live_for_channel(
     live_map: &LiveMap,
@@ -40,6 +42,80 @@ pub(crate) async fn remove_live_if_tag(live_map: &LiveMap, channel: serenity::Ch
 
 pub(crate) async fn cleanup_live_files(vm: &str, out_f: &str, code_f: &str) {
     let _ = guest_exec(vm, "/bin/rm", &["-f", out_f, code_f], false, 10).await;
+}
+
+/// Locate a monospace font for frame rendering.
+async fn mono_font() -> Option<String> {
+    for fam in ["DejaVu Sans Mono", "Liberation Mono"] {
+        let out = tokio::process::Command::new("fc-match")
+            .args([fam, "--format=%{file}"])
+            .output()
+            .await
+            .ok()?;
+        if out.status.success() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !p.is_empty() && std::path::Path::new(&p).exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+fn esc_filter_arg(s: &str) -> String {
+    s.replace('\\', "\\\\").replace(':', "\\:").replace(',', "\\,")
+}
+
+/// Render stripped terminal text to a PNG via ffmpeg drawtext.
+/// Returns PNG bytes, or None when rendering is unavailable (caller falls back to text).
+async fn render_frame(text: &str, w: u32, h: u32) -> Option<Vec<u8>> {
+    let font = mono_font().await?;
+    let tag = random_suffix();
+    let dir = std::env::temp_dir();
+    let txt = dir.join(format!("artixy-live-{}-{}.txt", std::process::id(), tag));
+    let png = dir.join(format!("artixy-live-{}-{}.png", std::process::id(), tag));
+    tokio::fs::write(&txt, text).await.ok()?;
+    let input = format!("color=c=#0b0e14:s={}x{}", w, h);
+    let vf = format!(
+        "drawtext=fontfile={}:textfile={}:expansion=none:fontcolor=#e6e6e6:fontsize=16:x=10:y=10",
+        esc_filter_arg(&font),
+        esc_filter_arg(&txt.to_string_lossy()),
+    );
+    let png_s = png.to_string_lossy().to_string();
+    let run = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        tokio::process::Command::new("ffmpeg")
+            .args([
+                "-y", "-v", "error", "-f", "lavfi", "-i", &input, "-vf", &vf, "-frames:v",
+                "1", "-c:v", "png", &png_s,
+            ])
+            .output(),
+    )
+    .await;
+    let ok = matches!(run, Ok(Ok(ref o)) if o.status.success());
+    let _ = tokio::fs::remove_file(&txt).await;
+    if !ok {
+        let _ = tokio::fs::remove_file(&png).await;
+        return None;
+    }
+    let bytes = tokio::fs::read(&png).await.ok()?;
+    let _ = tokio::fs::remove_file(&png).await;
+    if bytes.is_empty() { None } else { Some(bytes) }
+}
+
+/// Build the live message: short status text plus a rendered image of the
+/// output. Falls back to plain text when rendering is unavailable.
+async fn live_message(header: &str, output: &str) -> (String, Vec<(String, Vec<u8>)>) {
+    let combined = if output.trim().is_empty() {
+        header.to_string()
+    } else {
+        format!("{}\n{}", header, output.trim_end())
+    };
+    let (img_text, w, h) = frame_text(&combined);
+    match render_frame(&img_text, w, h).await {
+        Some(png) => (plain_tail(header), vec![("live.png".to_string(), png)]),
+        None => (plain_tail(&combined), Vec::new()),
+    }
 }
 
 pub(crate) async fn begin_live(
@@ -119,6 +195,7 @@ pub(crate) async fn live_run(
                 channel,
                 msg.id,
                 plain_tail("linked linux account is invalid; ask the owner to re-add you."),
+                Vec::new(),
             )
             .await;
             remove_live_if_tag(&live_map, channel, tag).await;
@@ -152,7 +229,15 @@ pub(crate) async fn live_run(
     let pid = match launched {
         Ok(p) => p,
         Err(e) => {
-            edit_posted(&poster, &http, channel, msg.id, plain_tail(&e.to_string())).await;
+            edit_posted(
+                &poster,
+                &http,
+                channel,
+                msg.id,
+                plain_tail(&e.to_string()),
+                Vec::new(),
+            )
+            .await;
             remove_live_if_tag(&live_map, channel, tag).await;
             return;
         }
@@ -170,40 +255,40 @@ pub(crate) async fn live_run(
                     "$ {}\n…stopped after {}s timeout; output truncated, process may still run in guest",
                     cmd, LIVE_TIMEOUT_SECS
                 )),
+                Vec::new(),
             )
             .await;
             cleanup_live_files(&vm, &out_f, &code_f).await;
             break;
         }
-        let tail = guest_exec(&vm, "/usr/bin/tail", &["-c", "1500", &out_f], true, 10)
+        // One generous fetch serves both the fallback text and the image frame.
+        let fetched = guest_exec(&vm, "/usr/bin/tail", &["-c", LIVE_FRAME_BYTES, &out_f], true, 15)
             .await
             .map(|(_, o, _)| o)
             .unwrap_or_default();
-        let tail = if scrub_ip { scrub_public_ip(&tail) } else { tail };
+        let fetched = if scrub_ip { scrub_public_ip(&fetched) } else { fetched };
         let done = guest_status(&vm, pid).await.unwrap_or(None);
-        let mut body = format!("$ {}\n{}", cmd, tail.trim_end());
         match done {
             Some(code) => {
-                if code != 0 {
-                    body.push_str(&format!("\nexit {}", code));
-                }
-                let fetched = guest_exec(&vm, "/bin/cat", &[&out_f], true, 30)
+                let full = guest_exec(&vm, "/bin/cat", &[&out_f], true, 30)
                     .await
                     .map(|(_, o, _)| o)
-                    .unwrap_or_default();
-                let fetched = if scrub_ip { scrub_public_ip(&fetched) } else { fetched };
-                let mut full_body = format!("$ {}\n{}", cmd, fetched.trim_end());
+                    .unwrap_or(fetched);
+                let full = if scrub_ip { scrub_public_ip(&full) } else { full };
+                let mut output = full.trim_end().to_string();
                 if code != 0 {
-                    full_body.push_str(&format!("\nexit {}", code));
+                    output.push_str(&format!("\nexit {}", code));
                 }
-                let view = if fetched.trim().is_empty() { &body } else { &full_body };
-                edit_posted(&poster, &http, channel, msg.id, plain_tail(view)).await;
+                let header = format!("$ {}", cmd);
+                let (text, files) = live_message(&header, &output).await;
+                edit_posted(&poster, &http, channel, msg.id, text, files).await;
                 cleanup_live_files(&vm, &out_f, &code_f).await;
                 break;
             }
             None => {
-                body.push_str("\n…live");
-                if !edit_posted(&poster, &http, channel, msg.id, plain_tail(&body)).await {
+                let header = format!("$ {}\n…live", cmd);
+                let (text, files) = live_message(&header, fetched.trim_end()).await;
+                if !edit_posted(&poster, &http, channel, msg.id, text, files).await {
                     cleanup_live_files(&vm, &out_f, &code_f).await;
                     break;
                 }

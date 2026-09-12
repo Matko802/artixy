@@ -55,6 +55,47 @@ mod tests {
     }
 
     #[test]
+    fn plain_tail_counts_chars_not_bytes() {
+        // jefetch-style wide Unicode: 3 bytes/char; a byte-starved tail would
+        // show almost nothing, but plain_tail fits by chars.
+        let line = "▗▒▓▓▓▓▓▒▒▒▄▄░▒▒▒▓▒ CPU-> AMD Ryzen 5 5600G (2) @ 3.89 GHz";
+        let body = (0..60).map(|i| format!("{} {}", line, i)).collect::<Vec<_>>().join("\n");
+        let out = plain_tail(&body);
+        assert!(out.chars().count() <= 2000, "fits Discord limit, got {}", out.chars().count());
+        assert!(out.contains(" 59"), "bottom kept");
+        assert!(!out.contains(" 00\n") && !out.starts_with("```\n▗▒▓▓▓▓▓▒▒▒▄▄░▒▒▒▓▒ CPU-> AMD Ryzen 5 5600G (2) @ 3.89 GHz 00"), "head dropped");
+        assert!(out.contains('…'), "truncation marked");
+    }
+
+    #[test]
+    fn frame_text_caps_rows_cols_and_sizes_image() {
+        let (text, w, h) = frame_text("ab\ncde");
+        assert_eq!(text, "ab\ncde");
+        assert_eq!(w, 3 * 10 + 20, "cols drive width");
+        assert_eq!(h, 2 * 20 + 20, "rows drive height");
+        let (empty_text, _, _) = frame_text("");
+        assert_eq!(empty_text, "(empty)");
+        let (empty_ws, _, _) = frame_text("   \n  ");
+        assert_eq!(empty_ws.split('\n').count(), 2);
+    }
+
+    #[test]
+    fn frame_text_strips_ansi_expands_tabs_keeps_bottom() {
+        let (text, _, _) = frame_text("\x1b[0;32m$ cmd\x1b[0m\na\tb");
+        assert!(!text.contains('\x1b'), "no escapes, got {:?}", text);
+        assert!(text.contains("a        b"), "tabs expanded, got {:?}", text);
+        let long = (0..100).map(|i| format!("line {:03}", i)).collect::<Vec<_>>().join("\n");
+        let (text, _, h) = frame_text(&long);
+        assert!(text.contains("line 099"), "bottom kept");
+        assert!(!text.contains("line 000\n"), "head dropped");
+        assert_eq!(h, 80 * 20 + 20, "rows capped at 80");
+        let wide = "x".repeat(200);
+        let (text, w, _) = frame_text(&wide);
+        assert_eq!(text.chars().count(), 120, "cols capped at 120");
+        assert_eq!(w, 120 * 10 + 20);
+    }
+
+    #[test]
     fn tabs_expand_to_spaces() {
         let out = sanitize_ansi("a\tb");
         assert_eq!(out, "a        b", "got {:?}", out);
