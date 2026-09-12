@@ -187,6 +187,23 @@ mod tests {
     }
 
     #[test]
+    fn terminal_viewport_shows_latest_after_scroll() {
+        use alacritty_terminal::index::{Column, Line};
+        use crate::termrender::*;
+        // Real pty output uses CRLF (ONLCR); bare LF alone drifts right.
+        let body: String = (0..100).map(|i| format!("line {:03}\r\n", i)).collect();
+        let term = emulate_output(body.as_bytes());
+        let grid = term.grid();
+        let top: String = (0..8).map(|c| grid[Line(0)][Column(c)].c).collect();
+        let bottom: String = (0..8).map(|c| grid[Line(39)][Column(c)].c).collect();
+        eprintln!("top={:?} bottom={:?}", top, bottom);
+        // Trailing newline leaves the cursor on its own blank row, like a
+        // real terminal; the newest content sits right above it.
+        assert_eq!(top, "line 061", "viewport top follows scroll");
+        assert_eq!(bottom, "        ", "cursor row is blank");
+    }
+
+    #[test]
     fn terminal_colors_resolve_sanely() {
         use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
         use crate::termrender::*;
@@ -211,11 +228,48 @@ mod tests {
         let bold =
             crate::termrender::system_font_bytes("DejaVu Sans Mono:weight=bold").unwrap_or_else(|| reg.clone());
         let fonts = TermFonts::load(&reg, &bold).expect("fonts parse");
-        let png = render_terminal(&fonts, &raw).expect("renders");
+        let mut region = None;
+        let png = render_terminal(&fonts, &raw, &mut region).expect("renders");
         std::fs::write("/tmp/termproof.png", &png).unwrap();
         let (w, h) = fonts.canvas();
         eprintln!("rendered {}x{} ({} bytes)", w, h, png.len());
         assert!(png.len() > 20_000, "a real frame is not tiny");
+    }
+
+    #[test]
+    fn terminal_content_region_skips_empty_edges() {
+        use crate::termrender::*;
+        assert_eq!(content_region(&emulate_output(b"hi")), (0, 1, 2));
+        assert_eq!(content_region(&emulate_output(b"")), (0, 0, 0));
+        // CRLF like real pty output (bare LF would drift right, no CR).
+        assert_eq!(
+            content_region(&emulate_output(b"\r\n\r\nab\r\ncde\r\n\r\n\r\n")),
+            (2, 2, 3),
+            "blank edges are outside the box"
+        );
+        // Bg-colored blanks count (palette swatches), glyph-less rows don't.
+        let term = emulate_output(b"\x1b[41m   \x1b[0m\r\nplain\r\n\r\n\r\n");
+        assert_eq!(content_region(&term), (0, 2, 5));
+    }
+
+    #[test]
+    fn terminal_quantize_floors_buckets_and_locks() {
+        use crate::termrender::*;
+        assert_eq!(quantize_region(0, 0, None), (60, 12), "floor");
+        assert_eq!(quantize_region(5, 3, None), (60, 12), "below floor");
+        assert_eq!(quantize_region(21, 9, None), (60, 16), "floor beats small buckets");
+        assert_eq!(quantize_region(120, 40, None), (120, 40), "ceiling");
+        assert_eq!(quantize_region(999, 999, None), (120, 40), "clamped");
+        assert_eq!(
+            quantize_region(5, 3, Some((100, 32))),
+            (100, 32),
+            "lock wins upward"
+        );
+        assert_eq!(
+            quantize_region(110, 40, Some((60, 12))),
+            (120, 40),
+            "content still grows the lock"
+        );
     }
 
     #[test]

@@ -28,6 +28,13 @@ pub(crate) const TERM_COLS: usize = 120;
 pub(crate) const TERM_ROWS: usize = 40;
 const FONT_PX: f32 = 28.0;
 const PAD: u32 = 10;
+// Rendered region buckets: coarse enough that growing output resizes rarely,
+// fine enough that small output isn't a thumbnail. Plus a floor and the
+// per-run grow-only lock (see quantize_region).
+const COL_STEP: usize = 20;
+const ROW_STEP: usize = 8;
+const MIN_COLS: u32 = 60;
+const MIN_ROWS: u32 = 12;
 
 const BG: [u8; 3] = [0x0b, 0x0e, 0x14];
 const FG: [u8; 3] = [0xe6, 0xe6, 0xe6];
@@ -221,19 +228,84 @@ pub(crate) fn emulate_output(output: &[u8]) -> Term<VoidListener> {
     term
 }
 
+/// Visible content bounding box of the viewport: (first_row, rows, cols).
+/// A cell counts as content when it holds a glyph or a non-default
+/// background (e.g. palette swatches); empty rows above/below are dropped so
+/// sparse output doesn't render as a giant dark rectangle.
+pub(crate) fn content_region(term: &Term<VoidListener>) -> (usize, usize, usize) {
+    let grid = term.grid();
+    let mut first: Option<usize> = None;
+    let mut last = 0usize;
+    let mut cols = 0usize;
+    for row in 0..TERM_ROWS {
+        let line = &grid[Line(row as i32)];
+        let mut row_cols = 0usize;
+        for col in 0..TERM_COLS {
+            let cell = &line[Column(col)];
+            if cell.c != ' ' || resolve_color(cell.bg) != BG {
+                row_cols = col + 1;
+            }
+        }
+        if row_cols > 0 {
+            if first.is_none() {
+                first = Some(row);
+            }
+            last = row;
+            cols = cols.max(row_cols);
+        }
+    }
+    match first {
+        Some(f) => (f, last - f + 1, cols),
+        None => (0, 0, 0),
+    }
+}
+
+/// Snap a content box to bucket boundaries with a floor and the full page as
+/// ceiling; `lock` (earlier frame of the same run) wins upward so the picture
+/// never shrinks mid-run. Returns cell counts (cols, rows).
+pub(crate) fn quantize_region(cols: usize, rows: usize, lock: Option<(u32, u32)>) -> (u32, u32) {
+    let bucket_cols = ((cols + COL_STEP - 1) / COL_STEP * COL_STEP) as u32;
+    let bucket_rows = ((rows + ROW_STEP - 1) / ROW_STEP * ROW_STEP) as u32;
+    let mut w = bucket_cols.clamp(MIN_COLS, TERM_COLS as u32);
+    let mut h = bucket_rows.clamp(MIN_ROWS, TERM_ROWS as u32);
+    if let Some((lw, lh)) = lock {
+        w = w.max(lw);
+        h = h.max(lh);
+    }
+    (w, h)
+}
+
 /// Rasterize one full terminal page to PNG bytes.
-pub(crate) fn render_terminal(fonts: &TermFonts, output: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn render_terminal(
+    fonts: &TermFonts,
+    output: &[u8],
+    region: &mut Option<(u32, u32)>,
+) -> Option<Vec<u8>> {
     let term = emulate_output(output);
-    let (w, h) = fonts.canvas();
+    let (first, rows, cols) = content_region(&term);
+    let (cols_q, rows_q) = quantize_region(cols, rows, *region);
+    *region = Some((cols_q, rows_q));
+    let w = cols_q * fonts.cell_w + PAD * 2;
+    let h = rows_q * fonts.cell_h + PAD * 2;
+    // Center leftover slack under the content (matches the old behavior for
+    // small frames); content itself starts at `first`.
+    let content_h = rows.min(rows_q as usize) as u32 * fonts.cell_h;
+    let y0 = PAD as i32 + (h.saturating_sub(content_h + PAD * 2) / 2) as i32;
     let mut img = vec![0u8; (w * h * 3) as usize];
     for px in img.chunks_exact_mut(3) {
         px.copy_from_slice(&BG);
     }
     let mut cache: HashMap<(char, bool), (fontdue::Metrics, Vec<u8>)> = HashMap::new();
     let grid = term.grid();
-    for row in 0..TERM_ROWS as i32 {
-        let line = &grid[Line(row)];
-        for col in 0..TERM_COLS {
+    let rows_draw = rows.min(rows_q as usize);
+    let cols_draw = cols.min(cols_q as usize);
+    for r in 0..rows_draw {
+        let row = first + r;
+        if row >= TERM_ROWS {
+            break;
+        }
+        let line = &grid[Line(row as i32)];
+        for col in 0..cols_draw.min(TERM_COLS) {
             let cell = &line[Column(col)];
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
                 || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
@@ -251,7 +323,7 @@ pub(crate) fn render_terminal(fonts: &TermFonts, output: &[u8]) -> Option<Vec<u8
                 fg = bg;
             }
             let cx = col as i32 * fonts.cell_w as i32 + PAD as i32;
-            let cy = row as i32 * fonts.cell_h as i32 + PAD as i32;
+            let cy = y0 + r as i32 * fonts.cell_h as i32;
             if bg != BG {
                 let x1 = (cx + fonts.cell_w as i32).min(w as i32);
                 let y1 = (cy + fonts.cell_h as i32).min(h as i32);

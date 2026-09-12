@@ -86,9 +86,10 @@ async fn live_message(
     fonts: Option<&TermFonts>,
     cmd: &str,
     output: &str,
+    region: &mut Option<(u32, u32)>,
 ) -> (String, Vec<(String, Vec<u8>)>) {
     let caption = format!("$ {}", cmd);
-    match fonts.and_then(|f| crate::termrender::render_terminal(f, output.as_bytes())) {
+    match fonts.and_then(|f| crate::termrender::render_terminal(f, output.as_bytes(), region)) {
         Some(png) => (caption, vec![("live.png".to_string(), png)]),
         None => {
             let mut combined = caption.clone();
@@ -229,6 +230,9 @@ pub(crate) async fn live_run(
         }
     };
     let mut first = true;
+    // Render region locked by the first frame: same picture size for the
+    // whole run (grows only if content outgrows it), so updates never jitter.
+    let mut region: Option<(u32, u32)> = None;
     let mut last_hash: u64 = 0;
     let mut hashed_once = false;
     loop {
@@ -282,7 +286,7 @@ pub(crate) async fn live_run(
                     edit_posted(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await;
                 } else {
                     let (text, files) =
-                        live_message(fonts.as_ref(), &cmd, &output).await;
+                        live_message(fonts.as_ref(), &cmd, &output, &mut region).await;
                     edit_posted(&poster, &http, channel, msg.id, text, files).await;
                 }
                 cleanup_live_files(&vm, &out_f, &code_f).await;
@@ -304,7 +308,7 @@ pub(crate) async fn live_run(
                 // Raw bytes: the emulator handles clears, redraws and
                 // scrollback natively, so no text preprocessing here.
                 let (text, files) =
-                    live_message(fonts.as_ref(), &cmd, &fetched).await;
+                    live_message(fonts.as_ref(), &cmd, &fetched, &mut region).await;
                 if !edit_posted(&poster, &http, channel, msg.id, text, files).await {
                     cleanup_live_files(&vm, &out_f, &code_f).await;
                     break;
