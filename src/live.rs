@@ -38,12 +38,14 @@ const GUEST_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH";
 /// programs wrap and format for what the picture shows and switch to
 /// line-buffered streaming output. Child stdin comes from `input`: a fifo for
 /// interactive runs (replies to the live message are typed into it), or
-/// /dev/null for instant EOF. Stdout/stderr stay on the pty. Falls back to a
-/// plain shell when `script` is missing. Returns exit code via the code file.
+/// /dev/null for instant EOF. The fifo is opened read-write (`<>`) so the
+/// command starts immediately with no writer present; reads then block until
+/// someone types, and never see spurious EOF. Stdout/stderr stay on the pty.
+/// Falls back to a plain shell when `script` is missing. Exit code via file.
 pub(crate) fn build_runner(shell: &str, b64: &str, out_f: &str, code_f: &str, input: &str) -> String {
     use crate::termrender::{TERM_COLS, TERM_ROWS};
     format!(
-        "export CMD_DATA=\"$(echo {b64} | base64 -d)\"; if command -v script >/dev/null 2>&1; then script -qec 'export TERM=xterm-256color; stty cols {cols} rows {rows} -echo; {shell} -c '\\''export PATH={path}; eval \"$CMD_DATA\"'\\'' < {input}' /dev/null </dev/null; else {shell} -c 'export PATH={path}; eval \"$CMD_DATA\"' < {input}; fi > {out_f} 2>&1; echo $? > {code_f}",
+        "export CMD_DATA=\"$(echo {b64} | base64 -d)\"; if command -v script >/dev/null 2>&1; then script -qec 'export TERM=xterm-256color; stty cols {cols} rows {rows} -echo; {shell} -c '\\''export PATH={path}; eval \"$CMD_DATA\"'\\'' <> {input}' /dev/null </dev/null; else {shell} -c 'export PATH={path}; eval \"$CMD_DATA\"' <> {input}; fi > {out_f} 2>&1; echo $? > {code_f}",
         b64 = b64,
         cols = TERM_COLS,
         rows = TERM_ROWS,

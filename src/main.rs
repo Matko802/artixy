@@ -145,13 +145,13 @@ mod tests {
         assert!(s.contains("CMD_DATA"), "command travels via env, not text");
         assert!(s.contains("script -qec"), "pty path first");
         assert!(s.contains("else bash -c"), "plain fallback");
-        assert!(s.contains("< /tmp/o.in"), "child stdin is the input fifo");
+        assert!(s.contains("<> /tmp/o.in"), "fifo opens read-write (never blocks)");
         assert!(s.contains("> /tmp/o.out 2>&1"), "output captured");
         assert!(s.contains("echo $? > /tmp/o.code"), "exit code kept");
         assert!(!s.contains("$(cat)"), "no pipe-through-pty (EOF would hang)");
         let sh = crate::live::build_runner("sh", "QkI2NA==", "/tmp/o.out", "/tmp/o.code", "/dev/null");
         assert!(sh.contains("else sh -c"), "sh fallback mirrors bash");
-        assert!(sh.contains("< /dev/null"), "null input stays EOF-fast");
+        assert!(sh.contains("<> /dev/null"), "null input stays EOF-fast");
         eprintln!("RUNNER=<<{}>>", s);
     }
 
