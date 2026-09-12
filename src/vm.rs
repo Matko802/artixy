@@ -1,4 +1,4 @@
-use crate::{config::Data, util::valid_runas, Error};
+use crate::{config::Data, Error};
 
 pub(crate) async fn virsh(args: &[&str]) -> Result<String, Error> {
     let out = tokio::process::Command::new("virsh")
@@ -158,15 +158,6 @@ pub(crate) async fn guest_launch_raw(vm: &str, path: &str, args: &[&str], captur
     Err("launch: agent returned empty response 3x".into())
 }
 
-pub(crate) async fn user_shell(data: &Data, uid: u64) -> String {
-    data.shells
-        .read()
-        .await
-        .get(&uid.to_string())
-        .cloned()
-        .unwrap_or_else(|| "bash".into())
-}
-
 pub(crate) async fn linked_user(data: &Data, uid: u64) -> Option<String> {
     data.allowed
         .read()
@@ -174,66 +165,5 @@ pub(crate) async fn linked_user(data: &Data, uid: u64) -> Option<String> {
         .linux
         .get(&uid.to_string())
         .cloned()
-}
-
-pub(crate) async fn run_guest_cmd(vm: &str, shell: &str, cmd_text: &str, runas: Option<&str>, timeout_s: u64) -> Result<(String, i64), Error> {
-    if let Some(u) = runas {
-        if !valid_runas(u) {
-            return Ok((
-                "Linked linux account is invalid; ask the owner to re-add you.".into(),
-                -1,
-            ));
-        }
-    }
-    if !agent_ping(vm).await {
-        return Ok((
-            "Guest agent is silent. Install `qemu-guest-agent` in Artix first.".into(),
-            -1,
-        ));
-    }
-    let (sh_path, setup, guard) = if shell == "fish" {
-        ("/usr/sbin/fish", "set -gx SHELL /usr/sbin/fish; set -gx PATH $HOME/.local/bin $HOME/bin /usr/local/bin $PATH; ", "$status")
-    } else {
-        ("/bin/bash", "export SHELL=/bin/bash PATH=\"$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH\"; ", "$?")
-    };
-    let inner = cmd_text.trim().trim_end_matches(';').trim_end();
-    let shcmd = format!("{}{}; exit {}", setup, inner, guard);
-    let (lpath, largs): (&str, Vec<&str>) = match runas {
-        Some(u) => ("su", vec![u, "-s", sh_path, "-c", &shcmd]),
-        None => (sh_path, vec!["-c", &shcmd]),
-    };
-    let run = guest_exec(vm, lpath, &largs, true, timeout_s).await;
-    let run = match run {
-        Err(e) if e.to_string().contains("No such file") && sh_path != "/bin/bash" => {
-            let fallback =
-                format!("export SHELL=/bin/bash; {}; exit $?", inner);
-            let (lpath2, largs2): (&str, Vec<&str>) = match runas {
-                Some(u) => ("su", vec![u, "-s", "/bin/bash", "-c", &fallback]),
-                None => ("/bin/bash", vec!["-c", &fallback]),
-            };
-            guest_exec(vm, lpath2, &largs2, true, timeout_s).await
-        }
-        other => other,
-    };
-    match run {
-        Ok((code, out, err)) => {
-            let mut body = format!(
-                "\u{1b}[0;32m$ {}\u{1b}[0m\n{}",
-                cmd_text.trim(),
-                out.trim_end()
-            );
-            if !err.trim().is_empty() {
-                body.push_str(&format!(
-                    "\n\u{1b}[0;31mstderr:\u{1b}[0m\n{}",
-                    err.trim_end()
-                ));
-            }
-            if code != 0 {
-                body.push_str(&format!("\n\u{1b}[0;31mexit {}\u{1b}[0m", code));
-            }
-            Ok((body, code))
-        }
-        Err(e) => Ok((e.to_string(), -1)),
-    }
 }
 

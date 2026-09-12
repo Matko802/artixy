@@ -158,7 +158,7 @@ pub(crate) fn codeblock(s: &str) -> String {
     if t.is_empty() {
         t = "(empty)".into();
     }
-    format!("```ansi\n{}\n```", t)
+    format!("```\n{}\n```", t)
 }
 
 pub(crate) fn fit_bottom_lines(body: &str) -> (String, bool) {
@@ -189,15 +189,6 @@ pub(crate) fn fit_bottom_lines(body: &str) -> (String, bool) {
     }
     kept.reverse();
     (kept.join("\n"), truncated)
-}
-
-pub(crate) fn fence_inline(fitted: &str) -> String {
-    let t = if fitted.trim().is_empty() {
-        "(empty)".to_string()
-    } else {
-        fitted.to_string()
-    };
-    format!("```ansi\n{}\n```", t)
 }
 
 pub(crate) fn plain_tail(body: &str) -> String {
@@ -258,7 +249,6 @@ pub(crate) fn cap_file_body(clean: &str) -> String {
         v[start..].iter().collect::<String>()
     )
 }
-
 pub(crate) fn attach_name(cmd: &str) -> String {
     let w: String = cmd
         .split_whitespace()
@@ -272,6 +262,53 @@ pub(crate) fn attach_name(cmd: &str) -> String {
     } else {
         format!("{}.txt", w)
     }
+}
+
+/// Locate a helper binary without relying on PATH (systemd services run with
+/// a minimal PATH that often lacks ffmpeg/fontconfig on NixOS).
+pub(crate) fn tool_path(name: &str) -> Option<std::path::PathBuf> {
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    dirs.push("/run/current-system/sw/bin".into());
+    dirs.push("/run/wrappers/bin".into());
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        dirs.push(home.join(".nix-profile/bin"));
+        if let Ok(rd) = std::fs::read_dir("/etc/profiles/per-user") {
+            for e in rd.flatten() {
+                dirs.push(e.path().join("bin"));
+            }
+        }
+    }
+    dirs.push("/nix/profile/bin".into());
+    dirs.push("/usr/local/bin".into());
+    dirs.push("/usr/bin".into());
+    dirs.push("/bin".into());
+    for d in &dirs {
+        let p = d.join(name);
+        if is_executable(&p) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn is_executable(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.is_file()
+        && p.metadata()
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(p: &std::path::Path) -> bool {
+    p.is_file()
 }
 
 

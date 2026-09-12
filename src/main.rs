@@ -10,7 +10,7 @@ mod webhook;
 use poise::serenity_prelude as serenity;
 
 use crate::commands::{
-    botrestart, help, info, live, notify, ps, purge_replies, restart, run, send, shell, shot,
+    botrestart, help, info, notify, ps, purge_replies, restart, run, send, shell, shot,
     start, status, stop, user, useradd, userdel, userlist, users, warmode,
 };
 use crate::commands::BOOT_ART;
@@ -93,6 +93,16 @@ mod tests {
         let (text, w, _) = frame_text(&wide);
         assert_eq!(text.chars().count(), 120, "cols capped at 120");
         assert_eq!(w, 120 * 10 + 20);
+    }
+
+    #[test]
+    fn tool_path_finds_shell_and_rejects_junk() {
+        let sh = tool_path("sh");
+        assert!(sh.is_some(), "sh must resolve even with a minimal PATH");
+        assert!(sh.unwrap().is_absolute());
+        assert!(tool_path("definitely-not-a-real-tool-xyz").is_none());
+        assert!(tool_path("").is_none());
+        assert!(tool_path("a/b").is_none());
     }
 
     #[test]
@@ -337,7 +347,6 @@ async fn main() {
                 shell(),
                 botrestart(),
                 run(),
-                live(),
                 shot(),
                 send(),
                 notify(),

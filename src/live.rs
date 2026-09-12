@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::{
     scrub::scrub_public_ip,
-    util::{frame_text, plain_tail, random_suffix, valid_runas},
+    util::{frame_text, plain_tail, random_suffix, tool_path, valid_runas},
     vm::{guest_exec, guest_launch_raw, guest_status},
     webhook::{edit_posted, resolve_poster, Poster},
 };
@@ -19,6 +19,9 @@ pub(crate) type LiveMap = std::sync::Arc<
 
 pub(crate) const LIVE_TIMEOUT_SECS: u64 = 600;
 pub(crate) const LIVE_POLL_SECS: u64 = 5;
+/// First poll comes sooner: commands finishing inside this window get a plain
+/// text reply instead of the live image feed.
+pub(crate) const LIVE_QUICK_SECS: u64 = 3;
 /// Guest output fetched per poll for the image frame (bytes, not chars).
 const LIVE_FRAME_BYTES: &str = "200000";
 
@@ -46,8 +49,9 @@ pub(crate) async fn cleanup_live_files(vm: &str, out_f: &str, code_f: &str) {
 
 /// Locate a monospace font for frame rendering.
 async fn mono_font() -> Option<String> {
+    let fc = tool_path("fc-match")?;
     for fam in ["DejaVu Sans Mono", "Liberation Mono"] {
-        let out = tokio::process::Command::new("fc-match")
+        let out = tokio::process::Command::new(&fc)
             .args([fam, "--format=%{file}"])
             .output()
             .await
@@ -69,7 +73,20 @@ fn esc_filter_arg(s: &str) -> String {
 /// Render stripped terminal text to a PNG via ffmpeg drawtext.
 /// Returns PNG bytes, or None when rendering is unavailable (caller falls back to text).
 async fn render_frame(text: &str, w: u32, h: u32) -> Option<Vec<u8>> {
-    let font = mono_font().await?;
+    let font = match mono_font().await {
+        Some(f) => f,
+        None => {
+            eprintln!("live: no monospace font found (fc-match missing?); text fallback");
+            return None;
+        }
+    };
+    let ffmpeg = match tool_path("ffmpeg") {
+        Some(p) => p,
+        None => {
+            eprintln!("live: ffmpeg not found; text fallback");
+            return None;
+        }
+    };
     let tag = random_suffix();
     let dir = std::env::temp_dir();
     let txt = dir.join(format!("artixy-live-{}-{}.txt", std::process::id(), tag));
@@ -84,7 +101,7 @@ async fn render_frame(text: &str, w: u32, h: u32) -> Option<Vec<u8>> {
     let png_s = png.to_string_lossy().to_string();
     let run = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        tokio::process::Command::new("ffmpeg")
+        tokio::process::Command::new(&ffmpeg)
             .args([
                 "-y", "-v", "error", "-f", "lavfi", "-i", &input, "-vf", &vf, "-frames:v",
                 "1", "-c:v", "png", &png_s,
@@ -92,7 +109,24 @@ async fn render_frame(text: &str, w: u32, h: u32) -> Option<Vec<u8>> {
             .output(),
     )
     .await;
-    let ok = matches!(run, Ok(Ok(ref o)) if o.status.success());
+    let ok = match run {
+        Ok(Ok(ref o)) if o.status.success() => true,
+        Ok(Ok(ref o)) => {
+            eprintln!(
+                "live: ffmpeg failed; text fallback ({}).",
+                String::from_utf8_lossy(&o.stderr).trim().chars().take(300).collect::<String>()
+            );
+            false
+        }
+        Ok(Err(e)) => {
+            eprintln!("live: ffmpeg spawn failed ({}); text fallback", e);
+            false
+        }
+        Err(_) => {
+            eprintln!("live: ffmpeg timed out; text fallback");
+            false
+        }
+    };
     let _ = tokio::fs::remove_file(&txt).await;
     if !ok {
         let _ = tokio::fs::remove_file(&png).await;
@@ -118,7 +152,7 @@ async fn live_message(header: &str, output: &str) -> (String, Vec<(String, Vec<u
     }
 }
 
-pub(crate) async fn begin_live(
+pub(crate) async fn begin_run(
     http: std::sync::Arc<serenity::Http>,
     ack: serenity::Message,
     author_id: u64,
@@ -169,7 +203,7 @@ pub(crate) async fn begin_live(
             code_f,
         },
     );
-    eprintln!("live started for {} (id {})", author_name, author_id);
+    eprintln!("run started for {} (id {})", author_name, author_id);
 }
 
 pub(crate) async fn live_run(
@@ -243,8 +277,10 @@ pub(crate) async fn live_run(
         }
     };
     let started = std::time::Instant::now();
+    let mut first = true;
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(LIVE_POLL_SECS)).await;
+        let wait = if first { LIVE_QUICK_SECS } else { LIVE_POLL_SECS };
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
         if started.elapsed().as_secs() > LIVE_TIMEOUT_SECS {
             edit_posted(
                 &poster,
@@ -280,8 +316,18 @@ pub(crate) async fn live_run(
                     output.push_str(&format!("\nexit {}", code));
                 }
                 let header = format!("$ {}", cmd);
-                let (text, files) = live_message(&header, &output).await;
-                edit_posted(&poster, &http, channel, msg.id, text, files).await;
+                if first {
+                    // Fast command: plain truncated text, no image, no file.
+                    let combined = if output.trim().is_empty() {
+                        header.clone()
+                    } else {
+                        format!("{}\n{}", header, output.trim_end())
+                    };
+                    edit_posted(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await;
+                } else {
+                    let (text, files) = live_message(&header, &output).await;
+                    edit_posted(&poster, &http, channel, msg.id, text, files).await;
+                }
                 cleanup_live_files(&vm, &out_f, &code_f).await;
                 break;
             }
@@ -294,6 +340,7 @@ pub(crate) async fn live_run(
                 }
             }
         }
+        first = false;
     }
     remove_live_if_tag(&live_map, channel, tag).await;
 }
