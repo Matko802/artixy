@@ -158,21 +158,16 @@ async fn render_frame(font: Option<&str>, text: &str, w: u32, h: u32) -> Option<
     if bytes.is_empty() { None } else { Some(bytes) }
 }
 
-/// Build the live message: `$ cmd` (+ status) as plain text, picture of the
-/// output alone underneath. Falls back to a fenced plain-text block (with
-/// the header for context) when rendering is unavailable.
+/// Build the live message: `$ cmd` as plain text, picture of the output
+/// alone underneath. Falls back to a fenced plain-text block (with the
+/// header for context) when rendering is unavailable.
 async fn live_message(
     font: Option<&str>,
     cmd: &str,
-    status: Option<&str>,
     output: &str,
 ) -> (String, Vec<(String, Vec<u8>)>) {
     let output = after_last_clear(output);
-    let mut caption = format!("$ {}", cmd);
-    if let Some(s) = status {
-        caption.push('\n');
-        caption.push_str(s);
-    }
+    let caption = format!("$ {}", cmd);
     let (img_text, w, h) = frame_text(output);
     match render_frame(font, &img_text, w, h).await {
         Some(png) => (caption, vec![("live.png".to_string(), png)]),
@@ -353,9 +348,13 @@ pub(crate) async fn live_run(
                     .unwrap_or(fetched);
                 let full = if scrub_ip { scrub_public_ip(&full) } else { full };
                 let header = format!("$ {}", cmd);
+                // Exit status lives in the output itself (caption is bare `$ cmd`).
+                let mut output = full.trim_end().to_string();
+                if code != 0 {
+                    output.push_str(&format!("\nexit {}", code));
+                }
                 if first {
                     // Fast command: plain truncated text, no image, no file.
-                    let output = after_last_clear(full.trim_end());
                     let combined = if output.trim().is_empty() {
                         header.clone()
                     } else {
@@ -363,13 +362,8 @@ pub(crate) async fn live_run(
                     };
                     edit_posted(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await;
                 } else {
-                    let status = if code != 0 {
-                        Some(format!("exit {}", code))
-                    } else {
-                        None
-                    };
                     let (text, files) =
-                        live_message(font.as_deref(), &cmd, status.as_deref(), full.trim_end()).await;
+                        live_message(font.as_deref(), &cmd, &output).await;
                     edit_posted(&poster, &http, channel, msg.id, text, files).await;
                 }
                 cleanup_live_files(&vm, &out_f, &code_f).await;
@@ -392,7 +386,7 @@ pub(crate) async fn live_run(
                 // after a clear shows the previous frame instead of nothing.
                 let frame = current_frame(fetched.trim_end());
                 let (text, files) =
-                    live_message(font.as_deref(), &cmd, Some("…live"), frame).await;
+                    live_message(font.as_deref(), &cmd, frame).await;
                 if !edit_posted(&poster, &http, channel, msg.id, text, files).await {
                     cleanup_live_files(&vm, &out_f, &code_f).await;
                     break;
