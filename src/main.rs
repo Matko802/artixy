@@ -3,8 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Default, Clone)]
-struct PrefixSettings {
-    semicolon: Option<String>,
+struct BotSettings {
     #[serde(default)]
     notify_channel: Option<u64>,
 }
@@ -13,7 +12,7 @@ struct Data {
     allowed: tokio::sync::RwLock<Allowed>,
     vm: String,
     live: LiveMap,
-    settings: tokio::sync::RwLock<PrefixSettings>,
+    settings: tokio::sync::RwLock<BotSettings>,
     shells: tokio::sync::RwLock<std::collections::HashMap<String, String>>,
 }
 struct LiveEntry {
@@ -752,11 +751,10 @@ async fn send_output(ctx: Context<'_>, cmd: &str, body: &str) -> Result<(), Erro
 }
 
 const HELP: &str = "\
-**artixy — your Artix VM in your pocket.** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me.\n\
-\n**VM**\n`;ps` — state of the VM\n`;status` — quick state + agent check\n`;start` — power on + wait for guest agent\n`;stop` — graceful shutdown\n`;restart` — reboot\n`;info` — details + agent status\n\
-\n**Who can use me**\n`;users` / `;userlist` — show owner + managers\n`;useradd @user` (prefix only) — owner only: links them and creates their Linux account in Artix (name from discord name).\n`;userdel @user` (prefix only) — owner only: revokes bot access and deletes their Linux account in the VM\n`;shell [fish|bash]` — your `$` interpreter (default bash)\n`;notify <#channel|off>` (prefix only) — owner only: where I post my boot message, unset means silent\n`;run <command>` — same as `;`, prefix only\n\
-\nPrefix starts OFF — slash commands always work. Owner turns it on in `/settings` (e.g. `/settings semicolon ;`).\n\
-\n**Run real commands in Artix**\n`;` followed by anything — runs it for real inside the VM through the guest agent and prints the output. e.g. `;sudo pacman -Syu`, `;ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`;live <command>` — follows one run live in a single message until it finishes. Starting another run stops it.\n`;shot` — screenshot of the host screen, uploaded here\n`;send <path>` — upload a host file here (absolute path, ~20MB max)\n\
+**artixy — your Artix VM in your pocket.** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me. Slash commands only.\n\
+\n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
+\n**Who can use me**\n`/users` / `/userlist` — show owner + managers\n`/useradd @user` — owner only: links them and creates their Linux account in Artix (name from discord name).\n`/userdel @user` — owner only: revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/run <command>` — run it for real inside the VM, prints the output\n\
+\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`/live <command>` — follows one run live in a single message until it finishes. Starting another run stops it.\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
 #[poise::command(slash_command, prefix_command)]
@@ -920,7 +918,7 @@ async fn shell(
         None => {
             let cur = ctx.data().shells.read().await;
             ctx.say(format!(
-                "Your shell: `{}`. Change with `;shell fish` or `;shell bash`.",
+                "Your shell: `{}`. Change with `/shell fish` or `/shell bash`.",
                 cur.get(&key).map(|s| s.as_str()).unwrap_or("bash")
             ))
             .await?;
@@ -1064,7 +1062,7 @@ async fn run(
 async fn do_live(ctx: Context<'_>, cmd: String) -> Result<(), Error> {
     maybe_defer(ctx).await;
     if cmd.trim().is_empty() {
-        ctx.say("Usage: `;live <command>`.").await?;
+        ctx.say("Usage: `/live <command>`.").await?;
         return Ok(());
     }
     let vm = ctx.data().vm.clone();
@@ -1240,84 +1238,21 @@ async fn userdel(
     do_userdel(ctx, &user).await
 }
 
-fn settings_text(s: &PrefixSettings) -> String {
-    let show = |v: &Option<String>| match v {
-        Some(p) => format!("ON `{}`", p),
-        None => "OFF".into(),
-    };
-    format!(
-        "Prefix (slash commands always work):\n; slot: {}\nChange (owner only): `/settings semicolon <off|;|…>` — 1-2 symbol chars, or `off`.\nBoot messages: {}",
-        show(&s.semicolon),
-        match s.notify_channel {
-            Some(id) => format!("<#{}>", id),
-            None => "OFF".into(),
-        }
-    )
-}
-
-async fn do_settings_set(ctx: Context<'_>, value: String) -> Result<(), Error> {
-    if !is_owner(ctx).await {
-        ctx.say("Owner only.").await?;
-        return Ok(());
-    }
-    let v = value.trim();
-    {
-        let mut s = ctx.data().settings.write().await;
-        if v.eq_ignore_ascii_case("off") {
-            s.semicolon = None;
-        } else {
-            let n = v.chars().count();
-            if !(1..=2).contains(&n) || !v.chars().all(|c| !c.is_alphanumeric() && !c.is_whitespace()) {
-                ctx.say("Use `off` or 1-2 symbol chars (no letters, no spaces).")
-                    .await?;
-                return Ok(());
-            }
-            s.semicolon = Some(v.into());
-        }
-    }
-    save_settings(ctx.data()).await?;
-    let s = ctx.data().settings.read().await;
-    ctx.say(settings_text(&s)).await?;
-    Ok(())
-}
-
-#[poise::command(slash_command, prefix_command)]
-async fn settings(ctx: Context<'_>) -> Result<(), Error> {
-    if !need_auth(ctx).await? {
-        return Ok(());
-    }
-    let s = ctx.data().settings.read().await;
-    ctx.say(settings_text(&s)).await?;
-    Ok(())
-}
-
-#[poise::command(slash_command, prefix_command)]
-async fn semicolon(
-    ctx: Context<'_>,
-    #[description = "off or 1-2 symbol chars"] value: String,
-) -> Result<(), Error> {
-    do_settings_set(ctx, value).await
-}
-
 const BOOT_ART: &str = "\
-.        :-------:        ^/ \\^      :Im here:\n\
+          .        :-------:\n\
+        ^/ \\^      :Im here:\n\
         ●   ●     <:-------:\n\
        /  ω  \\\n\
       /_/   \\_\\";
 
 fn parse_channel(s: &str) -> Option<u64> {
-    let t = s.trim();
-    let inner = t
-        .strip_prefix("<#")
-        .and_then(|r| r.strip_suffix('>'))
-        .unwrap_or(t);
-    inner.parse::<u64>().ok().filter(|id| *id != 0)
+    s.trim().parse::<u64>().ok().filter(|id| *id != 0)
 }
 
 #[poise::command(slash_command, prefix_command)]
 async fn notify(
     ctx: Context<'_>,
-    #[description = "#channel for boot messages, or off"] what: Option<String>,
+    #[description = "channel ID for boot messages, or off"] what: Option<String>,
 ) -> Result<(), Error> {
     if !is_owner(ctx).await {
         ctx.say("Owner only.").await?;
@@ -1347,7 +1282,7 @@ async fn notify(
                 ctx.say(format!("Boot messages will go to `<#{id}>`.\n```\n{BOOT_ART}\n```")).await?;
             }
             None => {
-                ctx.say("Usage: `;notify <#channel|id>` or `;notify off`.").await?;
+                ctx.say("Usage: `/notify <channel-id>` or `/notify off`.").await?;
             }
         },
     }
@@ -1574,13 +1509,6 @@ async fn do_userdel(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error
     Ok(())
 }
 
-const COMMANDS: &[&str] = &[
-    "help", "ps", "status", "start", "stop", "restart", "info", "users", "user",
-    "add", "del", "useradd", "userdel", "userlist", "shell",
-    "botrestart", "run", "live",
-    "shot", "send",
-    "settings", "semicolon", "notify",
-];
 async fn begin_live(
     http: std::sync::Arc<serenity::Http>,
     ack: serenity::Message,
@@ -1745,8 +1673,6 @@ async fn live_run(
     remove_live_if_tag(&live_map, channel, tag).await;
 }
 
-const MAXTYPE: usize = 120;
-
 async fn user_shell(data: &Data, uid: u64) -> String {
     data.shells
         .read()
@@ -1826,27 +1752,6 @@ async fn run_guest_cmd(vm: &str, shell: &str, cmd_text: &str, runas: Option<&str
     }
 }
 
-fn match_slot<'a>(content: &'a str, s: &PrefixSettings) -> Option<&'a str> {
-    if let Some(p) = &s.semicolon {
-        if content.starts_with(p.as_str()) {
-            return Some(&content[p.len()..]);
-        }
-    }
-    None
-}
-
-async fn match_prefix<'a>(
-    _ctx: &'a serenity::Context,
-    msg: &'a serenity::Message,
-    data: &'a Data,
-) -> Result<Option<(&'a str, &'a str)>, Error> {
-    let s = data.settings.read().await;
-    Ok(match_slot(&msg.content, &s).map(|rest| {
-        let n = msg.content.len() - rest.len();
-        msg.content.split_at(n)
-    }))
-}
-
 async fn save_settings(data: &Data) -> Result<(), Error> {
     let s = data.settings.read().await;
     save_json(
@@ -1856,139 +1761,6 @@ async fn save_settings(data: &Data) -> Result<(), Error> {
     .await
 }
 
-async fn event_handler(
-    ctx: &serenity::Context,
-    event: &serenity::FullEvent,
-    _framework: poise::FrameworkContext<'_, Data, Error>,
-    data: &Data,
-) -> Result<(), Error> {
-    let serenity::FullEvent::Message { new_message } = event else {
-        return Ok(());
-    };
-    if new_message.author.bot {
-        return Ok(());
-    }
-    let text = {
-        let s = data.settings.read().await;
-        match match_slot(&new_message.content, &s) {
-            Some(t) => t,
-            None => return Ok(()),
-        }
-    };
-    let text = text.trim_start();
-    let text = match text.strip_prefix('/') {
-        Some(t) if !t.contains('/') => t.trim_start(),
-        _ => text,
-    };
-    let first = text.trim().split_whitespace().next().unwrap_or("");
-    if COMMANDS.contains(&first) {
-        return Ok(());
-    }
-    if text.trim().is_empty() {
-        return Ok(());
-    }
-    let id = new_message.author.id.get();
-    let (authed, vm) = {
-        let a = data.allowed.read().await;
-        (
-            (id == a.owner || a.users.contains(&id)),
-            data.vm.clone(),
-        )
-    };
-    if !authed {
-        eprintln!("denied type: {} (id {})", new_message.author.name, id);
-        return Ok(());
-    }
-    if text.chars().count() > MAXTYPE {
-        new_message
-            .reply(&ctx.http, "Too long, max 120 chars.")
-            .await?;
-        return Ok(());
-    }
-    if first == "live" {
-        let cmd = text
-            .trim()
-            .strip_prefix("live")
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if cmd.is_empty() {
-            new_message
-                .reply(&ctx.http, "Usage: `;live <command>`.")
-                .await?;
-            return Ok(());
-        }
-        if !agent_ping(&vm).await {
-            new_message
-                .reply(
-                    &ctx.http,
-                    "Guest agent is silent. Install `qemu-guest-agent` in Artix first.",
-                )
-                .await?;
-            return Ok(());
-        }
-        let http = ctx.http.clone();
-        let ack = new_message
-            .reply(&ctx.http, format!("`live: {}` starting…", cmd))
-            .await?;
-        let runas = linked_user(data, id).await;
-        let scrub_ip = data.allowed.read().await.owner != id;
-        begin_live(
-            http,
-            ack,
-            id,
-            &new_message.author.name,
-            vm,
-            cmd,
-            runas,
-            data.live.clone(),
-            scrub_ip,
-        )
-        .await;
-        return Ok(());
-    }
-    let sh = user_shell(data, id).await;
-    if let Some(old) = abort_live_for_channel(&data.live, new_message.channel_id).await {
-        cleanup_live_files(&vm, &old.out_f, &old.code_f).await;
-    }
-    let runas = linked_user(data, id).await;
-    let (body, code) = run_guest_cmd(&vm, &sh, text, runas.as_deref(), 300).await?;
-    let owner_view = data.allowed.read().await.owner == id;
-    let body = if owner_view {
-        body
-    } else {
-        scrub_public_ip(&body)
-    };
-    let clean = sanitize_ansi(body.trim_end());
-    let (fitted, truncated) = fit_bottom_lines(&clean);
-    if !truncated {
-        let msg = fence_inline(&fitted);
-        if new_message.reply(&ctx.http, msg.clone()).await.is_err() {
-            let _ = new_message.channel_id.say(&ctx.http, msg).await;
-        }
-    } else {
-        let att = serenity::CreateAttachment::bytes(
-            cap_file_body(&clean).into_bytes(),
-            attach_name(text),
-        );
-        let _ = new_message
-            .channel_id
-            .send_message(
-                &ctx.http,
-                serenity::CreateMessage::new().add_file(att),
-            )
-            .await;
-    }
-    eprintln!(
-        "exec for {} (id {}): exit {} runas={:?} cmd={:?}",
-        new_message.author.name,
-        id,
-        code,
-        runas,
-        text.trim().chars().take(60).collect::<String>()
-    );
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
@@ -2074,15 +1846,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_channel_accepts_mention_or_id() {
-        assert_eq!(parse_channel("<#123456789>"), Some(123456789));
+    fn parse_channel_accepts_id_only() {
         assert_eq!(parse_channel("123456789"), Some(123456789));
-        assert_eq!(parse_channel("  <#123456789>  "), Some(123456789));
+        assert_eq!(parse_channel("  123456789  "), Some(123456789));
         assert_eq!(parse_channel("off"), None);
         assert_eq!(parse_channel(""), None);
         assert_eq!(parse_channel("0"), None);
         assert_eq!(parse_channel("abc"), None);
-        assert_eq!(parse_channel("<#abc>"), None);
+        assert_eq!(parse_channel("<#123456789>"), None);
     }
 
     #[test]
@@ -2166,7 +1937,7 @@ async fn main() {
         .expect("OWNER_ID must be a number");
     let _ = std::env::set_current_dir(project_dir());
     let vm = std::env::var("VM_NAME").unwrap_or_else(|_| "voidvm".into());
-    let prefix_settings: PrefixSettings = tokio::fs::read_to_string("settings.json")
+    let bot_settings: BotSettings = tokio::fs::read_to_string("settings.json")
         .await
         .ok()
         .and_then(|r| serde_json::from_str(&r).ok())
@@ -2196,7 +1967,7 @@ async fn main() {
         }),
         vm,
         live: Default::default(),
-        settings: tokio::sync::RwLock::new(prefix_settings),
+        settings: tokio::sync::RwLock::new(bot_settings),
         shells: tokio::sync::RwLock::new(load_shells()),
     };
 
@@ -2221,20 +1992,8 @@ async fn main() {
                 live(),
                 shot(),
                 send(),
-                settings(),
-                semicolon(),
                 notify(),
             ],
-            prefix_options: poise::PrefixFrameworkOptions {
-                prefix: None,
-                stripped_dynamic_prefix: Some(|ctx, msg, data| {
-                    Box::pin(match_prefix(ctx, msg, data))
-                }),
-                ..Default::default()
-            },
-            event_handler: |ctx, event, framework, data| {
-                Box::pin(event_handler(ctx, event, framework, data))
-            },
             on_error: |error| {
                 Box::pin(async move {
                     eprintln!("framework error: {}", error);
