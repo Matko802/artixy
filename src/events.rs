@@ -122,7 +122,7 @@ pub(crate) async fn event_handler(
                     if authed {
                         let trimmed = new_message.content.trim_end();
                         let payload = match crate::live::terminal_key(trimmed) {
-                            Some(key) => key.to_string(),
+                            Some(key) => key,
                             None => format!("{}\n", trimmed),
                         };
                         let runas = linked_user(data, id).await;

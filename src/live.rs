@@ -98,13 +98,30 @@ pub(crate) fn pending_queries(output: &str, answered_kitty: bool, answered_da: b
     found.sort();
     found.into_iter().map(|(_, answer)| answer).collect()
 }
-pub(crate) fn terminal_key(text: &str) -> Option<&'static str> {
-    match text {
-        ".backspace" => Some("\x7f"),
-        ".enter" => Some("\r"),
-        ".esc" => Some("\x1b"),
-        _ => None,
-    }
+pub(crate) fn terminal_key(text: &str) -> Option<String> {
+    const MAX_REPEAT: u32 = 100;
+    let mut parts = text.split_whitespace();
+    let base: &str = match parts.next()? {
+        ".backspace" => "\x7f",
+        ".enter" => "\r",
+        ".esc" => "\x1b",
+        ".up" => "\x1b[A",
+        ".down" => "\x1b[B",
+        ".right" => "\x1b[C",
+        ".left" => "\x1b[D",
+        _ => return None,
+    };
+    let count = match parts.next() {
+        None => 1,
+        Some(n) => {
+            let n: u32 = n.parse().ok()?;
+            if n == 0 || n > MAX_REPEAT || parts.next().is_some() {
+                return None;
+            }
+            n
+        }
+    };
+    Some(base.repeat(count as usize))
 }
 pub(crate) async fn forward_terminal_input(
     vm: &str,
