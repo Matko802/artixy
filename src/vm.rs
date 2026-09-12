@@ -171,3 +171,20 @@ pub(crate) async fn linked_user(data: &Data, uid: u64) -> Option<String> {
         .cloned()
 }
 
+/// Shell snippet stopping a guest process tree bottom-up (children first so
+/// nothing gets reparented and left behind). Best effort: missing pgrep or
+/// already-dead processes are fine.
+pub(crate) fn kill_tree_script(pid: i64) -> String {
+    format!(
+        "killtree() {{ for c in $(pgrep -P \"$1\"); do killtree \"$c\"; done; kill \"$1\" 2>/dev/null; }}; killtree {pid}",
+        pid = pid
+    )
+}
+
+/// Stop a guest process and all of its descendants (e.g. a superseded or
+/// runaway live command). Best effort.
+pub(crate) async fn guest_kill_tree(vm: &str, pid: i64) {
+    let snippet = kill_tree_script(pid);
+    let _ = guest_exec(vm, "/bin/bash", &["-c", &snippet], false, 15).await;
+}
+

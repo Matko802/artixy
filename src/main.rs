@@ -151,6 +151,7 @@ mod tests {
         assert!(!s.contains("$(cat)"), "no pipe-through-pty (EOF would hang)");
         let sh = crate::live::build_runner("sh", "QkI2NA==", "/tmp/o.out", "/tmp/o.code");
         assert!(sh.contains("else sh -c"), "sh fallback mirrors bash");
+        eprintln!("RUNNER=<<{}>>", s);
     }
 
     #[test]
@@ -270,6 +271,15 @@ mod tests {
             (120, 40),
             "content still grows the lock"
         );
+    }
+
+    #[test]
+    fn kill_tree_script_targets_only_given_pid() {
+        let s = crate::vm::kill_tree_script(1234);
+        assert!(s.contains("pgrep -P"), "walks children, no name patterns");
+        assert!(s.contains("killtree 1234"), "rooted at the pid");
+        assert!(!s.contains("pkill"), "never pattern-kills by name");
+        assert!(!s.contains("killall"), "never pattern-kills by name");
     }
 
     #[test]
@@ -574,6 +584,9 @@ async fn main() {
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
+                // Drop spool files / wrapper processes orphaned by a previous
+                // bot process (e.g. restarted mid-run) so they can't pile up.
+                crate::live::cleanup_stale_live_files(&data.vm).await;
                 if let Some(ch) = data.settings.read().await.notify_channel {
                     let _ = crate::webhook::post_message(
                         &ctx.http,

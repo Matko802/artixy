@@ -13,6 +13,7 @@ pub(crate) struct LiveEntry {
     pub(crate) tag: u64,
     pub(crate) out_f: String,
     pub(crate) code_f: String,
+    pub(crate) pid: Option<i64>,
 }
 pub(crate) type LiveMap = std::sync::Arc<
     tokio::sync::Mutex<std::collections::HashMap<serenity::ChannelId, LiveEntry>>,
@@ -69,6 +70,20 @@ pub(crate) async fn remove_live_if_tag(live_map: &LiveMap, channel: serenity::Ch
 
 pub(crate) async fn cleanup_live_files(vm: &str, out_f: &str, code_f: &str) {
     let _ = guest_exec(vm, "/bin/rm", &["-f", out_f, code_f], false, 10).await;
+}
+
+/// Best-effort purge of this bot's spool files and wrapper processes left
+/// behind by a previous bot process (e.g. killed mid-run by a restart).
+/// Only touches our own podbot-live-* names.
+pub(crate) async fn cleanup_stale_live_files(vm: &str) {
+    let _ = guest_exec(
+        vm,
+        "/bin/bash",
+        &["-c", "rm -f /tmp/podbot-live-*.out /tmp/podbot-live-*.code; pkill -f 'podbot-live-' 2>/dev/null; true"],
+        false,
+        15,
+    )
+    .await;
 }
 
 /// Load monospace font bytes (regular + bold) for terminal rendering.
@@ -134,6 +149,11 @@ pub(crate) async fn begin_run(
     if let Some(old) = abort_live_for_channel(&live_map, channel).await {
         let vm_clone = vm.clone();
         tokio::spawn(async move {
+            // Stop the superseded guest tree too, or it spews into a deleted
+            // file forever (invisible disk leak).
+            if let Some(pid) = old.pid {
+                crate::vm::guest_kill_tree(&vm_clone, pid).await;
+            }
             cleanup_live_files(&vm_clone, &old.out_f, &old.code_f).await;
         });
     }
@@ -151,6 +171,7 @@ pub(crate) async fn begin_run(
             tag,
             out_f,
             code_f,
+            pid: None,
         },
     );
     eprintln!("run started for {} (id {})", author_name, author_id);
@@ -220,6 +241,16 @@ pub(crate) async fn live_run(
             return;
         }
     };
+    // Remember the guest pid so a superseding run (or timeout) can stop the
+    // whole process tree instead of orphaning it.
+    {
+        let mut m = live_map.lock().await;
+        if let Some(e) = m.get_mut(&channel) {
+            if e.tag == tag {
+                e.pid = Some(pid);
+            }
+        }
+    }
     let started = std::time::Instant::now();
     // Fonts load once per run; without them the whole run falls back to text.
     let fonts = match load_terminal_fonts() {
@@ -239,14 +270,35 @@ pub(crate) async fn live_run(
         let wait = if first { LIVE_QUICK_SECS } else { LIVE_POLL_SECS };
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
         if started.elapsed().as_secs() > LIVE_TIMEOUT_SECS {
+            // Runaway spew (megabytes of output) gets its tree stopped so it
+            // can't fill the guest disk; ordinary long runs are left alone.
+            let huge = guest_exec(&vm, "/usr/bin/wc", &["-c", &out_f], true, 10)
+                .await
+                .map(|(_, o, _)| {
+                    o.split_whitespace()
+                        .next()
+                        .and_then(|n| n.parse::<u64>().ok())
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0)
+                > 20_000_000;
+            if huge {
+                crate::vm::guest_kill_tree(&vm, pid).await;
+            }
             edit_posted(
                 &poster,
                 &http,
                 channel,
                 msg.id,
                 plain_tail(&format!(
-                    "$ {}\n…stopped after {}s timeout; output truncated, process may still run in guest",
-                    cmd, LIVE_TIMEOUT_SECS
+                    "$ {}\n…stopped after {}s timeout; output truncated{}",
+                    cmd,
+                    LIVE_TIMEOUT_SECS,
+                    if huge {
+                        "; runaway process stopped"
+                    } else {
+                        "; process may still run in guest"
+                    }
                 )),
                 Vec::new(),
             )
