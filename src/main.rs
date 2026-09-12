@@ -1,5 +1,6 @@
 mod commands;
 mod config;
+mod events;
 mod live;
 mod scrub;
 mod util;
@@ -260,6 +261,9 @@ async fn main() {
                             .await;
                     }
                 })
+            },
+            event_handler: |ctx, event, framework, data| {
+                Box::pin(events::event_handler(ctx, event, framework, data))
             },
             ..Default::default()
         })
