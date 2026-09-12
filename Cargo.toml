@@ -16,7 +16,8 @@ base64 = "0.22"
 toml = "1"
 alacritty_terminal = "0.26"
 fontdue = "0.9"
-png = "0.18"
+miniz_oxide = "0.8"
+adler2 = "2"
 
 [profile.dev]
 # Fast iteration: no debuginfo to write/link, max parallelism, incremental.

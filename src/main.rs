@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod events;
 mod live;
+mod pngencode;
 mod scrub;
 mod termrender;
 mod util;
@@ -298,6 +299,148 @@ mod tests {
             pending_queries("\x1b[?25l\x1b[38;5;1m\x1b[?1000h", false, false).is_empty(),
             "lookalikes (cursor-hide, colors, mouse) must not fire"
         );
+    }
+
+    #[test]
+    fn png_crc32_matches_known_vectors() {
+        use crate::pngencode::crc32;
+        assert_eq!(crc32(b""), 0x00000000);
+        assert_eq!(crc32(b"a"), 0xe8b7be43);
+        assert_eq!(crc32(b"123456789"), 0xcbf43926);
+        assert_eq!(
+            crc32(b"The quick brown fox jumps over the lazy dog"),
+            0x414fa339
+        );
+    }
+
+    #[test]
+    fn png_encode_rejects_bad_dims() {
+        use crate::pngencode::encode_rgb;
+        assert!(encode_rgb(0, 10, &[]).is_none());
+        assert!(encode_rgb(10, 0, &[]).is_none());
+        assert!(encode_rgb(2, 2, &[0u8; 11]).is_none());
+        assert!(encode_rgb(2, 2, &[0u8; 13]).is_none());
+        assert!(encode_rgb(1, 1, &[9u8, 9u8, 9u8]).is_some());
+    }
+
+    fn png_parse_chunks(png: &[u8]) -> Vec<(String, Vec<u8>)> {
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "signature");
+        let mut chunks = Vec::new();
+        let mut i = 8;
+        while i + 8 <= png.len() {
+            let len =
+                u32::from_be_bytes([png[i], png[i + 1], png[i + 2], png[i + 3]]) as usize;
+            let kind =
+                String::from_utf8_lossy(&png[i + 4..i + 8]).into_owned();
+            let data = png[i + 8..i + 8 + len].to_vec();
+            let want = u32::from_be_bytes([
+                png[i + 8 + len],
+                png[i + 8 + len + 1],
+                png[i + 8 + len + 2],
+                png[i + 8 + len + 3],
+            ]);
+            let mut c = Vec::from(&png[i + 4..i + 8]);
+            c.extend_from_slice(&data);
+            assert_eq!(
+                crate::pngencode::crc32(&c),
+                want,
+                "chunk {} CRC must verify",
+                kind
+            );
+            chunks.push((kind, data));
+            i += 12 + len;
+        }
+        chunks
+    }
+
+    fn png_pattern_rgb(w: u32, h: u32) -> Vec<u8> {
+        let mut rgb = vec![0u8; (w * h * 3) as usize];
+        for (i, px) in rgb.chunks_exact_mut(3).enumerate() {
+            px[0] = ((i * 73 + 11) % 251) as u8;
+            px[1] = ((i * 149 + 67) % 251) as u8;
+            px[2] = ((i * 211 + 131) % 251) as u8;
+        }
+        rgb
+    }
+
+    fn png_assert_round_trip(png: &[u8], w: u32, h: u32, rgb: &[u8]) {
+        let chunks = png_parse_chunks(png);
+        let kinds: Vec<&str> = chunks.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(kinds.first().copied(), Some("IHDR"));
+        assert_eq!(kinds.last().copied(), Some("IEND"));
+        let ihdr = &chunks[0].1;
+        assert_eq!(&ihdr[0..4], &w.to_be_bytes(), "width");
+        assert_eq!(&ihdr[4..8], &h.to_be_bytes(), "height");
+        assert_eq!((ihdr[8], ihdr[9], ihdr[10], ihdr[11]), (8, 2, 0, 0));
+        let mut zlib: Vec<u8> = Vec::new();
+        for (k, d) in &chunks {
+            if k == "IDAT" {
+                zlib.extend_from_slice(d);
+            }
+        }
+        let raw = miniz_oxide::inflate::decompress_to_vec_zlib(&zlib).expect("inflates");
+        assert_eq!(raw.len(), h as usize * (1 + w as usize * 3));
+        for (row, stripe) in raw.chunks_exact(1 + w as usize * 3).enumerate() {
+            assert_eq!(stripe[0], 0, "filter byte row {}", row);
+            let s = row * w as usize * 3;
+            assert_eq!(&stripe[1..], &rgb[s..s + w as usize * 3], "row {} pixels", row);
+        }
+    }
+
+    #[test]
+    fn png_encode_round_trip_through_miniz() {
+        use crate::pngencode::{encode_rgb, encode_rgb_stored};
+        let (w, h) = (300u32, 300u32);
+        let rgb = png_pattern_rgb(w, h);
+        png_assert_round_trip(&encode_rgb(w, h, &rgb).expect("encodes"), w, h, &rgb);
+        png_assert_round_trip(
+            &encode_rgb_stored(w, h, &rgb).expect("stored encodes"),
+            w,
+            h,
+            &rgb,
+        );
+    }
+
+    #[test]
+    fn brighten_maps_normal_colors_to_bright() {
+        use alacritty_terminal::vte::ansi::{Color, NamedColor};
+        use crate::termrender::*;
+        let pairs = [
+            (NamedColor::Black, NamedColor::BrightBlack),
+            (NamedColor::Red, NamedColor::BrightRed),
+            (NamedColor::Green, NamedColor::BrightGreen),
+            (NamedColor::Yellow, NamedColor::BrightYellow),
+            (NamedColor::Blue, NamedColor::BrightBlue),
+            (NamedColor::Magenta, NamedColor::BrightMagenta),
+            (NamedColor::Cyan, NamedColor::BrightCyan),
+            (NamedColor::White, NamedColor::BrightWhite),
+        ];
+        for (plain, bright) in pairs {
+            assert_eq!(brighten(Color::Named(plain)), Color::Named(bright));
+            assert_eq!(resolve_color(brighten(Color::Named(plain))), resolve_color(Color::Named(bright)));
+        }
+        assert_eq!(resolve_color(brighten(Color::Named(NamedColor::Cyan))), [0x00, 0xff, 0xff]);
+        for passthrough in [
+            Color::Named(NamedColor::BrightRed),
+            Color::Named(NamedColor::Foreground),
+            Color::Named(NamedColor::Background),
+            Color::Indexed(196),
+        ] {
+            assert_eq!(brighten(passthrough), passthrough);
+        }
+    }
+
+    #[test]
+    fn terminal_key_maps_hotkeys_to_bytes() {
+        use crate::live::terminal_key;
+        assert_eq!(terminal_key(".backspace"), Some("\x7f"));
+        assert_eq!(terminal_key(".enter"), Some("\r"));
+        assert_eq!(terminal_key(".esc"), Some("\x1b"));
+        assert_eq!(terminal_key("hi"), None);
+        assert_eq!(terminal_key(""), None);
+        assert_eq!(terminal_key(".ENTER"), None);
+        assert_eq!(terminal_key(".backspace "), None);
+        assert_eq!(terminal_key("x.backspace"), None);
     }
 
     #[test]

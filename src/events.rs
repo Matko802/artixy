@@ -120,7 +120,11 @@ pub(crate) async fn event_handler(
                         access_allowed(a.owner, &a.users, &a.blocked, id)
                     };
                     if authed {
-                        let payload = format!("{}\n", new_message.content.trim_end());
+                        let trimmed = new_message.content.trim_end();
+                        let payload = match crate::live::terminal_key(trimmed) {
+                            Some(key) => key.to_string(),
+                            None => format!("{}\n", trimmed),
+                        };
                         let runas = linked_user(data, id).await;
                         if crate::live::forward_terminal_input(&data.vm, &fifo, runas.as_deref(), &payload).await {
                             let _ = new_message.delete(&ctx.http).await;

@@ -98,6 +98,14 @@ pub(crate) fn pending_queries(output: &str, answered_kitty: bool, answered_da: b
     found.sort();
     found.into_iter().map(|(_, answer)| answer).collect()
 }
+pub(crate) fn terminal_key(text: &str) -> Option<&'static str> {
+    match text {
+        ".backspace" => Some("\x7f"),
+        ".enter" => Some("\r"),
+        ".esc" => Some("\x1b"),
+        _ => None,
+    }
+}
 pub(crate) async fn forward_terminal_input(
     vm: &str,
     fifo: &str,

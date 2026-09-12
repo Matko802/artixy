@@ -121,6 +121,25 @@ fn named_color(n: NamedColor) -> [u8; 3] {
     }
 }
 
+/// Real terminals draw bold text in the bright color variants (only the 8
+/// normal colors change; bright/indexed/rgb/fg/bg stay as they are).
+pub(crate) fn brighten(color: Color) -> Color {
+    match color {
+        Color::Named(n) => Color::Named(match n {
+            NamedColor::Black => NamedColor::BrightBlack,
+            NamedColor::Red => NamedColor::BrightRed,
+            NamedColor::Green => NamedColor::BrightGreen,
+            NamedColor::Yellow => NamedColor::BrightYellow,
+            NamedColor::Blue => NamedColor::BrightBlue,
+            NamedColor::Magenta => NamedColor::BrightMagenta,
+            NamedColor::Cyan => NamedColor::BrightCyan,
+            NamedColor::White => NamedColor::BrightWhite,
+            other => other,
+        }),
+        other => other,
+    }
+}
+
 pub(crate) fn dim(c: [u8; 3]) -> [u8; 3] {
     [(c[0] as u16 * 2 / 3) as u8, (c[1] as u16 * 2 / 3) as u8, (c[2] as u16 * 2 / 3) as u8]
 }
@@ -284,7 +303,12 @@ pub(crate) fn render_terminal(
             {
                 continue;
             }
-            let (mut fg, mut bg) = (resolve_color(cell.fg), resolve_color(cell.bg));
+            let bold = cell.flags.contains(Flags::BOLD);
+            let mut fg_color = cell.fg;
+            if bold {
+                fg_color = brighten(fg_color);
+            }
+            let (mut fg, mut bg) = (resolve_color(fg_color), resolve_color(cell.bg));
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
@@ -310,7 +334,6 @@ pub(crate) fn render_terminal(
             if ch == ' ' || ch.is_control() {
                 continue;
             }
-            let bold = cell.flags.contains(Flags::BOLD);
             let font = if bold { &fonts.bold } else { &fonts.regular };
             let (m, bmp) = cache
                 .entry((ch, bold))
@@ -321,9 +344,5 @@ pub(crate) fn render_terminal(
             blit(&mut img, w, h, gx, gy, m.width as i32, m.height as i32, bmp, fg);
         }
     }
-    let mut out = Vec::new();
-    let mut enc = png::Encoder::new(&mut out, w, h);
-    enc.set_color(png::ColorType::Rgb);
-    enc.write_header().ok()?.write_image_data(&img).ok()?;
-    Some(out)
+    crate::pngencode::encode_rgb(w, h, &img)
 }
