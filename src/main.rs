@@ -55,13 +55,6 @@ fn hex_bytes(bytes: &[u8]) -> String {
     s
 }
 
-fn random_password() -> String {
-    if let Some(bytes) = urandom_bytes(16) {
-        return hex_bytes(&bytes);
-    }
-    random_suffix().repeat(2)
-}
-
 fn random_suffix() -> String {
     if let Some(bytes) = urandom_bytes(8) {
         return hex_bytes(&bytes);
@@ -1327,23 +1320,11 @@ async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error
         a.linux.insert(uid.to_string(), name.clone());
         a.save().await?;
     }
-    let pw = random_password();
-    let pw_ok = virsh(&["set-user-password", &vm, &name, &pw])
-        .await
-        .is_ok();
-    if pw_ok {
-        ctx.say(format!(
-            "added user \"{}\" linked to `{}` — account created.",
-            name, uid
-        ))
-        .await?;
-    } else {
-        ctx.say(format!(
-            "added user \"{}\" linked to `{}` — but setting their password failed.",
-            name, uid
-        ))
-        .await?;
-    }
+    ctx.say(format!(
+        "added user \"{}\" linked to `{}` — account created, no password set.",
+        name, uid
+    ))
+    .await?;
     Ok(())
 }
 
