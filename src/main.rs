@@ -5,6 +5,8 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct PrefixSettings {
     semicolon: Option<String>,
+    #[serde(default)]
+    notify_channel: Option<u64>,
 }
 
 struct Data {
@@ -752,7 +754,7 @@ async fn send_output(ctx: Context<'_>, cmd: &str, body: &str) -> Result<(), Erro
 const HELP: &str = "\
 **artixy — your Artix VM in your pocket.** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me.\n\
 \n**VM**\n`;ps` — state of the VM\n`;status` — quick state + agent check\n`;start` — power on + wait for guest agent\n`;stop` — graceful shutdown\n`;restart` — reboot\n`;info` — details + agent status\n\
-\n**Who can use me**\n`;users` / `;userlist` — show owner + managers\n`;useradd @user` (prefix only) — owner only: links them and creates their Linux account in Artix (name from discord name).\n`;userdel @user` (prefix only) — owner only\n`;shell [fish|bash]` — your `$` interpreter (default bash)\n`;run <command>` — same as `;`, prefix only\n\
+\n**Who can use me**\n`;users` / `;userlist` — show owner + managers\n`;useradd @user` (prefix only) — owner only: links them and creates their Linux account in Artix (name from discord name).\n`;userdel @user` (prefix only) — owner only\n`;shell [fish|bash]` — your `$` interpreter (default bash)\n`;notify <#channel|off>` (prefix only) — owner only: where I post my boot message, unset means silent\n`;run <command>` — same as `;`, prefix only\n\
 \nPrefix starts OFF — slash commands always work. Owner turns it on in `/settings` (e.g. `/settings semicolon ;`).\n\
 \n**Run real commands in Artix**\n`;` followed by anything — runs it for real inside the VM through the guest agent and prints the output. e.g. `;sudo pacman -Syu`, `;ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`;live <command>` — follows one run live in a single message until it finishes. Starting another run stops it.\n`;shot` — screenshot of the host screen, uploaded here\n`;send <path>` — upload a host file here (absolute path, ~20MB max)\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
@@ -1244,8 +1246,12 @@ fn settings_text(s: &PrefixSettings) -> String {
         None => "OFF".into(),
     };
     format!(
-        "Prefix (slash commands always work):\n; slot: {}\nChange (owner only): `/settings semicolon <off|;|…>` — 1-2 symbol chars, or `off`.",
-        show(&s.semicolon)
+        "Prefix (slash commands always work):\n; slot: {}\nChange (owner only): `/settings semicolon <off|;|…>` — 1-2 symbol chars, or `off`.\nBoot messages: {}",
+        show(&s.semicolon),
+        match s.notify_channel {
+            Some(id) => format!("<#{}>", id),
+            None => "OFF".into(),
+        }
     )
 }
 
@@ -1291,6 +1297,61 @@ async fn semicolon(
     #[description = "off or 1-2 symbol chars"] value: String,
 ) -> Result<(), Error> {
     do_settings_set(ctx, value).await
+}
+
+const BOOT_ART: &str = "\
+.        :-------:        ^/ \\^      :Im here:\n\
+        ●   ●     <:-------:\n\
+       /  ω  \\\n\
+      /_/   \\_\\";
+
+fn parse_channel(s: &str) -> Option<u64> {
+    let t = s.trim();
+    let inner = t
+        .strip_prefix("<#")
+        .and_then(|r| r.strip_suffix('>'))
+        .unwrap_or(t);
+    inner.parse::<u64>().ok().filter(|id| *id != 0)
+}
+
+#[poise::command(slash_command, prefix_command)]
+async fn notify(
+    ctx: Context<'_>,
+    #[description = "#channel for boot messages, or off"] what: Option<String>,
+) -> Result<(), Error> {
+    if !is_owner(ctx).await {
+        ctx.say("Owner only.").await?;
+        return Ok(());
+    }
+    match what.as_deref().map(str::trim) {
+        None => {
+            let s = ctx.data().settings.read().await;
+            match s.notify_channel {
+                Some(id) => {
+                    ctx.say(format!("Boot messages go to <#{}>.", id)).await?;
+                }
+                None => {
+                    ctx.say("Boot messages are OFF (no channel set).").await?;
+                }
+            }
+        }
+        Some(v) if v.eq_ignore_ascii_case("off") => {
+            ctx.data().settings.write().await.notify_channel = None;
+            save_settings(ctx.data()).await?;
+            ctx.say("Boot messages OFF.").await?;
+        }
+        Some(v) => match parse_channel(v) {
+            Some(id) => {
+                ctx.data().settings.write().await.notify_channel = Some(id);
+                save_settings(ctx.data()).await?;
+                ctx.say(format!("Boot messages will go to `<#{id}>`.\n```\n{BOOT_ART}\n```")).await?;
+            }
+            None => {
+                ctx.say("Usage: `;notify <#channel|id>` or `;notify off`.").await?;
+            }
+        },
+    }
+    Ok(())
 }
 
 #[poise::command(slash_command, prefix_command)]
@@ -1492,7 +1553,7 @@ const COMMANDS: &[&str] = &[
     "add", "del", "useradd", "userdel", "userlist", "shell",
     "botrestart", "run", "live",
     "shot", "send",
-    "settings", "semicolon",
+    "settings", "semicolon", "notify",
 ];
 async fn begin_live(
     http: std::sync::Arc<serenity::Http>,
@@ -1987,6 +2048,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_channel_accepts_mention_or_id() {
+        assert_eq!(parse_channel("<#123456789>"), Some(123456789));
+        assert_eq!(parse_channel("123456789"), Some(123456789));
+        assert_eq!(parse_channel("  <#123456789>  "), Some(123456789));
+        assert_eq!(parse_channel("off"), None);
+        assert_eq!(parse_channel(""), None);
+        assert_eq!(parse_channel("0"), None);
+        assert_eq!(parse_channel("abc"), None);
+        assert_eq!(parse_channel("<#abc>"), None);
+    }
+
+    #[test]
     fn scrub_redacts_public_ipv4_only() {
         assert_eq!(scrub_public_ip("ip 203.0.113.7 ok"), "ip [redacted] ok");
         assert_eq!(scrub_public_ip("dns 8.8.8.8"), "dns [redacted]");
@@ -2124,6 +2197,7 @@ async fn main() {
                 send(),
                 settings(),
                 semicolon(),
+                notify(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: None,
@@ -2150,6 +2224,11 @@ async fn main() {
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
+                if let Some(ch) = data.settings.read().await.notify_channel {
+                    let _ = serenity::ChannelId::new(ch)
+                        .say(&ctx.http, format!("```\n{BOOT_ART}\n```"))
+                        .await;
+                }
                 Ok(data)
             })
         })
