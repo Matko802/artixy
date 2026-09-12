@@ -438,6 +438,97 @@ fn codeblock(s: &str) -> String {
     format!("```ansi\n{}\n```", t)
 }
 
+fn public_ipv4(o: [u8; 4]) -> bool {
+    match o {
+        [10, _, _, _] => false,
+        [172, b, _, _] if (16..=31).contains(&b) => false,
+        [192, 168, _, _] => false,
+        [127, _, _, _] => false,
+        [169, 254, _, _] => false,
+        [100, b, _, _] if (64..=127).contains(&b) => false,
+        [0, _, _, _] => false,
+        [255, 255, 255, 255] => false,
+        _ => true,
+    }
+}
+
+fn scan_ipv4(b: &[u8], i: usize) -> Option<([u8; 4], usize)> {
+    if i > 0 {
+        let p = b[i - 1];
+        if p.is_ascii_alphanumeric() || p == b'.' {
+            return None;
+        }
+    }
+    let mut o = [0u8; 4];
+    let mut j = i;
+    for k in 0..4 {
+        let start = j;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        let len = j - start;
+        if len == 0 || len > 3 {
+            return None;
+        }
+        let mut v: u16 = 0;
+        for d in &b[start..j] {
+            v = v * 10 + (d - b'0') as u16;
+        }
+        if v > 255 {
+            return None;
+        }
+        o[k] = v as u8;
+        if k < 3 {
+            if j >= b.len() || b[j] != b'.' {
+                return None;
+            }
+            j += 1;
+        }
+    }
+    match b.get(j) {
+        Some(d) if d.is_ascii_digit() => return None,
+        Some(b'.') => {
+            if matches!(b.get(j + 1), Some(d) if d.is_ascii_digit()) {
+                return None;
+            }
+        }
+        _ => {}
+    }
+    Some((o, j))
+}
+
+fn utf8_len(first: u8) -> usize {
+    match first {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        _ => 4,
+    }
+}
+
+fn scrub_public_ip(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i].is_ascii_digit() {
+            if let Some((o, end)) = scan_ipv4(b, i) {
+                if public_ipv4(o) {
+                    out.push_str("[redacted]");
+                } else {
+                    out.push_str(&s[i..end]);
+                }
+                i = end;
+                continue;
+            }
+        }
+        let len = utf8_len(b[i]);
+        out.push_str(&s[i..i + len]);
+        i += len;
+    }
+    out
+}
+
 fn fit_bottom_lines(body: &str) -> (String, bool) {
     const MAX: usize = 1750;
     let lines: Vec<&str> = body.lines().collect();
@@ -829,6 +920,11 @@ async fn run(
     let sh = user_shell(ctx.data(), uid).await;
     let runas = linked_user(ctx.data(), uid).await;
     let (body, code) = run_guest_cmd(&vm, &sh, &cmd, runas.as_deref(), 300).await?;
+    let body = if is_owner(ctx).await {
+        body
+    } else {
+        scrub_public_ip(&body)
+    };
     send_output(ctx, &cmd, &body).await?;
     eprintln!("run for {}: exit {}", ctx.author().name, code);
     Ok(())
@@ -861,6 +957,7 @@ async fn do_live(ctx: Context<'_>, cmd: String) -> Result<(), Error> {
         cmd.trim().to_string(),
         linked_user(ctx.data(), ctx.author().id.get()).await,
         ctx.data().live.clone(),
+        !is_owner(ctx).await,
     )
     .await;
     Ok(())
@@ -1311,6 +1408,7 @@ async fn begin_live(
     cmd: String,
     runas: Option<String>,
     live_map: LiveMap,
+    scrub_ip: bool,
 ) {
     if let Some(ref u) = runas {
         if !valid_runas(u) {
@@ -1336,7 +1434,7 @@ async fn begin_live(
     let (vm2, cmd2, runas2, out_f2, code_f2) =
         (vm.clone(), cmd.clone(), runas.clone(), out_f.clone(), code_f.clone());
     let handle = tokio::spawn(async move {
-        live_run(http, ack, channel, tag, vm2, cmd2, runas2, out_f2, code_f2, live_map2).await;
+        live_run(http, ack, channel, tag, vm2, cmd2, runas2, out_f2, code_f2, live_map2, scrub_ip).await;
     })
     .abort_handle();
     live_map.lock().await.insert(
@@ -1362,6 +1460,7 @@ async fn live_run(
     out_f: String,
     code_f: String,
     live_map: LiveMap,
+    scrub_ip: bool,
 ) {
     use base64::Engine as _;
     if let Some(ref u) = runas {
@@ -1430,6 +1529,7 @@ async fn live_run(
             .await
             .map(|(_, o, _)| o)
             .unwrap_or_default();
+        let tail = if scrub_ip { scrub_public_ip(&tail) } else { tail };
         let done = guest_status(&vm, pid).await.unwrap_or(None);
         let mut body = format!(
             "\u{1b}[0;32m$ {}\u{1b}[0m\n{}",
@@ -1655,6 +1755,7 @@ async fn event_handler(
             .reply(&ctx.http, format!("`live: {}` starting…", cmd))
             .await?;
         let runas = linked_user(data, id).await;
+        let scrub_ip = data.allowed.read().await.owner != id;
         begin_live(
             http,
             ack,
@@ -1664,6 +1765,7 @@ async fn event_handler(
             cmd,
             runas,
             data.live.clone(),
+            scrub_ip,
         )
         .await;
         return Ok(());
@@ -1674,6 +1776,12 @@ async fn event_handler(
     }
     let runas = linked_user(data, id).await;
     let (body, code) = run_guest_cmd(&vm, &sh, text, runas.as_deref(), 300).await?;
+    let owner_view = data.allowed.read().await.owner == id;
+    let body = if owner_view {
+        body
+    } else {
+        scrub_public_ip(&body)
+    };
     let clean = sanitize_ansi(body.trim_end());
     let (fitted, truncated) = fit_bottom_lines(&clean);
     if !truncated {
@@ -1787,6 +1895,27 @@ mod tests {
         assert_eq!(attach_name(""), "output.txt");
         assert_eq!(attach_name("../../../etc/passwd"), "etcpasswd.txt");
         assert_eq!(attach_name("sudo pacman -Syu"), "sudo.txt");
+    }
+
+    #[test]
+    fn scrub_redacts_public_ipv4_only() {
+        assert_eq!(scrub_public_ip("ip 203.0.113.7 ok"), "ip [redacted] ok");
+        assert_eq!(scrub_public_ip("dns 8.8.8.8"), "dns [redacted]");
+        assert_eq!(scrub_public_ip("a 1.2.3.4 b 5.6.7.8"), "a [redacted] b [redacted]");
+        assert_eq!(scrub_public_ip("local 192.168.1.5"), "local 192.168.1.5");
+        assert_eq!(scrub_public_ip("ten 10.0.0.1"), "ten 10.0.0.1");
+        assert_eq!(scrub_public_ip("corp 172.16.5.4 and 172.31.255.1"), "corp 172.16.5.4 and 172.31.255.1");
+        assert_eq!(scrub_public_ip("not-private 172.32.0.1"), "not-private [redacted]");
+        assert_eq!(scrub_public_ip("loop 127.0.0.1"), "loop 127.0.0.1");
+        assert_eq!(scrub_public_ip("link 169.254.169.254"), "link 169.254.169.254");
+        assert_eq!(scrub_public_ip("cgnat 100.64.0.1"), "cgnat 100.64.0.1");
+        assert_eq!(scrub_public_ip("not-cgnat 100.128.0.1"), "not-cgnat [redacted]");
+        assert_eq!(scrub_public_ip("kernel 7.2.2-artix1"), "kernel 7.2.2-artix1");
+        assert_eq!(scrub_public_ip("mem 1.48 GiB"), "mem 1.48 GiB");
+        assert_eq!(scrub_public_ip("bad 999.1.1.1"), "bad 999.1.1.1");
+        assert_eq!(scrub_public_ip("see 1.2.3.4."), "see [redacted].");
+        assert_eq!(scrub_public_ip("v1.2.3.4 out"), "v1.2.3.4 out");
+        assert_eq!(scrub_public_ip("1.2.3.4.5 out"), "1.2.3.4.5 out");
     }
 
     #[test]
