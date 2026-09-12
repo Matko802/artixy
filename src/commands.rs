@@ -506,12 +506,11 @@ pub(crate) async fn userdel(
     do_userdel(ctx, &user).await
 }
 
-pub(crate) const BOOT_ART: &str = "\
-          .        :-------:\n\
-        ^/ \\^      :Im here:\n\
-        ●   ●     <:-------:\n\
-       /  ω  \\\n\
-      /_/   \\_\\";
+pub(crate) const BOOT_ART: &str = r"          .        :-------:
+        ^/ \^      :Im here:
+        ●   ●     <:-------:
+       /  ω  \
+      /_/   \_\";
 
 pub(crate) fn parse_channel(s: &str) -> Option<u64> {
     s.trim().parse::<u64>().ok().filter(|id| *id != 0)

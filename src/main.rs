@@ -115,6 +115,17 @@ mod tests {
     }
 
     #[test]
+    fn boot_art_matches_lol_txt_byte_for_byte() {
+        let rows: Vec<&str> = crate::commands::BOOT_ART.lines().collect();
+        assert_eq!(rows.len(), 5, "five art rows");
+        assert_eq!(rows[0], "          .        :-------:");
+        assert_eq!(rows[1], "        ^/ \\^      :Im here:");
+        assert_eq!(rows[2], "        ●   ●     <:-------:");
+        assert_eq!(rows[3], "       /  ω  \\");
+        assert_eq!(rows[4], "      /_/   \\_\\");
+    }
+
+    #[test]
     fn scrub_redacts_public_ipv4_only() {
         assert_eq!(scrub_public_ip("ip 203.0.113.7 ok"), "ip [redacted] ok");
         assert_eq!(scrub_public_ip("dns 8.8.8.8"), "dns [redacted]");
