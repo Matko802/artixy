@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use crate::{
     config::persist_runtime,
     live::begin_run,
-    util::{codeblock, deployed_via_nix, project_dir, random_suffix, valid_runas},
+    util::{attach_name, cap_file_body, codeblock, deployed_via_nix, project_dir, random_suffix, strip_sgr, valid_runas},
     vm::{agent_ping, guest_exec, linked_user, virsh, wait_agent},
-    webhook::{is_own_message, mark_self_deleted, post_response, post_text},
+    webhook::{is_own_message, mark_self_deleted, post_message, post_response, post_text},
     Context, Error,
 };
 
@@ -41,7 +41,7 @@ pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
 \n**Who can use me**\n`/users` / `/userlist` — show owner + managers\n`/useradd @user` — owner only: links them and creates their Linux account in Artix (name from discord name).\n`/userdel @user` — owner only: revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
-\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n\
+\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/say <message> [reply_to]` — owner only: say something as me (reply_to takes a message ID or link)\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
 #[poise::command(
@@ -359,6 +359,96 @@ pub(crate) async fn run(
         !is_owner(ctx).await,
     )
     .await;
+    Ok(())
+}
+
+/// Parse a reply target: either a bare message ID (resolved in the current
+/// channel) or a full message link. Returns (channel_id, message_id).
+pub(crate) fn parse_message_ref(s: &str, current_channel: u64) -> Option<(u64, u64)> {
+    let t = s.trim().trim_matches(|c| c == '<' || c == '>').trim();
+    let t = t.split('?').next().unwrap_or(t).trim();
+    if let Some((_, rest)) = t.split_once("/channels/") {
+        let mut parts = rest.split('/');
+        let _guild = parts.next()?;
+        let channel = parts.next()?.parse::<u64>().ok()?;
+        let msg = parts.next()?.parse::<u64>().ok()?;
+        if parts.next().is_some() || channel == 0 || msg == 0 {
+            return None;
+        }
+        return Some((channel, msg));
+    }
+    let id = t.parse::<u64>().ok()?;
+    if id == 0 {
+        return None;
+    }
+    Some((current_channel, id))
+}
+
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
+pub(crate) async fn say(
+    ctx: Context<'_>,
+    #[description = "Text to send as artixy"] message: String,
+    #[description = "Message ID or link to reply to"] reply_to: Option<String>,
+) -> Result<(), Error> {
+    if !is_owner(ctx).await {
+        post_text(ctx, "Owner only.").await?;
+        return Ok(());
+    }
+    let text = message.trim_end().to_string();
+    if text.trim().is_empty() {
+        post_text(ctx, "Usage: `/say <message> [reply_to: message ID or link]`.").await?;
+        return Ok(());
+    }
+    maybe_defer(ctx).await;
+    let http = ctx.serenity_context().http.clone();
+    let channel = ctx.channel_id();
+    if let poise::Context::Prefix(pctx) = ctx {
+        // Parity with .ar: remove the invoking message (best effort; impossible in DMs).
+        let _ = pctx.msg.delete(&http).await;
+    }
+    if let Some(target) = reply_to {
+        let Some((ch_id, msg_id)) = parse_message_ref(&target, channel.get()) else {
+            post_text(ctx, "Couldn't read that reply target — give a message ID or a full message link.").await?;
+            return Ok(());
+        };
+        let ch = serenity::ChannelId::new(ch_id);
+        let target_msg = match ch.message(&http, serenity::MessageId::new(msg_id)).await {
+            Ok(m) => m,
+            Err(_) => {
+                post_text(ctx, "Couldn't fetch that message (wrong channel, or I can't see it).").await?;
+                return Ok(());
+            }
+        };
+        if text.chars().count() <= 2000 {
+            if target_msg.reply(&http, &text).await.is_err() {
+                post_text(ctx, "Reply failed (missing permission?).").await?;
+            }
+        } else {
+            let att = serenity::CreateAttachment::bytes(
+                cap_file_body(&strip_sgr(&text)).into_bytes(),
+                attach_name(&text),
+            );
+            let builder = serenity::CreateMessage::new()
+                .add_file(att)
+                .reference_message((ch, target_msg.id));
+            if ch.send_message(&http, builder).await.is_err() {
+                post_text(ctx, "Reply failed (missing permission?).").await?;
+            }
+        }
+    } else if text.chars().count() <= 2000 {
+        let _ = post_message(&http, channel, text, Vec::new()).await;
+    } else {
+        let att = (attach_name(&text), cap_file_body(&strip_sgr(&text)).into_bytes());
+        let _ = post_message(&http, channel, String::new(), vec![att]).await;
+    }
+    if let poise::Context::Application(actx) = ctx {
+        let _ = actx.interaction.delete_response(&http).await;
+    }
     Ok(())
 }
 

@@ -10,7 +10,7 @@ mod webhook;
 use poise::serenity_prelude as serenity;
 
 use crate::commands::{
-    botrestart, help, info, notify, ps, purge_replies, restart, run, send, shell, shot,
+    botrestart, help, info, notify, ps, purge_replies, restart, run, say, send, shell, shot,
     start, status, stop, user, useradd, userdel, userlist, users, warmode,
 };
 use crate::commands::BOOT_ART;
@@ -45,13 +45,14 @@ mod tests {
             shell(),
             botrestart(),
             run(),
+            say(),
             shot(),
             send(),
             notify(),
             purge_replies(),
             warmode(),
         ];
-        assert_eq!(cmds.len(), 20, "test must mirror the framework command list");
+        assert_eq!(cmds.len(), 21, "test must mirror the framework command list");
         for cmd in &cmds {
             let builder = cmd
                 .create_as_slash_command()
@@ -201,6 +202,30 @@ mod tests {
     }
 
     #[test]
+    fn build_runner_wraps_pty_matching_render_window() {
+        let s = crate::live::build_runner("bash", "QkI2NA==", "/tmp/o.out", "/tmp/o.code");
+        assert!(s.contains("stty cols 120 rows 80"), "pty matches render window");
+        assert!(s.contains("TERM=xterm-256color"), "terminfo set");
+        assert!(s.contains("CMD_DATA"), "command travels via env, not text");
+        assert!(s.contains("script -qec"), "pty path first");
+        assert!(s.contains("else bash -c"), "plain fallback");
+        assert!(s.contains("</dev/null"), "stdin EOFs instantly");
+        assert!(s.contains("> /tmp/o.out 2>&1"), "output captured");
+        assert!(s.contains("echo $? > /tmp/o.code"), "exit code kept");
+        assert!(!s.contains("$(cat)"), "no pipe-through-pty (EOF would hang)");
+        let sh = crate::live::build_runner("sh", "QkI2NA==", "/tmp/o.out", "/tmp/o.code");
+        assert!(sh.contains("else sh -c"), "sh fallback mirrors bash");
+        eprintln!("RUNNER=<<{}>>", s);
+    }
+
+    #[test]
+    fn normalize_nl_collapses_crlf_first() {
+        assert_eq!(crate::util::normalize_nl("a\r\nb"), "a\nb", "no doubling");
+        assert_eq!(crate::util::normalize_nl("a\rb"), "a\nb", "lone CR");
+        assert_eq!(crate::util::normalize_nl("a\nb"), "a\nb", "LF untouched");
+    }
+
+    #[test]
     fn tool_path_finds_shell_and_rejects_junk() {
         let sh = tool_path("sh");
         assert!(sh.is_some(), "sh must resolve even with a minimal PATH");
@@ -279,6 +304,31 @@ mod tests {
         assert_eq!(parse_target_id("0"), None);
         assert_eq!(parse_target_id("abc"), None);
         assert_eq!(parse_target_id("<@abc>"), None);
+    }
+
+    #[test]
+    fn parse_message_ref_accepts_id_or_link() {
+        assert_eq!(parse_message_ref("123", 99), Some((99, 123)));
+        assert_eq!(parse_message_ref("  123  ", 99), Some((99, 123)));
+        assert_eq!(
+            parse_message_ref("https://discord.com/channels/1/2/3", 99),
+            Some((2, 3))
+        );
+        assert_eq!(
+            parse_message_ref("https://discord.com/channels/@me/2/3", 99),
+            Some((2, 3))
+        );
+        assert_eq!(
+            parse_message_ref("<https://discord.com/channels/1/2/3>", 99),
+            Some((2, 3))
+        );
+        assert_eq!(parse_message_ref("", 1), None);
+        assert_eq!(parse_message_ref("0", 1), None);
+        assert_eq!(parse_message_ref("abc", 1), None);
+        assert_eq!(parse_message_ref("1/2", 1), None);
+        assert_eq!(parse_message_ref("https://discord.com/channels/1/2/0", 99), None);
+        assert_eq!(parse_message_ref("https://discord.com/channels/1/2/3/4", 99), None);
+        assert_eq!(parse_message_ref("https://discord.com/channels/1/2", 99), None);
     }
 
     #[test]
@@ -452,6 +502,7 @@ async fn main() {
                 shell(),
                 botrestart(),
                 run(),
+                say(),
                 shot(),
                 send(),
                 notify(),

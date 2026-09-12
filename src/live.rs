@@ -25,6 +25,29 @@ pub(crate) const LIVE_QUICK_SECS: u64 = 1;
 /// Guest output fetched per poll for the image frame (bytes, not chars).
 const LIVE_FRAME_BYTES: &str = "200000";
 
+/// PATH exported inside the guest before running user commands.
+const GUEST_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH";
+
+/// Build the guest runner script. The user command travels base64-encoded in
+/// CMD_DATA (never embedded in the script text, so quotes in it are safe) and
+/// runs under `script(1)` on a pty sized exactly like our render window, so
+/// programs wrap and format for what the picture shows and switch to
+/// line-buffered streaming output. Child stdin is /dev/null (instant EOF);
+/// stdout/stderr stay on the pty. Falls back to a plain shell when `script`
+/// is missing. Returns exit code via the code file.
+pub(crate) fn build_runner(shell: &str, b64: &str, out_f: &str, code_f: &str) -> String {
+    use crate::util::{LIVE_IMG_MAX_COLS, LIVE_IMG_MAX_ROWS};
+    format!(
+        "export CMD_DATA=\"$(echo {b64} | base64 -d)\"; if command -v script >/dev/null 2>&1; then script -qec 'export TERM=xterm-256color; stty cols {cols} rows {rows} -echo; {shell} -c '\\''export PATH={path}; eval \"$CMD_DATA\"'\\'' </dev/null' /dev/null </dev/null; else {shell} -c 'export PATH={path}; eval \"$CMD_DATA\"'; fi > {out_f} 2>&1; echo $? > {code_f}",
+        b64 = b64,
+        cols = LIVE_IMG_MAX_COLS,
+        rows = LIVE_IMG_MAX_ROWS,
+        shell = shell,
+        path = GUEST_PATH,
+        out_f = out_f,
+        code_f = code_f,
+    )
+}
 pub(crate) async fn abort_live_for_channel(
     live_map: &LiveMap,
     channel: serenity::ChannelId,
@@ -135,37 +158,32 @@ async fn render_frame(font: Option<&str>, text: &str, w: u32, h: u32) -> Option<
     if bytes.is_empty() { None } else { Some(bytes) }
 }
 
-/// Build the live message: short plain caption plus a rendered image of the
-/// output (the image carries the $ cmd header itself). Falls back to a
-/// fenced plain-text block when rendering is unavailable.
+/// Build the live message: `$ cmd` (+ status) as plain text, picture of the
+/// output alone underneath. Falls back to a fenced plain-text block (with
+/// the header for context) when rendering is unavailable.
 async fn live_message(
     font: Option<&str>,
     cmd: &str,
     status: Option<&str>,
     output: &str,
 ) -> (String, Vec<(String, Vec<u8>)>) {
-    // Collapse clear-screen redraws first, so the $ cmd line we add below
-    // survives programs that clear the screen every frame.
     let output = after_last_clear(output);
-    let mut combined = format!("$ {}", cmd);
+    let mut caption = format!("$ {}", cmd);
     if let Some(s) = status {
-        combined.push('\n');
-        combined.push_str(s);
+        caption.push('\n');
+        caption.push_str(s);
     }
-    if !output.trim().is_empty() {
-        combined.push('\n');
-        combined.push_str(output.trim_end());
-    }
-    let (img_text, w, h) = frame_text(&combined);
+    let (img_text, w, h) = frame_text(output);
     match render_frame(font, &img_text, w, h).await {
-        Some(png) => {
-            let caption = match status {
-                Some(s) => format!("`{}` {}", cmd, s),
-                None => format!("`{}`", cmd),
-            };
-            (caption, vec![("live.png".to_string(), png)])
+        Some(png) => (caption, vec![("live.png".to_string(), png)]),
+        None => {
+            let mut combined = caption.clone();
+            if !output.trim().is_empty() {
+                combined.push('\n');
+                combined.push_str(output.trim_end());
+            }
+            (plain_tail(&combined), Vec::new())
         }
-        None => (plain_tail(&combined), Vec::new()),
     }
 }
 
@@ -254,14 +272,8 @@ pub(crate) async fn live_run(
         }
     }
     let b64 = base64::engine::general_purpose::STANDARD.encode(cmd.as_bytes());
-    let script = format!(
-        "echo {} | base64 -d | bash -c 'export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH; eval \"$(cat)\"' > {} 2>&1; echo $? > {}",
-        b64, out_f, code_f
-    );
-    let script_sh = format!(
-        "echo {} | base64 -d | sh -c 'export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH; eval \"$(cat)\"' > {} 2>&1; echo $? > {}",
-        b64, out_f, code_f
-    );
+    let script = build_runner("bash", &b64, &out_f, &code_f);
+    let script_sh = build_runner("sh", &b64, &out_f, &code_f);
     let (lpath, largs): (&str, Vec<&str>) = match &runas {
         Some(u) => ("su", vec![u.as_str(), "-s", "/bin/bash", "-c", &script]),
         None => ("/bin/bash", vec!["-c", &script]),

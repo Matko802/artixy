@@ -191,8 +191,14 @@ pub(crate) fn fit_bottom_lines(body: &str) -> (String, bool) {
     (kept.join("\n"), truncated)
 }
 
+pub(crate) fn normalize_nl(s: &str) -> String {
+    // Pty output uses CRLF; lone CRs (progress redraws) become lines too.
+    // Order matters: collapse CRLF first so it doesn't double up.
+    s.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 pub(crate) fn plain_tail(body: &str) -> String {
-    let cr = body.replace('\r', "\n");
+    let cr = normalize_nl(body);
     let clean = strip_sgr(after_last_clear(cr.trim_end()));
     let (fitted, truncated) = fit_bottom_lines(&clean);
     let t = if fitted.trim().is_empty() {
@@ -289,7 +295,7 @@ pub(crate) fn current_frame(s: &str) -> &str {
 /// to MAX_COLS chars.
 /// Returns (renderable text, image width, image height) sized to the text.
 pub(crate) fn frame_text(body: &str) -> (String, u32, u32) {
-    let cr = body.replace('\r', "\n");
+    let cr = normalize_nl(body);
     let clean = strip_sgr(after_last_clear(&cr));
     let lines: Vec<&str> = clean.lines().collect();
     let start = lines.len().saturating_sub(LIVE_IMG_MAX_ROWS);
