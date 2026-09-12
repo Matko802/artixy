@@ -25,6 +25,54 @@ mod tests {
     use crate::{commands::*, scrub::*, util::*};
 
     #[test]
+    fn slash_commands_allow_user_install_everywhere() {
+        // Mirrors the framework command list below: every slash command must
+        // be registered for guild+user installs and usable in guilds + DMs,
+        // or the app is dead outside servers.
+        let cmds = vec![
+            help(),
+            ps(),
+            status(),
+            start(),
+            stop(),
+            restart(),
+            info(),
+            users(),
+            userlist(),
+            user(),
+            useradd(),
+            userdel(),
+            shell(),
+            botrestart(),
+            run(),
+            shot(),
+            send(),
+            notify(),
+            purge_replies(),
+            warmode(),
+        ];
+        assert_eq!(cmds.len(), 20, "test must mirror the framework command list");
+        for cmd in &cmds {
+            let builder = cmd
+                .create_as_slash_command()
+                .unwrap_or_else(|| panic!("{} has no slash action", cmd.name));
+            let v = serde_json::to_value(&builder).expect("serializes");
+            assert_eq!(
+                v.get("integration_types"),
+                Some(&serde_json::json!([0, 1])),
+                "{} must allow guild+user installs",
+                cmd.name
+            );
+            assert_eq!(
+                v.get("contexts"),
+                Some(&serde_json::json!([0, 1, 2])),
+                "{} must allow guild+DM contexts",
+                cmd.name
+            );
+        }
+    }
+
+    #[test]
     fn palette_becomes_blocks() {
         let out = sanitize_ansi("\x1b[40m   \x1b[41m   \x1b[m");
         assert!(out.contains("\x1b[0;30m███\x1b[0m"), "got {:?}", out);

@@ -44,13 +44,23 @@ pub(crate) const HELP: &str = "\
 \n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn help(ctx: Context<'_>) -> Result<(), Error> {
     post_text(ctx, HELP).await?;
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn ps(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -66,7 +76,12 @@ pub(crate) async fn ps(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn start(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -121,7 +136,12 @@ pub(crate) async fn start(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -153,7 +173,12 @@ pub(crate) async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn restart(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -170,7 +195,12 @@ pub(crate) async fn restart(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn info(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -192,7 +222,12 @@ pub(crate) async fn info(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn shell(
     ctx: Context<'_>,
     #[description = "fish or bash (empty shows current)"] name: Option<String>,
@@ -227,7 +262,12 @@ pub(crate) async fn shell(
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn botrestart(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -281,7 +321,12 @@ pub(crate) async fn botrestart(ctx: Context<'_>) -> Result<(), Error> {
     }
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn run(
     ctx: Context<'_>,
     #[description = "Command to run in the VM"] cmd: String,
@@ -317,7 +362,12 @@ pub(crate) async fn run(
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn shot(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -354,7 +404,12 @@ pub(crate) async fn shot(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn send(
     ctx: Context<'_>,
     #[description = "Absolute path of a file inside the bot's project dir (max ~20MB)"] path: String,
@@ -415,7 +470,12 @@ pub(crate) async fn send(
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn status(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -436,7 +496,12 @@ pub(crate) async fn status(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn useradd(
     ctx: Context<'_>,
     #[description = "User to authorize"] user: serenity::User,
@@ -444,7 +509,12 @@ pub(crate) async fn useradd(
     do_useradd(ctx, &user).await
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn userdel(
     ctx: Context<'_>,
     #[description = "User to remove"] user: serenity::User,
@@ -462,7 +532,12 @@ pub(crate) fn parse_channel(s: &str) -> Option<u64> {
     s.trim().parse::<u64>().ok().filter(|id| *id != 0)
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn notify(
     ctx: Context<'_>,
     #[description = "channel ID for boot messages, or off"] what: Option<String>,
@@ -502,7 +577,12 @@ pub(crate) async fn notify(
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn warmode(
     ctx: Context<'_>,
     #[description = "true to arm protections, false to stand down"] enabled: bool,
@@ -539,7 +619,12 @@ pub(crate) fn parse_target_id(s: &str) -> Option<u64> {
     inner.parse::<u64>().ok().filter(|id| *id != 0)
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn purge_replies(
     ctx: Context<'_>,
     #[description = "User/bot ID whose replies to my messages get deleted"] target: String,
@@ -626,24 +711,45 @@ pub(crate) async fn purge_replies(
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn users(ctx: Context<'_>) -> Result<(), Error> {
     do_users(ctx).await
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn userlist(ctx: Context<'_>) -> Result<(), Error> {
     do_users(ctx).await
 }
 
-#[poise::command(slash_command, prefix_command, subcommands("add", "del"))]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    subcommands("add", "del"),
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn user(ctx: Context<'_>) -> Result<(), Error> {
     post_text(ctx, "Usage: `;user add <discord id> [linuxname]` or `;user del <discord id>`.")
         .await?;
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn add(
     ctx: Context<'_>,
     #[description = "User to authorize"] user: serenity::User,
@@ -651,7 +757,12 @@ pub(crate) async fn add(
     do_useradd(ctx, &user).await
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
 pub(crate) async fn del(
     ctx: Context<'_>,
     #[description = "User to remove"] user: serenity::User,
