@@ -10,8 +10,8 @@ use poise::serenity_prelude as serenity;
 use std::path::PathBuf;
 
 use crate::commands::{
-    botrestart, help, info, live, notify, ps, restart, run, send, shell, shot, start, status,
-    stop, user, useradd, userdel, userlist, users,
+    botrestart, help, info, live, notify, ps, purge_replies, restart, run, send, shell, shot,
+    start, status, stop, user, useradd, userdel, userlist, users,
 };
 use crate::commands::BOOT_ART;
 use crate::config::{Allowed, AllowedFile, BotSettings, Data, load_shells};
@@ -126,6 +126,18 @@ mod tests {
         assert_eq!(parse_channel("0"), None);
         assert_eq!(parse_channel("abc"), None);
         assert_eq!(parse_channel("<#123456789>"), None);
+    }
+
+    #[test]
+    fn parse_target_id_accepts_mention_or_id() {
+        assert_eq!(parse_target_id("1546673525392146553"), Some(1546673525392146553));
+        assert_eq!(parse_target_id("<@1546673525392146553>"), Some(1546673525392146553));
+        assert_eq!(parse_target_id("<@!1546673525392146553>"), Some(1546673525392146553));
+        assert_eq!(parse_target_id("  123  "), Some(123));
+        assert_eq!(parse_target_id(""), None);
+        assert_eq!(parse_target_id("0"), None);
+        assert_eq!(parse_target_id("abc"), None);
+        assert_eq!(parse_target_id("<@abc>"), None);
     }
 
     #[test]
@@ -276,6 +288,7 @@ async fn main() {
                 shot(),
                 send(),
                 notify(),
+                purge_replies(),
             ],
             on_error: |error| {
                 Box::pin(async move {

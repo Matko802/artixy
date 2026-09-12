@@ -54,7 +54,7 @@ pub(crate) async fn send_output(ctx: Context<'_>, cmd: &str, body: &str) -> Resu
 pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
-\n**Who can use me**\n`/users` / `/userlist` — show owner + managers\n`/useradd @user` — owner only: links them and creates their Linux account in Artix (name from discord name).\n`/userdel @user` — owner only: revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/run <command>` — run it for real inside the VM, prints the output\n\
+\n**Who can use me**\n`/users` / `/userlist` — show owner + managers\n`/useradd @user` — owner only: links them and creates their Linux account in Artix (name from discord name).\n`/userdel @user` — owner only: revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/run <command>` — run it for real inside the VM, prints the output\n\
 \n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`/live <command>` — follows one run live in a single message until it finishes. Starting another run stops it.\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
@@ -553,6 +553,83 @@ pub(crate) async fn notify(
             }
         },
     }
+    Ok(())
+}
+
+pub(crate) fn parse_target_id(s: &str) -> Option<u64> {
+    let t = s.trim();
+    let inner = t
+        .strip_prefix("<@")
+        .and_then(|r| r.strip_suffix('>'))
+        .map(|r| r.strip_prefix('!').unwrap_or(r))
+        .unwrap_or(t);
+    inner.parse::<u64>().ok().filter(|id| *id != 0)
+}
+
+#[poise::command(slash_command, prefix_command)]
+pub(crate) async fn purge_replies(
+    ctx: Context<'_>,
+    #[description = "User/bot ID whose replies to my messages get deleted"] target: String,
+    #[description = "How many recent messages to scan (default 50, max 100)"] limit: Option<u8>,
+) -> Result<(), Error> {
+    if !is_owner(ctx).await {
+        ctx.say("Owner only.").await?;
+        return Ok(());
+    }
+    let Some(target_id) = parse_target_id(&target) else {
+        ctx.say("Usage: `/purge_replies <user-id> [limit]`.").await?;
+        return Ok(());
+    };
+    maybe_defer(ctx).await;
+    let http = ctx.serenity_context().http.clone();
+    let bot_id = match http.get_current_user().await {
+        Ok(u) => u.id.get(),
+        Err(e) => {
+            ctx.say(codeblock(&format!("could not learn my own id: {}", e))).await?;
+            return Ok(());
+        }
+    };
+    let channel = ctx.channel_id();
+    let n = limit.unwrap_or(50).clamp(1, 100);
+    let msgs = match channel.messages(&http, serenity::GetMessages::new().limit(n)).await {
+        Ok(m) => m,
+        Err(e) => {
+            ctx.say(codeblock(&format!("could not read channel history: {}", e))).await?;
+            return Ok(());
+        }
+    };
+    let scanned = msgs.len() as u32;
+    let mut deleted = 0u32;
+    for m in &msgs {
+        if m.author.id.get() != target_id {
+            continue;
+        }
+        let replied_to_me = match &m.referenced_message {
+            Some(r) => r.author.id.get() == bot_id,
+            None => match &m.message_reference {
+                Some(r) => match r.message_id {
+                    Some(mid) => match channel.message(&http, mid).await {
+                        Ok(orig) => orig.author.id.get() == bot_id,
+                        Err(_) => false,
+                    },
+                    None => false,
+                },
+                None => false,
+            },
+        };
+        if !replied_to_me {
+            continue;
+        }
+        match m.delete(&http).await {
+            Ok(_) => deleted += 1,
+            Err(e) => eprintln!("purge_replies: failed to delete {}: {}", m.id.get(), e),
+        }
+    }
+    ctx.say(format!(
+        "Scanned {} recent messages, deleted {} replies from `<@{target_id}>` to my messages.",
+        scanned, deleted
+    ))
+    .await?;
     Ok(())
 }
 
