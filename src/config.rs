@@ -29,6 +29,7 @@ pub(crate) struct Allowed {
     pub(crate) users: Vec<u64>,
     pub(crate) linux: std::collections::HashMap<String, String>,
     pub(crate) path: PathBuf,
+    pub(crate) blocked: Vec<u64>,
 }
 
 impl Allowed {
@@ -43,6 +44,48 @@ impl Allowed {
         )
         .await
     }
+}
+
+#[derive(Deserialize, Default)]
+pub(crate) struct FileConfig {
+    #[serde(default)]
+    pub(crate) owner_id: Option<u64>,
+    #[serde(default)]
+    pub(crate) blocked_ids: Vec<u64>,
+}
+
+pub(crate) fn access_allowed(owner: u64, users: &[u64], blocked: &[u64], id: u64) -> bool {
+    !blocked.contains(&id) && (id == owner || users.contains(&id))
+}
+
+pub(crate) fn config_file_path() -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    base.map(|b| b.join("artixy").join("config.toml"))
+        .unwrap_or_else(|| PathBuf::from("config.toml"))
+}
+
+pub(crate) fn load_file_config() -> FileConfig {
+    std::fs::read_to_string(config_file_path())
+        .ok()
+        .and_then(|r| toml::from_str(&r).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn ensure_config_template(owner_id: u64) {
+    let path = config_file_path();
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let template = format!("owner_id = {}\nblocked_ids = []\n", owner_id);
+    let _ = std::fs::write(path, template);
 }
 
 pub(crate) fn load_shells() -> std::collections::HashMap<String, String> {
@@ -72,5 +115,48 @@ pub(crate) async fn save_json(path: &str, data: String) -> Result<(), Error> {
     drop(f);
     tokio::fs::rename(&tmp, path).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(text: &str) -> FileConfig {
+        toml::from_str(text).expect("test TOML must parse")
+    }
+
+    #[test]
+    fn file_config_parses_full() {
+        let c = parse("owner_id = 123\nblocked_ids = [4, 5]\n");
+        assert_eq!(c.owner_id, Some(123));
+        assert_eq!(c.blocked_ids, vec![4, 5]);
+    }
+
+    #[test]
+    fn file_config_missing_keys_default() {
+        let c = parse("");
+        assert_eq!(c.owner_id, None);
+        assert!(c.blocked_ids.is_empty());
+        let c = parse("owner_id = 7\n");
+        assert_eq!(c.owner_id, Some(7));
+        assert!(c.blocked_ids.is_empty());
+    }
+
+    #[test]
+    fn file_config_invalid_is_default() {
+        let c: FileConfig = toml::from_str("owner_id = [unclosed").unwrap_or_default();
+        assert_eq!(c.owner_id, None);
+        assert!(c.blocked_ids.is_empty());
+    }
+
+    #[test]
+    fn access_allowed_matrix() {
+        assert!(access_allowed(1, &[2], &[], 1));
+        assert!(access_allowed(1, &[2], &[], 2));
+        assert!(!access_allowed(1, &[2], &[], 3));
+        assert!(!access_allowed(1, &[2], &[2], 2));
+        assert!(!access_allowed(1, &[2], &[1], 1));
+        assert!(!access_allowed(1, &[], &[9], 9));
+    }
 }
 

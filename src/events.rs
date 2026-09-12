@@ -32,7 +32,14 @@ pub(crate) async fn event_handler(
     if new_message.author.bot {
         return Ok(());
     }
-    let owner = new_message.author.id.get() == data.allowed.read().await.owner;
+    let id = new_message.author.id.get();
+    let (owner, blocked) = {
+        let a = data.allowed.read().await;
+        (id == a.owner, a.blocked.contains(&id))
+    };
+    if blocked {
+        return Ok(());
+    }
     if !owner {
         if is_boo_message(&new_message.content) {
             let _ = new_message.reply(&ctx.http, "boo on you! :3").await;

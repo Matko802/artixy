@@ -14,7 +14,7 @@ use crate::{
 pub(crate) async fn is_authed(ctx: Context<'_>) -> bool {
     let id = ctx.author().id.get();
     let a = ctx.data().allowed.read().await;
-    id == a.owner || a.users.contains(&id)
+    crate::config::access_allowed(a.owner, &a.users, &a.blocked, id)
 }
 
 pub(crate) async fn is_owner(ctx: Context<'_>) -> bool {

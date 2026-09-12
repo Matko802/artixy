@@ -14,7 +14,7 @@ use crate::commands::{
     start, status, stop, user, useradd, userdel, userlist, users,
 };
 use crate::commands::BOOT_ART;
-use crate::config::{Allowed, AllowedFile, BotSettings, Data, load_shells};
+use crate::config::{Allowed, AllowedFile, BotSettings, Data, load_file_config, ensure_config_template, load_shells};
 use crate::util::project_dir;
 
 pub(crate) type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -226,10 +226,15 @@ mod tests {
 #[tokio::main]
 async fn main() {
     let token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN env missing");
-    let owner: u64 = std::env::var("OWNER_ID")
-        .expect("OWNER_ID env missing")
-        .parse()
-        .expect("OWNER_ID must be a number");
+    let file_config = load_file_config();
+    let owner: u64 = match file_config.owner_id {
+        Some(id) => id,
+        None => std::env::var("OWNER_ID")
+            .expect("set owner_id in ~/.config/artixy/config.toml or OWNER_ID env")
+            .parse()
+            .expect("OWNER_ID must be a number"),
+    };
+    ensure_config_template(owner);
     let _ = std::env::set_current_dir(project_dir());
     let vm = std::env::var("VM_NAME").unwrap_or_else(|_| "voidvm".into());
     let bot_settings: BotSettings = tokio::fs::read_to_string("settings.json")
@@ -259,6 +264,7 @@ async fn main() {
             users: saved_users,
             path,
             linux: saved_linux,
+            blocked: file_config.blocked_ids,
         }),
         vm,
         live: Default::default(),
