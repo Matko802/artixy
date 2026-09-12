@@ -220,7 +220,52 @@ pub(crate) async fn live_run(
             }
             None => {
                 body.push_str("\n\u{1b}[0;33m…live\u{1b}[0m");
-                if !edit_posted(&poster, &http, channel, msg.id, ansi_tail(&body), Vec::new()).await {
+                let text = ansi_tail(&body);
+                // When the full output no longer fits in a message, attach it
+                // as a file live too (not just on the final edit). Check size
+                // cheaply with wc first so small outputs skip the big fetch.
+                let files = {
+                    let size = guest_exec(&vm, "/usr/bin/wc", &["-c", &out_f], true, 10)
+                        .await
+                        .map(|(_, o, _)| {
+                            o.split_whitespace()
+                                .next()
+                                .and_then(|n| n.parse::<usize>().ok())
+                                .unwrap_or(0)
+                        })
+                        .unwrap_or(0);
+                    if size > 1500 {
+                        match guest_exec(&vm, "/usr/bin/tail", &["-c", "500000", &out_f], true, 30)
+                            .await
+                        {
+                            Ok((_, full, _)) => {
+                                let full = if scrub_ip {
+                                    scrub_public_ip(&full)
+                                } else {
+                                    full
+                                };
+                                let clean_full = sanitize_ansi(&format!(
+                                    "\u{1b}[0;32m$ {}\u{1b}[0m\n{}",
+                                    cmd,
+                                    full.trim_end()
+                                ));
+                                let (_, truncated_full) = fit_bottom_lines(&clean_full);
+                                if truncated_full {
+                                    vec![(
+                                        attach_name(&cmd),
+                                        cap_file_body(&strip_sgr(&clean_full)).into_bytes(),
+                                    )]
+                                } else {
+                                    Vec::new()
+                                }
+                            }
+                            Err(_) => Vec::new(),
+                        }
+                    } else {
+                        Vec::new()
+                    }
+                };
+                if !edit_posted(&poster, &http, channel, msg.id, text, files).await {
                     cleanup_live_files(&vm, &out_f, &code_f).await;
                     break;
                 }
