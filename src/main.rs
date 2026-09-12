@@ -613,9 +613,8 @@ async fn send_output(ctx: Context<'_>, cmd: &str, body: &str) -> Result<(), Erro
         ctx.say(fence_inline(&fitted)).await?;
         return Ok(());
     }
-    let preview = format!("```ansi\n…\n{}\n```", fitted);
     let att = serenity::CreateAttachment::bytes(cap_file_body(&clean).into_bytes(), attach_name(cmd));
-    ctx.send(poise::CreateReply::default().content(preview).attachment(att))
+    ctx.send(poise::CreateReply::default().attachment(att))
         .await?;
     Ok(())
 }
@@ -1790,7 +1789,6 @@ async fn event_handler(
             let _ = new_message.channel_id.say(&ctx.http, msg).await;
         }
     } else {
-        let preview = format!("```ansi\n…\n{}\n```", fitted);
         let att = serenity::CreateAttachment::bytes(
             cap_file_body(&clean).into_bytes(),
             attach_name(text),
@@ -1799,7 +1797,7 @@ async fn event_handler(
             .channel_id
             .send_message(
                 &ctx.http,
-                serenity::CreateMessage::new().content(preview).add_file(att),
+                serenity::CreateMessage::new().add_file(att),
             )
             .await;
     }
