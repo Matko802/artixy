@@ -12,6 +12,14 @@ fn is_boo_message(s: &str) -> bool {
         .any(|w| w == "boo")
 }
 
+const TAUNT: &str = "purged your message haha";
+
+fn blocked_reply_action(ref_author: Option<u64>, ref_content: &str, me: u64) -> (bool, bool) {
+    match ref_author {
+        Some(a) if a == me => (true, ref_content != TAUNT),
+        _ => (false, false),
+    }
+}
 fn artixy_text(s: &str) -> Option<String> {
     let text = s.trim_end().strip_suffix(".ar")?.trim();
     if text.is_empty() {
@@ -29,15 +37,51 @@ pub(crate) async fn event_handler(
     let serenity::FullEvent::Message { new_message } = event else {
         return Ok(());
     };
-    if new_message.author.bot {
-        return Ok(());
-    }
     let id = new_message.author.id.get();
     let (owner, blocked) = {
         let a = data.allowed.read().await;
         (id == a.owner, a.blocked.contains(&id))
     };
     if blocked {
+        let me = match ctx.http.get_current_user().await {
+            Ok(u) => u.id.get(),
+            Err(_) => return Ok(()),
+        };
+        let (delete, taunt) = match &new_message.referenced_message {
+            Some(r) => blocked_reply_action(Some(r.author.id.get()), &r.content, me),
+            None => match &new_message.message_reference {
+                Some(r) => match r.message_id {
+                    Some(mid) => match new_message.channel_id.message(&ctx.http, mid).await {
+                        Ok(orig) => {
+                            blocked_reply_action(Some(orig.author.id.get()), &orig.content, me)
+                        }
+                        Err(_) => (false, false),
+                    },
+                    None => (false, false),
+                },
+                None => (false, false),
+            },
+        };
+        if delete {
+            match new_message.delete(&ctx.http).await {
+                Ok(_) => {
+                    if taunt {
+                        let _ = new_message.channel_id.say(&ctx.http, TAUNT).await;
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "guard: failed to delete blocked reply {} in {}: {}",
+                        new_message.id.get(),
+                        new_message.channel_id.get(),
+                        e
+                    );
+                }
+            }
+        }
+        return Ok(());
+    }
+    if new_message.author.bot {
         return Ok(());
     }
     if !owner {
@@ -113,8 +157,19 @@ mod tests {
     }
 
     #[test]
-    fn artixy_suffix_returns_plain_text() {
-        assert_eq!(artixy_text("hello .ar"), Some("hello".into()));
+    fn blocked_reply_verdicts() {
+        assert_eq!(blocked_reply_action(Some(9), "trash talk", 9), (true, true));
+        assert_eq!(
+            blocked_reply_action(Some(9), "purged your message haha", 9),
+            (true, false)
+        );
+        assert_eq!(blocked_reply_action(Some(3), "trash talk", 9), (false, false));
+        assert_eq!(blocked_reply_action(None, "trash talk", 9), (false, false));
+        assert_eq!(blocked_reply_action(None, "", 9), (false, false));
+    }
+
+    #[test]
+    fn artixy_suffix_returns_plain_text() {        assert_eq!(artixy_text("hello .ar"), Some("hello".into()));
         assert_eq!(artixy_text("hello .ar   "), Some("hello".into()));
         assert_eq!(artixy_text("a.ar"), Some("a".into()));
         assert_eq!(artixy_text(".ar"), None);
