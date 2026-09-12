@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct PrefixSettings {
-    dollar: Option<String>,
     semicolon: Option<String>,
 }
 
@@ -621,10 +620,10 @@ async fn send_output(ctx: Context<'_>, cmd: &str, body: &str) -> Result<(), Erro
 
 const HELP: &str = "\
 **artixy — your Artix VM in your pocket.** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me.\n\
-\n**VM**\n`$ps` — state of the VM\n`$status` — quick state + agent check\n`$start` — power on + wait for guest agent\n`$stop` — graceful shutdown\n`$restart` — reboot\n`$info` — details + agent status\n\
-\n**Who can use me**\n`$users` / `$userlist` — show owner + managers\n`$useradd @user` (prefix only) — owner only: links them and creates their Linux account in Artix (name from discord name).\n`$userdel @user` (prefix only) — owner only\n`$shell [fish|bash]` — your `$` interpreter (default bash)\n`$run <command>` — same as `$`, prefix only\n\
-\nPrefixes start OFF — slash commands always work. Owner turns them on in `/settings` (e.g. `/settings dollar $`).\n\
-\n**Run real commands in Artix**\n`$<command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `$sudo pacman -Syu`, `$ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`$live <command>` — follows one run live in a single message until it finishes. Starting another run stops it.\n`$shot` — screenshot of the host screen, uploaded here\n`$send <path>` — upload a host file here (absolute path, ~20MB max)\n\
+\n**VM**\n`;ps` — state of the VM\n`;status` — quick state + agent check\n`;start` — power on + wait for guest agent\n`;stop` — graceful shutdown\n`;restart` — reboot\n`;info` — details + agent status\n\
+\n**Who can use me**\n`;users` / `;userlist` — show owner + managers\n`;useradd @user` (prefix only) — owner only: links them and creates their Linux account in Artix (name from discord name).\n`;userdel @user` (prefix only) — owner only\n`;shell [fish|bash]` — your `$` interpreter (default bash)\n`;run <command>` — same as `;`, prefix only\n\
+\nPrefix starts OFF — slash commands always work. Owner turns it on in `/settings` (e.g. `/settings semicolon ;`).\n\
+\n**Run real commands in Artix**\n`;` followed by anything — runs it for real inside the VM through the guest agent and prints the output. e.g. `;sudo pacman -Syu`, `;ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`;live <command>` — follows one run live in a single message until it finishes. Starting another run stops it.\n`;shot` — screenshot of the host screen, uploaded here\n`;send <path>` — upload a host file here (absolute path, ~20MB max)\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
 #[poise::command(slash_command, prefix_command)]
@@ -699,7 +698,7 @@ async fn start(ctx: Context<'_>) -> Result<(), Error> {
             .await?;
         }
     } else {
-        ctx.say(format!("`{}` is on but the guest agent is silent. Inside Artix run `sudo pacman -S qemu-guest-agent` and enable its service, then `$start` again.", vm)).await?;
+        ctx.say(format!("`{}` is on but the guest agent is silent. Inside Artix run `sudo pacman -S qemu-guest-agent` and enable its service, then `;start` again.", vm)).await?;
     }
     Ok(())
 }
@@ -932,7 +931,7 @@ async fn run(
 async fn do_live(ctx: Context<'_>, cmd: String) -> Result<(), Error> {
     maybe_defer(ctx).await;
     if cmd.trim().is_empty() {
-        ctx.say("Usage: `$live <command>`.").await?;
+        ctx.say("Usage: `;live <command>`.").await?;
         return Ok(());
     }
     let vm = ctx.data().vm.clone();
@@ -1114,13 +1113,12 @@ fn settings_text(s: &PrefixSettings) -> String {
         None => "OFF".into(),
     };
     format!(
-        "Prefixes (slash commands always work):\n$ slot: {}\n; slot: {}\nChange (owner only): `/settings dollar <off|$|!|…>`, `/settings semicolon <off|;|…>` — 1-2 symbol chars, or `off`.",
-        show(&s.dollar),
+        "Prefix (slash commands always work):\n; slot: {}\nChange (owner only): `/settings semicolon <off|;|…>` — 1-2 symbol chars, or `off`.",
         show(&s.semicolon)
     )
 }
 
-async fn do_settings_set(ctx: Context<'_>, slot: &str, value: String) -> Result<(), Error> {
+async fn do_settings_set(ctx: Context<'_>, value: String) -> Result<(), Error> {
     if !is_owner(ctx).await {
         ctx.say("Owner only.").await?;
         return Ok(());
@@ -1129,11 +1127,7 @@ async fn do_settings_set(ctx: Context<'_>, slot: &str, value: String) -> Result<
     {
         let mut s = ctx.data().settings.write().await;
         if v.eq_ignore_ascii_case("off") {
-            if slot == "dollar" {
-                s.dollar = None;
-            } else {
-                s.semicolon = None;
-            }
+            s.semicolon = None;
         } else {
             let n = v.chars().count();
             if !(1..=2).contains(&n) || !v.chars().all(|c| !c.is_alphanumeric() && !c.is_whitespace()) {
@@ -1141,16 +1135,7 @@ async fn do_settings_set(ctx: Context<'_>, slot: &str, value: String) -> Result<
                     .await?;
                 return Ok(());
             }
-            let other = if slot == "dollar" { &s.semicolon } else { &s.dollar };
-            if other.as_deref() == Some(v) {
-                ctx.say("The other slot already uses that.").await?;
-                return Ok(());
-            }
-            if slot == "dollar" {
-                s.dollar = Some(v.into());
-            } else {
-                s.semicolon = Some(v.into());
-            }
+            s.semicolon = Some(v.into());
         }
     }
     save_settings(ctx.data()).await?;
@@ -1159,7 +1144,7 @@ async fn do_settings_set(ctx: Context<'_>, slot: &str, value: String) -> Result<
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command, subcommands("dollar", "semicolon"))]
+#[poise::command(slash_command, prefix_command)]
 async fn settings(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -1170,19 +1155,11 @@ async fn settings(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 #[poise::command(slash_command, prefix_command)]
-async fn dollar(
-    ctx: Context<'_>,
-    #[description = "off or 1-2 symbol chars"] value: String,
-) -> Result<(), Error> {
-    do_settings_set(ctx, "dollar", value).await
-}
-
-#[poise::command(slash_command, prefix_command)]
 async fn semicolon(
     ctx: Context<'_>,
     #[description = "off or 1-2 symbol chars"] value: String,
 ) -> Result<(), Error> {
-    do_settings_set(ctx, "semicolon", value).await
+    do_settings_set(ctx, value).await
 }
 
 #[poise::command(slash_command, prefix_command)]
@@ -1313,7 +1290,7 @@ async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error
         }
     }
     if !wait_agent(&vm, 60).await {
-            ctx.say(format!("Authorized `{}` in the bot, but the guest agent is silent — no Linux account created. Install `qemu-guest-agent` in Artix, then rerun `$useradd <@{}> {}`.", uid, uid, name)).await?;
+            ctx.say(format!("Authorized `{}` in the bot, but the guest agent is silent — no Linux account created. Install `qemu-guest-agent` in Artix, then rerun `;useradd <@{}> {}`.", uid, uid, name)).await?;
         return Ok(());
     }
     let mut rc = guest_exec(&vm, "/usr/bin/useradd", &["-m", "-s", "/bin/bash", &name], false, 30).await;
@@ -1396,7 +1373,7 @@ const COMMANDS: &[&str] = &[
     "add", "del", "useradd", "userdel", "userlist", "shell",
     "botrestart", "run", "live",
     "shot", "send",
-    "settings", "dollar", "semicolon",
+    "settings", "semicolon",
 ];
 async fn begin_live(
     http: std::sync::Arc<serenity::Http>,
@@ -1644,11 +1621,6 @@ async fn run_guest_cmd(vm: &str, shell: &str, cmd_text: &str, runas: Option<&str
 }
 
 fn match_slot<'a>(content: &'a str, s: &PrefixSettings) -> Option<&'a str> {
-    if let Some(p) = &s.dollar {
-        if content.starts_with(p.as_str()) {
-            return Some(&content[p.len()..]);
-        }
-    }
     if let Some(p) = &s.semicolon {
         if content.starts_with(p.as_str()) {
             return Some(&content[p.len()..]);
@@ -1736,7 +1708,7 @@ async fn event_handler(
             .to_string();
         if cmd.is_empty() {
             new_message
-                .reply(&ctx.http, "Usage: `$live <command>`.")
+                .reply(&ctx.http, "Usage: `;live <command>`.")
                 .await?;
             return Ok(());
         }
@@ -2011,6 +1983,7 @@ async fn main() {
                 shot(),
                 send(),
                 settings(),
+                semicolon(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: None,
