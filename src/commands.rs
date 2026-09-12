@@ -6,7 +6,7 @@ use crate::{
     config::save_settings,
     live::{abort_live_for_channel, begin_live, cleanup_live_files},
     scrub::scrub_public_ip,
-    util::{ansi_to_html, attach_name, cap_file_body, codeblock, deployed_via_nix, fence_inline, fit_bottom_lines, project_dir, random_suffix, sanitize_ansi, valid_runas},
+    util::{attach_name, cap_file_body, codeblock, deployed_via_nix, fence_inline, fit_bottom_lines, project_dir, random_suffix, sanitize_ansi, strip_sgr, valid_runas},
     vm::{agent_ping, guest_exec, linked_user, run_guest_cmd, user_shell, virsh, wait_agent},
     Context, Error,
 };
@@ -45,7 +45,7 @@ pub(crate) async fn send_output(ctx: Context<'_>, cmd: &str, body: &str) -> Resu
         ctx.say(fence_inline(&fitted)).await?;
         return Ok(());
     }
-    let att = serenity::CreateAttachment::bytes(ansi_to_html(&cap_file_body(&clean)).into_bytes(), attach_name(cmd));
+    let att = serenity::CreateAttachment::bytes(cap_file_body(&strip_sgr(&clean)).into_bytes(), attach_name(cmd));
     ctx.send(poise::CreateReply::default().attachment(att))
         .await?;
     Ok(())

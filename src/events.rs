@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::{
     config::Data,
-    util::{ansi_to_html, attach_name, cap_file_body},
+    util::{attach_name, cap_file_body, strip_sgr},
     Error,
 };
 
@@ -49,7 +49,7 @@ pub(crate) async fn event_handler(
         }
     } else {
         let att = serenity::CreateAttachment::bytes(
-            ansi_to_html(&cap_file_body(&text)).into_bytes(),
+            cap_file_body(&strip_sgr(&text)).into_bytes(),
             attach_name(&text),
         );
         new_message

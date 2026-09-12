@@ -232,109 +232,42 @@ pub(crate) fn attach_name(cmd: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     if w.is_empty() {
-        "output.html".into()
+        "output.txt".into()
     } else {
-        format!("{}.html", w)
+        format!("{}.txt", w)
     }
 }
 
-fn ansi_pal(n: u8) -> &'static str {
-    match n {
-        0 => "#000000",
-        1 => "#aa0000",
-        2 => "#00aa00",
-        3 => "#aa5500",
-        4 => "#0000aa",
-        5 => "#aa00aa",
-        6 => "#00aaaa",
-        _ => "#aaaaaa",
-    }
-}
 
-fn html_escape_into(o: &mut String, c: char) {
-    match c {
-        '&' => o.push_str("&amp;"),
-        '<' => o.push_str("&lt;"),
-        '>' => o.push_str("&gt;"),
-        _ => o.push(c),
-    }
-}
-
-fn open_span(o: &mut String, fg: Option<u8>, bg: Option<u8>, bold: bool, under: bool) {
-    o.push_str("<span style=\"");
-    if let Some(c) = fg {
-        o.push_str("color:");
-        o.push_str(ansi_pal(c - 30));
-        o.push(';');
-    }
-    if let Some(c) = bg {
-        o.push_str("background:");
-        o.push_str(ansi_pal(c - 40));
-        o.push(';');
-    }
-    if bold {
-        o.push_str("font-weight:bold;");
-    }
-    if under {
-        o.push_str("text-decoration:underline;");
-    }
-    o.push_str("\">");
-}
-
-pub(crate) fn ansi_to_html(s: &str) -> String {
-    let mut o = String::from("<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body style=\"background:#101010;color:#cccccc;\"><pre style=\"font-family:monospace;\">");
+pub(crate) fn strip_sgr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
     let b = s.as_bytes();
     let mut i = 0;
-    let mut fg: Option<u8> = None;
-    let mut bg: Option<u8> = None;
-    let mut bold = false;
-    let mut under = false;
-    let mut span = false;
-    let mut styled = false;
     while i < b.len() {
         if b[i] == 0x1b && i + 1 < b.len() && b[i + 1] == b'[' {
             let mut j = i + 2;
             while j < b.len() && !b[j].is_ascii_alphabetic() {
                 j += 1;
             }
-            if j < b.len() && b[j] == b'm' {
-                if span {
-                    o.push_str("</span>");
-                    span = false;
-                }
-                let params = &s[i + 2..j];
-                let list: Vec<&str> = if params.is_empty() {
-                    vec!["0"]
-                } else {
-                    params.split(';').collect()
-                };
-                for p in list {
-                    match p.parse::<u8>() {
-                        Ok(0) => {
-                            fg = None;
-                            bg = None;
-                            bold = false;
-                            under = false;
-                        }
-                        Ok(1) => bold = true,
-                        Ok(22) => bold = false,
-                        Ok(4) => under = true,
-                        Ok(24) => under = false,
-                        Ok(n @ 30..=37) => fg = Some(n),
-                        Ok(39) => fg = None,
-                        Ok(n @ 40..=47) => bg = Some(n),
-                        Ok(49) => bg = None,
-                        _ => {}
-                    }
-                }
-                styled = fg.is_some() || bg.is_some() || bold || under;
-                i = j + 1;
-                continue;
-            }
             i = (j + 1).min(b.len());
             continue;
         }
         if b[i] == 0x1b {
+            if i + 1 < b.len() && b[i + 1] == b']' {
+                let mut j = i + 2;
+                while j < b.len() && b[j] != 0x07 {
+                    if b[j] == 0x1b && j + 1 < b.len() && b[j + 1] == b'\\' {
+                        j += 2;
+                        break;
+                    }
+                    j += 1;
+                }
+                if j < b.len() && b[j] == 0x07 {
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
             i += 1;
             if i < b.len() {
                 i += 1;
@@ -345,22 +278,12 @@ pub(crate) fn ansi_to_html(s: &str) -> String {
             i += 1;
             continue;
         }
-        if styled && !span {
-            open_span(&mut o, fg, bg, bold, under);
-            span = true;
-        }
         let len = utf8_len(b[i]);
         let end = (i + len).min(b.len());
-        for c in s[i..end].chars() {
-            html_escape_into(&mut o, c);
-        }
+        out.push_str(&s[i..end]);
         i = end;
     }
-    if span {
-        o.push_str("</span>");
-    }
-    o.push_str("</pre></body></html>");
-    o
+    out
 }
 
 pub(crate) fn deployed_via_nix() -> bool {
