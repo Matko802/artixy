@@ -8,14 +8,13 @@ mod vm;
 mod webhook;
 
 use poise::serenity_prelude as serenity;
-use std::path::PathBuf;
 
 use crate::commands::{
     botrestart, help, info, live, notify, ps, purge_replies, restart, run, send, shell, shot,
     start, status, stop, user, useradd, userdel, userlist, users, warmode,
 };
 use crate::commands::BOOT_ART;
-use crate::config::{Allowed, AllowedFile, BotSettings, Data, load_file_config, ensure_config_template, load_shells};
+use crate::config::{Allowed, AllowedFile, BotSettings, Data, apply_legacy_import, config_file_path, ensure_config_template, load_file_config, save_json};
 use crate::util::project_dir;
 
 pub(crate) type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -226,7 +225,8 @@ mod tests {
 
 #[tokio::main]
 async fn main() {
-    let file_config = load_file_config();
+    let fresh_config = !config_file_path().exists();
+    let mut file_config = load_file_config();
     let token: String = match file_config.discord_token.clone() {
         Some(t) => t,
         None => std::env::var("DISCORD_TOKEN")
@@ -240,6 +240,31 @@ async fn main() {
             .expect("OWNER_ID must be a number"),
     };
     ensure_config_template(owner);
+    if fresh_config {
+        let legacy_users: AllowedFile = tokio::fs::read_to_string("users.json")
+            .await
+            .ok()
+            .and_then(|r| serde_json::from_str(&r).ok())
+            .unwrap_or_default();
+        let legacy_shells: std::collections::HashMap<String, String> =
+            tokio::fs::read_to_string("shells.json")
+                .await
+                .ok()
+                .and_then(|r| serde_json::from_str(&r).ok())
+                .unwrap_or_default();
+        let legacy_notify: Option<u64> = tokio::fs::read_to_string("settings.json")
+            .await
+            .ok()
+            .and_then(|r| serde_json::from_str::<BotSettings>(&r).ok())
+            .and_then(|s| s.notify_channel);
+        apply_legacy_import(&mut file_config, legacy_users, legacy_shells, legacy_notify);
+        if let Ok(text) = toml::to_string_pretty(&file_config) {
+            let p = config_file_path();
+            let ps = p.to_string_lossy().to_string();
+            let _ = tokio::fs::remove_file(&p).await;
+            let _ = save_json(&ps, text).await;
+        }
+    }
     crate::webhook::init_webhook_urls(file_config.webhook_urls);
     let _ = std::env::set_current_dir(project_dir());
     let vm = file_config
@@ -248,39 +273,20 @@ async fn main() {
         .filter(|s| !s.trim().is_empty())
         .or_else(|| std::env::var("VM_NAME").ok())
         .unwrap_or_else(|| "voidvm".into());
-    let bot_settings: BotSettings = tokio::fs::read_to_string("settings.json")
-        .await
-        .ok()
-        .and_then(|r| serde_json::from_str(&r).ok())
-        .unwrap_or_default();
-    let path = PathBuf::from("users.json");
-    let (saved_users, saved_linux): (Vec<u64>, std::collections::HashMap<String, String>) =
-        if path.exists() {
-            let raw = tokio::fs::read_to_string(&path)
-                .await
-                .expect("read users.json");
-            if raw.trim().is_empty() {
-                Default::default()
-            } else {
-                serde_json::from_str::<AllowedFile>(&raw)
-                    .map(|f| (f.users, f.linux))
-                    .unwrap_or_default()
-            }
-    } else {
-        Default::default()
-    };
     let data = Data {
         allowed: tokio::sync::RwLock::new(Allowed {
             owner,
-            users: saved_users,
-            path,
-            linux: saved_linux,
-            blocked: file_config.blocked_ids,
+            users: file_config.managers.clone(),
+            linux: file_config.linux.clone(),
+            blocked: file_config.blocked_ids.clone(),
         }),
         vm,
         live: Default::default(),
-        settings: tokio::sync::RwLock::new(bot_settings),
-        shells: tokio::sync::RwLock::new(load_shells()),
+        settings: tokio::sync::RwLock::new(BotSettings {
+            notify_channel: file_config.notify_channel,
+            war_mode: file_config.war_mode,
+        }),
+        shells: tokio::sync::RwLock::new(file_config.shells.clone()),
     };
 
     let framework = poise::Framework::builder()

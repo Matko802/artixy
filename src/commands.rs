@@ -2,8 +2,7 @@ use poise::serenity_prelude as serenity;
 use std::path::PathBuf;
 
 use crate::{
-    config::save_json,
-    config::save_settings,
+    config::persist_runtime,
     live::{abort_live_for_channel, begin_live, cleanup_live_files},
     scrub::scrub_public_ip,
     util::{attach_name, cap_file_body, codeblock, deployed_via_nix, fence_inline, fit_bottom_lines, project_dir, random_suffix, sanitize_ansi, strip_sgr, valid_runas},
@@ -234,9 +233,8 @@ pub(crate) async fn shell(
             {
                 let mut m = ctx.data().shells.write().await;
                 m.insert(key, n.clone());
-                let data = serde_json::to_string_pretty(&*m)?;
-                save_json("shells.json", data).await?;
             }
+            persist_runtime(ctx.data()).await?;
             post_text(ctx, format!("Your shell is now `{}`.", n)).await?;
         }
     }
@@ -536,13 +534,13 @@ pub(crate) async fn notify(
         }
         Some(v) if v.eq_ignore_ascii_case("off") => {
             ctx.data().settings.write().await.notify_channel = None;
-            save_settings(ctx.data()).await?;
+            persist_runtime(ctx.data()).await?;
             post_text(ctx, "Boot messages OFF.").await?;
         }
         Some(v) => match parse_channel(v) {
             Some(id) => {
                 ctx.data().settings.write().await.notify_channel = Some(id);
-                save_settings(ctx.data()).await?;
+                persist_runtime(ctx.data()).await?;
                 post_text(ctx, format!("Boot messages will go to `<#{id}>`.\n```\n{BOOT_ART}\n```")).await?;
             }
             None => {
@@ -563,7 +561,7 @@ pub(crate) async fn warmode(
         return Ok(());
     }
     ctx.data().settings.write().await.war_mode = enabled;
-    save_settings(ctx.data()).await?;
+    persist_runtime(ctx.data()).await?;
     if enabled {
         post_text(ctx, "War mode on! >:3").await?;
         return Ok(());
@@ -783,7 +781,8 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
         let mut a = ctx.data().allowed.write().await;
         if a.owner != uid && !a.users.contains(&uid) {
             a.users.push(uid);
-            a.save().await?;
+            drop(a);
+            persist_runtime(ctx.data()).await?;
         }
     }
     let vm = ctx.data().vm.clone();
@@ -840,8 +839,8 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
     {
         let mut a = ctx.data().allowed.write().await;
         a.linux.insert(uid.to_string(), name.clone());
-        a.save().await?;
     }
+    persist_runtime(ctx.data()).await?;
     post_text(ctx, format!(
         "added user \"{}\" linked to `{}` — account created, no password set.",
         name, uid
@@ -861,8 +860,8 @@ pub(crate) async fn do_userdel(ctx: Context<'_>, user: &serenity::User) -> Resul
     if let Some(i) = a.users.iter().position(|u| *u == uid) {
         a.users.remove(i);
         let linked = a.linux.remove(&uid.to_string());
-        a.save().await?;
         drop(a);
+        persist_runtime(ctx.data()).await?;
         match linked {
             Some(n) if valid_runas(&n) => {
                 let vm = ctx.data().vm.clone();

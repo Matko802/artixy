@@ -3,15 +3,15 @@ use std::path::PathBuf;
 
 use crate::{live::LiveMap, util::random_suffix, Error};
 
-fn war_default_on() -> bool {
-    true
+fn war_default_off() -> bool {
+    false
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct BotSettings {
     #[serde(default)]
     pub(crate) notify_channel: Option<u64>,
-    #[serde(default = "war_default_on")]
+    #[serde(default = "war_default_off")]
     pub(crate) war_mode: bool,
 }
 
@@ -19,7 +19,7 @@ impl Default for BotSettings {
     fn default() -> Self {
         Self {
             notify_channel: None,
-            war_mode: war_default_on(),
+            war_mode: war_default_off(),
         }
     }
 }
@@ -32,7 +32,7 @@ pub(crate) struct Data {
     pub(crate) shells: tokio::sync::RwLock<std::collections::HashMap<String, String>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub(crate) struct AllowedFile {
     pub(crate) users: Vec<u64>,
     #[serde(default)]
@@ -43,36 +43,74 @@ pub(crate) struct Allowed {
     pub(crate) owner: u64,
     pub(crate) users: Vec<u64>,
     pub(crate) linux: std::collections::HashMap<String, String>,
-    pub(crate) path: PathBuf,
     pub(crate) blocked: Vec<u64>,
 }
 
-impl Allowed {
-    pub(crate) async fn save(&self) -> Result<(), Error> {
-        let data = serde_json::to_string_pretty(&AllowedFile {
-            users: self.users.clone(),
-            linux: self.linux.clone(),
-        })?;
-        save_json(
-            self.path.to_str().unwrap_or("users.json"),
-            data,
-        )
-        .await
-    }
-}
-
-#[derive(Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
 pub(crate) struct FileConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) owner_id: Option<u64>,
     #[serde(default)]
     pub(crate) blocked_ids: Vec<u64>,
     #[serde(default)]
     pub(crate) webhook_urls: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) discord_token: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) vm_name: Option<String>,
+    #[serde(default)]
+    pub(crate) war_mode: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) notify_channel: Option<u64>,
+    #[serde(default)]
+    pub(crate) managers: Vec<u64>,
+    #[serde(default)]
+    pub(crate) linux: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub(crate) shells: std::collections::HashMap<String, String>,
+}
+
+pub(crate) fn apply_legacy_import(
+    cfg: &mut FileConfig,
+    users: AllowedFile,
+    shells: std::collections::HashMap<String, String>,
+    notify: Option<u64>,
+) {
+    if cfg.managers.is_empty() && cfg.linux.is_empty()
+        && (!users.users.is_empty() || !users.linux.is_empty())
+    {
+        cfg.managers = users.users;
+        cfg.linux = users.linux;
+    }
+    if cfg.shells.is_empty() && !shells.is_empty() {
+        cfg.shells = shells;
+    }
+    if cfg.notify_channel.is_none() {
+        cfg.notify_channel = notify;
+    }
+}
+
+pub(crate) async fn persist_runtime(data: &Data) -> Result<(), Error> {
+    let mut cfg = load_file_config();
+    {
+        let a = data.allowed.read().await;
+        cfg.managers = a.users.clone();
+        cfg.linux = a.linux.clone();
+    }
+    {
+        let s = data.settings.read().await;
+        cfg.notify_channel = s.notify_channel;
+        cfg.war_mode = s.war_mode;
+    }
+    {
+        let m = data.shells.read().await;
+        cfg.shells = m.clone();
+    }
+    let text = toml::to_string_pretty(&cfg)?;
+    let path = config_file_path();
+    let path_str = path.to_string_lossy().to_string();
+    let _ = tokio::fs::remove_file(&path).await;
+    save_json(&path_str, text).await
 }
 
 pub(crate) fn access_allowed(owner: u64, users: &[u64], blocked: &[u64], id: u64) -> bool {
@@ -137,22 +175,6 @@ pub(crate) fn ensure_config_template(owner_id: u64) {
     );
     let _ = std::fs::write(path, template);
     lock_config_private();
-}
-
-pub(crate) fn load_shells() -> std::collections::HashMap<String, String> {
-    std::fs::read_to_string("shells.json")
-        .ok()
-        .and_then(|r| serde_json::from_str(&r).ok())
-        .unwrap_or_default()
-}
-
-pub(crate) async fn save_settings(data: &Data) -> Result<(), Error> {
-    let s = data.settings.read().await;
-    save_json(
-        "settings.json",
-        serde_json::to_string_pretty(&*s)?,
-    )
-    .await
 }
 
 pub(crate) async fn save_json(path: &str, data: String) -> Result<(), Error> {
@@ -227,6 +249,72 @@ mod tests {
         assert!(!access_allowed(1, &[2], &[2], 2));
         assert!(!access_allowed(1, &[2], &[1], 1));
         assert!(!access_allowed(1, &[], &[9], 9));
+    }
+
+    #[test]
+    fn war_mode_defaults_off() {
+        assert!(!BotSettings::default().war_mode);
+        let c = parse("notify_channel = 5\n");
+        assert!(!c.war_mode);
+        let c = parse("war_mode = true\n");
+        assert!(c.war_mode);
+    }
+
+    fn sample_legacy() -> (AllowedFile, std::collections::HashMap<String, String>, Option<u64>) {
+        let users = AllowedFile {
+            users: vec![11, 22],
+            linux: [("11".to_string(), "amy".to_string())].into_iter().collect(),
+        };
+        let mut shells = std::collections::HashMap::new();
+        shells.insert("11".to_string(), "fish".to_string());
+        (users, shells, Some(99))
+    }
+
+    #[test]
+    fn legacy_import_fills_empty_config() {
+        let mut cfg = FileConfig::default();
+        let (users, shells, notify) = sample_legacy();
+        apply_legacy_import(&mut cfg, users, shells, notify);
+        assert_eq!(cfg.managers, vec![11, 22]);
+        assert_eq!(cfg.linux.get("11").map(String::as_str), Some("amy"));
+        assert_eq!(cfg.shells.get("11").map(String::as_str), Some("fish"));
+        assert_eq!(cfg.notify_channel, Some(99));
+    }
+
+    #[test]
+    fn legacy_import_never_overwrites_config() {
+        let mut cfg = FileConfig {
+            managers: vec![1],
+            linux: [("1".to_string(), "zed".to_string())].into_iter().collect(),
+            shells: [("1".to_string(), "bash".to_string())].into_iter().collect(),
+            notify_channel: Some(7),
+            ..Default::default()
+        };
+        let (users, shells, notify) = sample_legacy();
+        apply_legacy_import(&mut cfg, users, shells, notify);
+        assert_eq!(cfg.managers, vec![1]);
+        assert_eq!(cfg.linux.get("1").map(String::as_str), Some("zed"));
+        assert_eq!(cfg.shells.get("1").map(String::as_str), Some("bash"));
+        assert_eq!(cfg.notify_channel, Some(7));
+    }
+
+    #[test]
+    fn config_round_trip_preserves_everything() {
+        let mut cfg = FileConfig {
+            owner_id: Some(1),
+            blocked_ids: vec![2],
+            webhook_urls: vec!["https://discord.com/api/webhooks/3/tok".to_string()],
+            discord_token: Some("tok".to_string()),
+            vm_name: Some("artix".to_string()),
+            war_mode: true,
+            notify_channel: Some(4),
+            managers: vec![5],
+            linux: [("5".to_string(), "sam".to_string())].into_iter().collect(),
+            shells: [("5".to_string(), "fish".to_string())].into_iter().collect(),
+        };
+        let text = toml::to_string_pretty(&cfg).expect("serializes");
+        let back: FileConfig = toml::from_str(&text).expect("reparses");
+        assert_eq!(cfg, back);
     }
 }
 
