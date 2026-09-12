@@ -13,7 +13,7 @@ fn is_boo_message(s: &str) -> bool {
 }
 
 fn artixy_text(s: &str) -> Option<String> {
-    let text = s.trim_end().strip_suffix(".artixy")?.trim();
+    let text = s.trim_end().strip_suffix(".ar")?.trim();
     if text.is_empty() {
         return None;
     }
@@ -42,8 +42,29 @@ pub(crate) async fn event_handler(
     let Some(text) = artixy_text(&new_message.content) else {
         return Ok(());
     };
-    if let Err(e) = new_message.delete(&ctx.http).await {
-        eprintln!("artixy-say: could not delete original message: {}", e);
+    let mut deleted = false;
+    for _ in 0..3 {
+        match new_message.delete(&ctx.http).await {
+            Ok(_) => {
+                deleted = true;
+                break;
+            }
+            Err(e) => {
+                eprintln!(
+                    "artixy-say: delete attempt failed for {} in {}: {}",
+                    new_message.id.get(),
+                    new_message.channel_id.get(),
+                    e
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+    if !deleted {
+        eprintln!(
+            "artixy-say: giving up deleting {} (needs Manage Messages there)",
+            new_message.id.get()
+        );
     }
     if text.chars().count() <= 2000 {
         match &new_message.referenced_message {
@@ -86,14 +107,15 @@ mod tests {
 
     #[test]
     fn artixy_suffix_returns_plain_text() {
-        assert_eq!(artixy_text("hello .artixy"), Some("hello".into()));
-        assert_eq!(artixy_text("hello .artixy   "), Some("hello".into()));
-        assert_eq!(artixy_text("a.artixy"), Some("a".into()));
-        assert_eq!(artixy_text(".artixy"), None);
-        assert_eq!(artixy_text("   .artixy  "), None);
-        assert_eq!(artixy_text(".artixy hello"), None);
+        assert_eq!(artixy_text("hello .ar"), Some("hello".into()));
+        assert_eq!(artixy_text("hello .ar   "), Some("hello".into()));
+        assert_eq!(artixy_text("a.ar"), Some("a".into()));
+        assert_eq!(artixy_text(".ar"), None);
+        assert_eq!(artixy_text("   .ar  "), None);
+        assert_eq!(artixy_text(".ar hello"), None);
         assert_eq!(artixy_text("hello"), None);
         assert_eq!(artixy_text(""), None);
-        assert_eq!(artixy_text(".ARTIXY"), None);
+        assert_eq!(artixy_text(".AR"), None);
+        assert_eq!(artixy_text("hello .artixy"), None);
     }
 }
