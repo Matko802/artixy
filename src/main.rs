@@ -754,7 +754,7 @@ async fn send_output(ctx: Context<'_>, cmd: &str, body: &str) -> Result<(), Erro
 const HELP: &str = "\
 **artixy — your Artix VM in your pocket.** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me.\n\
 \n**VM**\n`;ps` — state of the VM\n`;status` — quick state + agent check\n`;start` — power on + wait for guest agent\n`;stop` — graceful shutdown\n`;restart` — reboot\n`;info` — details + agent status\n\
-\n**Who can use me**\n`;users` / `;userlist` — show owner + managers\n`;useradd @user` (prefix only) — owner only: links them and creates their Linux account in Artix (name from discord name).\n`;userdel @user` (prefix only) — owner only\n`;shell [fish|bash]` — your `$` interpreter (default bash)\n`;notify <#channel|off>` (prefix only) — owner only: where I post my boot message, unset means silent\n`;run <command>` — same as `;`, prefix only\n\
+\n**Who can use me**\n`;users` / `;userlist` — show owner + managers\n`;useradd @user` (prefix only) — owner only: links them and creates their Linux account in Artix (name from discord name).\n`;userdel @user` (prefix only) — owner only: revokes bot access and deletes their Linux account in the VM\n`;shell [fish|bash]` — your `$` interpreter (default bash)\n`;notify <#channel|off>` (prefix only) — owner only: where I post my boot message, unset means silent\n`;run <command>` — same as `;`, prefix only\n\
 \nPrefix starts OFF — slash commands always work. Owner turns it on in `/settings` (e.g. `/settings semicolon ;`).\n\
 \n**Run real commands in Artix**\n`;` followed by anything — runs it for real inside the VM through the guest agent and prints the output. e.g. `;sudo pacman -Syu`, `;ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`;live <command>` — follows one run live in a single message until it finishes. Starting another run stops it.\n`;shot` — screenshot of the host screen, uploaded here\n`;send <path>` — upload a host file here (absolute path, ~20MB max)\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
@@ -1532,15 +1532,41 @@ async fn do_userdel(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error
         ctx.say("Owner only.").await?;
         return Ok(());
     }
+    maybe_defer(ctx).await;
     let uid = user.id.get();
     let mut a = ctx.data().allowed.write().await;
     if let Some(i) = a.users.iter().position(|u| *u == uid) {
         a.users.remove(i);
         let linked = a.linux.remove(&uid.to_string());
         a.save().await?;
+        drop(a);
         match linked {
-            Some(n) => ctx.say(format!("Removed <@{}> (was linked to linux `{}`; account left in place).", uid, n)).await?,
-            None => ctx.say(format!("Removed <@{}>.", uid)).await?,
+            Some(n) if valid_runas(&n) => {
+                let vm = ctx.data().vm.clone();
+                let mut rc = guest_exec(&vm, "/usr/sbin/userdel", &["-r", &n], false, 30).await;
+                if let Err(e) = &rc {
+                    if e.to_string().contains("No such file") {
+                        rc = guest_exec(&vm, "/usr/bin/userdel", &["-r", &n], false, 30).await;
+                    }
+                }
+                match rc {
+                    Ok((0, _, _)) => {
+                        ctx.say(format!("Removed <@{}> and deleted linux `{}`.", uid, n)).await?;
+                    }
+                    Ok((c, _, _)) => {
+                        ctx.say(format!("Removed <@{}> from the bot, but deleting linux `{}` failed (code {}). Remove it by hand in the VM.", uid, n, c)).await?;
+                    }
+                    Err(e) => {
+                        ctx.say(format!("Removed <@{}> from the bot, but deleting linux `{}` failed:\n{}", uid, n, codeblock(&e.to_string()))).await?;
+                    }
+                };
+            }
+            Some(n) => {
+                ctx.say(format!("Removed <@{}> (linked name `{}` looked invalid, left alone in the VM).", uid, n)).await?;
+            }
+            None => {
+                ctx.say(format!("Removed <@{}>.", uid)).await?;
+            }
         };
     } else {
         ctx.say(format!("<@{}> was not a manager.", uid)).await?;
