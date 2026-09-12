@@ -284,6 +284,15 @@ mod tests {
     }
 
     #[test]
+    fn mkfifo_script_owns_fifo_for_the_reader() {
+        let s = crate::live::mkfifo_script("/tmp/x.in", Some("matko802"));
+        assert!(s.contains("mkfifo -m 600 /tmp/x.in"), "tight perms");
+        assert!(s.contains("chown matko802 /tmp/x.in"), "reader must own it for <>");
+        let s = crate::live::mkfifo_script("/tmp/x.in", None);
+        assert!(!s.contains("chown"), "nothing to chown without runas");
+    }
+
+    #[test]
     fn tool_path_finds_shell_and_rejects_junk() {
         let sh = tool_path("sh");
         assert!(sh.is_some(), "sh must resolve even with a minimal PATH");

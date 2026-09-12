@@ -56,6 +56,16 @@ pub(crate) fn build_runner(shell: &str, b64: &str, out_f: &str, code_f: &str, in
         code_f = code_f,
     )
 }
+/// Shell snippet creating the input fifo owned by whoever will read it.
+/// Root (the writer side) bypasses permission checks, so 600 is enough —
+/// importantly the reader must own it, since opening read-write requires
+/// write permission too.
+pub(crate) fn mkfifo_script(path: &str, runas: Option<&str>) -> String {
+    match runas {
+        Some(u) => format!("rm -f {path} && mkfifo -m 600 {path} && chown {u} {path}"),
+        None => format!("rm -f {path} && mkfifo -m 600 {path}"),
+    }
+}
 pub(crate) async fn abort_live_for_channel(
     live_map: &LiveMap,
     channel: serenity::ChannelId,
@@ -87,11 +97,24 @@ pub(crate) async fn cleanup_live_files(vm: &str, out_f: &str, code_f: &str, in_f
 
 /// Type one message into a live session: appends the text plus Enter to the
 /// session fifo. The open blocks (up to the timeout) when nothing is reading,
-/// which is how a finished session reports itself. Returns true on delivery.
-pub(crate) async fn forward_terminal_input(vm: &str, fifo: &str, text: &str) -> bool {
+/// which is how a finished session reports itself. The write runs as the
+/// typist's linked account (root if unlinked), so it only succeeds on a
+/// session they started themselves — typing into someone else's session is
+/// refused rather than escalated. Returns true on delivery.
+pub(crate) async fn forward_terminal_input(
+    vm: &str,
+    fifo: &str,
+    runas: Option<&str>,
+    text: &str,
+) -> bool {
     use base64::Engine as _;
+    let runas = runas.filter(|u| valid_runas(u));
     let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-    let script = format!("timeout 8 bash -c 'echo {} | base64 -d >> {}'", b64, fifo);
+    let inner = format!("echo {} | base64 -d >> {}", b64, fifo);
+    let script = match runas {
+        Some(u) => format!("timeout 8 su {} -s /bin/bash -c '{}'", u, inner),
+        None => format!("timeout 8 bash -c '{}'", inner),
+    };
     match guest_exec(vm, "/bin/bash", &["-c", &script], false, 15).await {
         Ok((0, _, _)) => true,
         Ok((code, _, _)) => {
@@ -186,7 +209,7 @@ pub(crate) async fn begin_run(
     let in_opt = match guest_exec(
         &vm,
         "/bin/bash",
-        &["-c", &format!("rm -f {} && mkfifo -m 644 {}", in_f, in_f)],
+        &["-c", &mkfifo_script(&in_f, runas.as_deref())],
         false,
         10,
     )

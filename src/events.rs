@@ -3,6 +3,7 @@ use poise::serenity_prelude as serenity;
 use crate::{
     config::{access_allowed, Data},
     util::{attach_name, cap_file_body, strip_sgr},
+    vm::linked_user,
     webhook::{handle_delete, is_posted_message, post_message},
     Error,
 };
@@ -123,13 +124,15 @@ pub(crate) async fn event_handler(
                     };
                     if authed {
                         let payload = format!("{}\n", new_message.content.trim_end());
-                        if crate::live::forward_terminal_input(&data.vm, &fifo, &payload).await {
+                        let runas = linked_user(data, id).await;
+                        if crate::live::forward_terminal_input(&data.vm, &fifo, runas.as_deref(), &payload).await {
                             let _ = new_message.delete(&ctx.http).await;
                         } else {
                             let _ = post_message(
                                 &ctx.http,
                                 new_message.channel_id,
-                                "Live session already ended.".into(),
+                                "Couldn't type into that session (ended, or it's someone else's)."
+                                    .into(),
                                 Vec::new(),
                             )
                             .await;
