@@ -249,7 +249,7 @@ pub(crate) async fn botrestart(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     }
     if deployed_via_nix() {
-        post_text(ctx, 
+        post_text(ctx,
             "Deployed from Nix — I can't re-exec myself out of a read-only \
              `/nix/store`. Restart with `systemctl --user restart artixy`.",
         )
@@ -573,7 +573,7 @@ pub(crate) async fn warmode(
         "war mode disabled, peace?".to_string(),
         vec![(
             "lapeace.jpg".to_string(),
-            include_bytes!("../lapeace.jpg").to_vec(),
+            include_bytes!("../imgs/lapeace.jpg").to_vec(),
         )],
     )
     .await?;
@@ -896,4 +896,3 @@ pub(crate) async fn do_userdel(ctx: Context<'_>, user: &serenity::User) -> Resul
     }
     Ok(())
 }
-
