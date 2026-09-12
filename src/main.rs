@@ -97,10 +97,32 @@ mod tests {
 
     #[test]
     fn attach_name_is_safe_filename() {
-        assert_eq!(attach_name("jefetch --static"), "jefetch.txt");
-        assert_eq!(attach_name(""), "output.txt");
-        assert_eq!(attach_name("../../../etc/passwd"), "etcpasswd.txt");
-        assert_eq!(attach_name("sudo pacman -Syu"), "sudo.txt");
+        assert_eq!(attach_name("jefetch --static"), "jefetch.html");
+        assert_eq!(attach_name(""), "output.html");
+        assert_eq!(attach_name("../../../etc/passwd"), "etcpasswd.html");
+        assert_eq!(attach_name("sudo pacman -Syu"), "sudo.html");
+    }
+
+    #[test]
+    fn ansi_to_html_renders_colors() {
+        let plain = ansi_to_html("a<b>&");
+        assert!(plain.contains("a&lt;b&gt;&amp;"), "escapes html, got {:?}", plain);
+        assert!(!plain.contains("<span"), "unstyled text has no spans");
+        assert!(plain.starts_with("<!DOCTYPE html>"), "doc shell");
+        assert!(plain.ends_with("</pre></body></html>"), "doc close");
+        let colored = ansi_to_html("\x1b[0;32mok\x1b[0m plain");
+        assert!(colored.contains("<span"), "opens span");
+        assert!(colored.contains("ok</span> plain"), "closes span at reset, got {:?}", colored);
+        assert!(colored.contains("#00aa00"), "green hue");
+        assert!(!colored.contains("\x1b"), "no raw escapes remain");
+        let styled = ansi_to_html("\x1b[1;31;44mX\x1b[0m");
+        assert!(styled.contains("font-weight:bold"), "bold, got {:?}", styled);
+        assert!(styled.contains("#aa0000"), "red fg");
+        assert!(styled.contains("background:#0000aa"), "blue bg");
+        let unknown = ansi_to_html("\x1b[38;5;1mX\x1b[2KY");
+        assert!(!unknown.contains("[38"), "256-color swallowed");
+        assert!(!unknown.contains("[2K"), "erase-line swallowed");
+        assert!(unknown.contains('X') && unknown.contains('Y'), "text kept");
     }
 
     #[test]
