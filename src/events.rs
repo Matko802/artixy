@@ -42,26 +42,27 @@ pub(crate) async fn event_handler(
     let Some(text) = artixy_text(&new_message.content) else {
         return Ok(());
     };
-    let sent_ok = if text.chars().count() <= 2000 {
+    if let Err(e) = new_message.delete(&ctx.http).await {
+        eprintln!("artixy-say: could not delete original message: {}", e);
+    }
+    if text.chars().count() <= 2000 {
         match &new_message.referenced_message {
-            Some(target) => target.reply(&ctx.http, &text).await.is_ok(),
-            None => new_message.channel_id.say(&ctx.http, &text).await.is_ok(),
+            Some(target) => {
+                let _ = target.reply(&ctx.http, &text).await;
+            }
+            None => {
+                let _ = new_message.channel_id.say(&ctx.http, &text).await;
+            }
         }
     } else {
         let att = serenity::CreateAttachment::bytes(
             cap_file_body(&strip_sgr(&text)).into_bytes(),
             attach_name(&text),
         );
-        new_message
+        let _ = new_message
             .channel_id
             .send_message(&ctx.http, serenity::CreateMessage::new().add_file(att))
-            .await
-            .is_ok()
-    };
-    if sent_ok {
-        if let Err(e) = new_message.delete(&ctx.http).await {
-            eprintln!("artixy-say: posted but failed to delete original: {}", e);
-        }
+            .await;
     }
     Ok(())
 }
