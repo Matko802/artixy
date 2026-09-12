@@ -192,7 +192,7 @@ pub(crate) fn fit_bottom_lines(body: &str) -> (String, bool) {
 }
 
 pub(crate) fn plain_tail(body: &str) -> String {
-    let clean = strip_sgr(body.trim_end());
+    let clean = strip_sgr(&body.replace('\r', "\n").trim_end().to_string());
     let (fitted, truncated) = fit_bottom_lines(&clean);
     let t = if fitted.trim().is_empty() {
         "(empty)".to_string()
@@ -206,34 +206,29 @@ pub(crate) fn plain_tail(body: &str) -> String {
     }
 }
 
-pub(crate) const LIVE_IMG_MAX_COLS: usize = 120;
-pub(crate) const LIVE_IMG_MAX_ROWS: usize = 80;
-const LIVE_IMG_COL_PX: u32 = 10;
-const LIVE_IMG_ROW_PX: u32 = 20;
-const LIVE_IMG_PAD_PX: u32 = 10;
+pub(crate) const LIVE_IMG_W: u32 = 500;
+pub(crate) const LIVE_IMG_H: u32 = 500;
+pub(crate) const LIVE_IMG_MAX_COLS: usize = 48;
+pub(crate) const LIVE_IMG_MAX_ROWS: usize = 24;
 
-/// Prepare terminal output for image rendering: strip colors, expand tabs,
-/// keep the last MAX_ROWS lines, truncate lines to MAX_COLS chars.
-/// Returns (renderable text, image width, image height).
-pub(crate) fn frame_text(body: &str) -> (String, u32, u32) {
-    let clean = strip_sgr(body);
+/// Prepare terminal output for image rendering: turn carriage returns into
+/// newlines (so progress-bar redraws become lines instead of glued text),
+/// strip colors, expand tabs, keep the last MAX_ROWS lines, truncate lines
+/// to MAX_COLS chars. Pair with the LIVE_IMG_W x LIVE_IMG_H canvas.
+pub(crate) fn frame_text(body: &str) -> String {
+    let clean = strip_sgr(&body.replace('\r', "\n"));
     let lines: Vec<&str> = clean.lines().collect();
     let start = lines.len().saturating_sub(LIVE_IMG_MAX_ROWS);
     let mut out: Vec<String> = Vec::new();
-    let mut cols: usize = 0;
     for l in &lines[start..] {
         let expanded: Vec<char> = l.replace('\t', "        ").chars().collect();
         let len = expanded.len().min(LIVE_IMG_MAX_COLS);
-        cols = cols.max(len);
         out.push(expanded[..len].iter().collect());
     }
     if out.is_empty() {
         out.push("(empty)".to_string());
-        cols = cols.max(7);
     }
-    let w = cols as u32 * LIVE_IMG_COL_PX + LIVE_IMG_PAD_PX * 2;
-    let h = out.len() as u32 * LIVE_IMG_ROW_PX + LIVE_IMG_PAD_PX * 2;
-    (out.join("\n"), w, h)
+    out.join("\n")
 }
 
 pub(crate) fn cap_file_body(clean: &str) -> String {

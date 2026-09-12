@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::{
     scrub::scrub_public_ip,
-    util::{frame_text, plain_tail, random_suffix, tool_path, valid_runas},
+    util::{frame_text, plain_tail, random_suffix, tool_path, valid_runas, LIVE_IMG_H, LIVE_IMG_W},
     vm::{guest_exec, guest_launch_raw, guest_status},
     webhook::{edit_posted, resolve_poster, Poster},
 };
@@ -70,9 +70,9 @@ fn esc_filter_arg(s: &str) -> String {
     s.replace('\\', "\\\\").replace(':', "\\:").replace(',', "\\,")
 }
 
-/// Render stripped terminal text to a PNG via ffmpeg drawtext.
+/// Render stripped terminal text to a fixed 500x500 PNG via ffmpeg drawtext.
 /// Returns PNG bytes, or None when rendering is unavailable (caller falls back to text).
-async fn render_frame(text: &str, w: u32, h: u32) -> Option<Vec<u8>> {
+async fn render_frame(text: &str) -> Option<Vec<u8>> {
     let font = match mono_font().await {
         Some(f) => f,
         None => {
@@ -92,7 +92,7 @@ async fn render_frame(text: &str, w: u32, h: u32) -> Option<Vec<u8>> {
     let txt = dir.join(format!("artixy-live-{}-{}.txt", std::process::id(), tag));
     let png = dir.join(format!("artixy-live-{}-{}.png", std::process::id(), tag));
     tokio::fs::write(&txt, text).await.ok()?;
-    let input = format!("color=c=#0b0e14:s={}x{}", w, h);
+    let input = format!("color=c=#0b0e14:s={}x{}", LIVE_IMG_W, LIVE_IMG_H);
     let vf = format!(
         "drawtext=fontfile={}:textfile={}:expansion=none:fontcolor=#e6e6e6:fontsize=16:x=10:y=10",
         esc_filter_arg(&font),
@@ -145,8 +145,8 @@ async fn live_message(header: &str, output: &str) -> (String, Vec<(String, Vec<u
     } else {
         format!("{}\n{}", header, output.trim_end())
     };
-    let (img_text, w, h) = frame_text(&combined);
-    match render_frame(&img_text, w, h).await {
+    let img_text = frame_text(&combined);
+    match render_frame(&img_text).await {
         Some(png) => (plain_tail(header), vec![("live.png".to_string(), png)]),
         None => (plain_tail(&combined), Vec::new()),
     }

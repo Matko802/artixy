@@ -68,31 +68,26 @@ mod tests {
     }
 
     #[test]
-    fn frame_text_caps_rows_cols_and_sizes_image() {
-        let (text, w, h) = frame_text("ab\ncde");
-        assert_eq!(text, "ab\ncde");
-        assert_eq!(w, 3 * 10 + 20, "cols drive width");
-        assert_eq!(h, 2 * 20 + 20, "rows drive height");
-        let (empty_text, _, _) = frame_text("");
-        assert_eq!(empty_text, "(empty)");
-        let (empty_ws, _, _) = frame_text("   \n  ");
-        assert_eq!(empty_ws.split('\n').count(), 2);
+    fn frame_text_caps_rows_and_cols() {
+        assert_eq!(frame_text("ab\ncde"), "ab\ncde");
+        assert_eq!(frame_text(""), "(empty)");
+        assert_eq!(frame_text("   \n  ").split('\n').count(), 2);
+        let long = (0..100).map(|i| format!("line {:03}", i)).collect::<Vec<_>>().join("\n");
+        let text = frame_text(&long);
+        assert!(text.contains("line 099"), "bottom kept");
+        assert!(!text.contains("line 000\n"), "head dropped");
+        assert_eq!(text.lines().count(), 24, "rows capped at 24");
+        let wide = "x".repeat(200);
+        assert_eq!(frame_text(&wide).chars().count(), 48, "cols capped at 48");
     }
 
     #[test]
-    fn frame_text_strips_ansi_expands_tabs_keeps_bottom() {
-        let (text, _, _) = frame_text("\x1b[0;32m$ cmd\x1b[0m\na\tb");
+    fn frame_text_strips_ansi_expands_tabs_splits_cr() {
+        let text = frame_text("\x1b[0;32m$ cmd\x1b[0m\na\tb");
         assert!(!text.contains('\x1b'), "no escapes, got {:?}", text);
         assert!(text.contains("a        b"), "tabs expanded, got {:?}", text);
-        let long = (0..100).map(|i| format!("line {:03}", i)).collect::<Vec<_>>().join("\n");
-        let (text, _, h) = frame_text(&long);
-        assert!(text.contains("line 099"), "bottom kept");
-        assert!(!text.contains("line 000\n"), "head dropped");
-        assert_eq!(h, 80 * 20 + 20, "rows capped at 80");
-        let wide = "x".repeat(200);
-        let (text, w, _) = frame_text(&wide);
-        assert_eq!(text.chars().count(), 120, "cols capped at 120");
-        assert_eq!(w, 120 * 10 + 20);
+        let text = frame_text("10%\r20%\r30%");
+        assert_eq!(text, "10%\n20%\n30%", "progress redraws become lines, got {:?}", text);
     }
 
     #[test]
