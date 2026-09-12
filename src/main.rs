@@ -129,6 +129,30 @@ mod tests {
     }
 
     #[test]
+    fn current_frame_falls_back_to_previous_when_blank() {
+        assert_eq!(current_frame("a\nb"), "a\nb", "no clears: unchanged");
+        assert_eq!(current_frame(""), "");
+        assert_eq!(
+            current_frame("frame1\n\x1b[J\x1b[Hframe2"),
+            "frame2",
+            "non-blank current frame"
+        );
+        assert_eq!(
+            current_frame("frame1\n\x1b[J\x1b[H"),
+            "frame1\n",
+            "blank tail: previous frame instead of nothing"
+        );
+        assert_eq!(
+            current_frame("\x1b[2J"),
+            "",
+            "nothing before the clear: genuinely empty"
+        );
+        // Feeding the result through after_last_clear again must not eat it.
+        let f = current_frame("frame1\n\x1b[J\x1b[H");
+        assert_eq!(after_last_clear(f), f, "no clear seq leaks into the frame");
+    }
+
+    #[test]
     fn tool_path_finds_shell_and_rejects_junk() {
         let sh = tool_path("sh");
         assert!(sh.is_some(), "sh must resolve even with a minimal PATH");

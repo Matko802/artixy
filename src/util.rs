@@ -217,19 +217,17 @@ const LIVE_IMG_PAD_PX: u32 = 20;
 const LIVE_IMG_MIN_W: u32 = 640;
 const LIVE_IMG_MIN_H: u32 = 400;
 
-/// Terminal emulators replace the screen on clear/home sequences instead of
-/// appending. Return everything after the last such sequence so animated
-/// redraws (clear + redraw loops) show the current frame, not stacked history.
-/// Must run on the raw text, before strip_sgr removes the sequences.
-pub(crate) fn after_last_clear(s: &str) -> &str {
+/// Byte spans (start, end) of terminal clear-screen sequences: CSI J
+/// (erase display), CSI H/f (cursor home/position), ESC c (full reset).
+/// The spans are ASCII-only, so both ends are always char boundaries.
+fn clear_cuts(s: &str) -> Vec<(usize, usize)> {
     let b = s.as_bytes();
-    let mut last = 0usize;
+    let mut cuts = Vec::new();
     let mut i = 0;
     while i < b.len() {
         if b[i] == 0x1b && i + 1 < b.len() {
             if b[i + 1] == b'c' {
-                // ESC c: full reset.
-                last = i + 2;
+                cuts.push((i, i + 2));
                 i += 2;
                 continue;
             }
@@ -239,8 +237,7 @@ pub(crate) fn after_last_clear(s: &str) -> &str {
                     j += 1;
                 }
                 if j < b.len() && (b[j] == b'J' || b[j] == b'H' || b[j] == b'f') {
-                    // CSI J: erase display, CSI H/f: cursor home/position.
-                    last = j + 1;
+                    cuts.push((i, j + 1));
                     i = j + 1;
                     continue;
                 }
@@ -248,7 +245,42 @@ pub(crate) fn after_last_clear(s: &str) -> &str {
         }
         i = (i + utf8_len(b[i])).min(b.len());
     }
-    &s[last..]
+    cuts
+}
+
+/// Terminal emulators replace the screen on clear/home sequences instead of
+/// appending. Return everything after the last such sequence so animated
+/// redraws (clear + redraw loops) show the current frame, not stacked history.
+/// Must run on the raw text, before strip_sgr removes the sequences.
+pub(crate) fn after_last_clear(s: &str) -> &str {
+    match clear_cuts(s).last() {
+        Some(&(_, end)) => &s[end..],
+        None => s,
+    }
+}
+
+/// Like after_last_clear, but if the current frame is blank (a poll landed
+/// right after a clear while the program is still redrawing), fall back to
+/// the newest non-blank frame instead of flashing empty. Returned slices
+/// never contain a clear sequence, so feeding them through after_last_clear
+/// again is a safe no-op. For finished output prefer after_last_clear (a
+/// trailing clear there is the genuine final state).
+pub(crate) fn current_frame(s: &str) -> &str {
+    let cuts = clear_cuts(s);
+    // Content runs between the clear sequences (seq bytes excluded).
+    let mut segs: Vec<(usize, usize)> = Vec::with_capacity(cuts.len() + 1);
+    let mut start = 0;
+    for &(st, en) in &cuts {
+        segs.push((start, st));
+        start = en;
+    }
+    segs.push((start, s.len()));
+    for &(a, b) in segs.iter().rev() {
+        if !s[a..b].trim().is_empty() {
+            return &s[a..b];
+        }
+    }
+    ""
 }
 
 /// Prepare terminal output for image rendering: turn carriage returns into

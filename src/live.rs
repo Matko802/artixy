@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::{
     scrub::scrub_public_ip,
-    util::{after_last_clear, frame_text, plain_tail, random_suffix, tool_path, valid_runas},
+    util::{after_last_clear, current_frame, frame_text, plain_tail, random_suffix, tool_path, valid_runas},
     vm::{guest_exec, guest_launch_raw, guest_status},
     webhook::{edit_posted, resolve_poster, Poster},
 };
@@ -376,8 +376,11 @@ pub(crate) async fn live_run(
                 }
                 last_hash = digest;
                 hashed_once = true;
+                // Current frame, not raw scrollback: a poll landing right
+                // after a clear shows the previous frame instead of nothing.
+                let frame = current_frame(fetched.trim_end());
                 let (text, files) =
-                    live_message(font.as_deref(), &cmd, Some("…live"), fetched.trim_end()).await;
+                    live_message(font.as_deref(), &cmd, Some("…live"), frame).await;
                 if !edit_posted(&poster, &http, channel, msg.id, text, files).await {
                     cleanup_live_files(&vm, &out_f, &code_f).await;
                     break;
