@@ -591,19 +591,33 @@ pub(crate) async fn purge_replies(
     };
     let channel = ctx.channel_id();
     let n = limit.unwrap_or(50).clamp(1, 100);
-    let msgs = match channel.messages(&http, serenity::GetMessages::new().limit(n)).await {
+    let mut msgs = match channel.messages(&http, serenity::GetMessages::new().limit(n)).await {
         Ok(m) => m,
         Err(e) => {
             ctx.say(codeblock(&format!("could not read channel history: {}", e))).await?;
             return Ok(());
         }
     };
+    let mut thread_count = 0u32;
+    if let Some(guild_id) = ctx.guild_id() {
+        if let Ok(active) = guild_id.get_active_threads(&http).await {
+            for t in active.threads.iter().filter(|t| t.parent_id == Some(channel)).take(5) {
+                if let Ok(ms) = t.id.messages(&http, serenity::GetMessages::new().limit(n)).await {
+                    thread_count += 1;
+                    msgs.extend(ms);
+                }
+            }
+        }
+    }
     let scanned = msgs.len() as u32;
+    let mut authored = 0u32;
     let mut deleted = 0u32;
+    let mut failed = 0u32;
     for m in &msgs {
         if m.author.id.get() != target_id {
             continue;
         }
+        authored += 1;
         let replied_to_me = match &m.referenced_message {
             Some(r) => r.author.id.get() == bot_id,
             None => match &m.message_reference {
@@ -622,12 +636,15 @@ pub(crate) async fn purge_replies(
         }
         match m.delete(&http).await {
             Ok(_) => deleted += 1,
-            Err(e) => eprintln!("purge_replies: failed to delete {}: {}", m.id.get(), e),
+            Err(e) => {
+                failed += 1;
+                eprintln!("purge_replies: failed to delete {}: {}", m.id.get(), e);
+            }
         }
     }
     ctx.say(format!(
-        "Scanned {} recent messages, deleted {} replies from `<@{target_id}>` to my messages.",
-        scanned, deleted
+        "Scanned {} recent messages ({} threads), `<@{target_id}>` authored {}, deleted {} replies to my messages, {} deletes failed.",
+        scanned, thread_count, authored, deleted, failed
     ))
     .await?;
     Ok(())
