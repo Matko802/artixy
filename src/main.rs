@@ -226,8 +226,12 @@ mod tests {
 
 #[tokio::main]
 async fn main() {
-    let token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN env missing");
     let file_config = load_file_config();
+    let token: String = match file_config.discord_token.clone() {
+        Some(t) => t,
+        None => std::env::var("DISCORD_TOKEN")
+            .expect("set discord_token in ~/.config/artixy/config.toml or DISCORD_TOKEN env"),
+    };
     let owner: u64 = match file_config.owner_id {
         Some(id) => id,
         None => std::env::var("OWNER_ID")
@@ -238,7 +242,12 @@ async fn main() {
     ensure_config_template(owner);
     crate::webhook::init_webhook_urls(file_config.webhook_urls);
     let _ = std::env::set_current_dir(project_dir());
-    let vm = std::env::var("VM_NAME").unwrap_or_else(|_| "voidvm".into());
+    let vm = file_config
+        .vm_name
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("VM_NAME").ok())
+        .unwrap_or_else(|| "voidvm".into());
     let bot_settings: BotSettings = tokio::fs::read_to_string("settings.json")
         .await
         .ok()

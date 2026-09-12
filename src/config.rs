@@ -69,6 +69,10 @@ pub(crate) struct FileConfig {
     pub(crate) blocked_ids: Vec<u64>,
     #[serde(default)]
     pub(crate) webhook_urls: Vec<String>,
+    #[serde(default)]
+    pub(crate) discord_token: Option<String>,
+    #[serde(default)]
+    pub(crate) vm_name: Option<String>,
 }
 
 pub(crate) fn access_allowed(owner: u64, users: &[u64], blocked: &[u64], id: u64) -> bool {
@@ -84,11 +88,35 @@ pub(crate) fn config_file_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("config.toml"))
 }
 
+fn normalize_file_config(mut cfg: FileConfig) -> FileConfig {
+    for slot in [&mut cfg.discord_token, &mut cfg.vm_name] {
+        if slot.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            *slot = None;
+        }
+    }
+    cfg
+}
+
 pub(crate) fn load_file_config() -> FileConfig {
-    std::fs::read_to_string(config_file_path())
+    let cfg: FileConfig = std::fs::read_to_string(config_file_path())
         .ok()
         .and_then(|r| toml::from_str(&r).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let cfg = normalize_file_config(cfg);
+    lock_config_private();
+    cfg
+}
+
+pub(crate) fn lock_config_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = config_file_path();
+    if let Ok(meta) = std::fs::metadata(&path) {
+        let mut perm = meta.permissions();
+        if perm.mode() & 0o077 != 0 {
+            perm.set_mode(0o600);
+            let _ = std::fs::set_permissions(path, perm);
+        }
+    }
 }
 
 pub(crate) fn ensure_config_template(owner_id: u64) {
@@ -101,11 +129,14 @@ pub(crate) fn ensure_config_template(owner_id: u64) {
             return;
         }
     }
+    let token = std::env::var("DISCORD_TOKEN").unwrap_or_default();
+    let vm = std::env::var("VM_NAME").unwrap_or_else(|_| "voidvm".into());
     let template = format!(
-        "owner_id = {}\nblocked_ids = []\nwebhook_urls = []\n",
-        owner_id
+        "owner_id = {}\ndiscord_token = \"{}\"\nvm_name = \"{}\"\nblocked_ids = []\nwebhook_urls = []\n",
+        owner_id, token, vm
     );
     let _ = std::fs::write(path, template);
+    lock_config_private();
 }
 
 pub(crate) fn load_shells() -> std::collections::HashMap<String, String> {
@@ -151,6 +182,24 @@ mod tests {
         assert_eq!(c.owner_id, Some(123));
         assert_eq!(c.blocked_ids, vec![4, 5]);
         assert_eq!(c.webhook_urls, vec!["https://discord.com/api/webhooks/1/abc".to_string()]);
+    }
+
+    #[test]
+    fn file_config_parses_secrets_and_vm() {
+        let c = parse("discord_token = \"tok123\"\nvm_name = \"artix\"\n");
+        assert_eq!(c.discord_token.as_deref(), Some("tok123"));
+        assert_eq!(c.vm_name.as_deref(), Some("artix"));
+        assert_eq!(c.owner_id, None);
+    }
+
+    #[test]
+    fn normalize_clears_blank_secrets() {
+        let c = normalize_file_config(parse("discord_token = \"  \"\nvm_name = \"\"\n"));
+        assert_eq!(c.discord_token, None);
+        assert_eq!(c.vm_name, None);
+        let c = normalize_file_config(parse("discord_token = \"tok\"\nvm_name = \"v\"\n"));
+        assert_eq!(c.discord_token.as_deref(), Some("tok"));
+        assert_eq!(c.vm_name.as_deref(), Some("v"));
     }
 
     #[test]
