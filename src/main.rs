@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use crate::commands::{
     botrestart, help, info, live, notify, ps, purge_replies, restart, run, send, shell, shot,
-    start, status, stop, user, useradd, userdel, userlist, users,
+    start, status, stop, user, useradd, userdel, userlist, users, warmode,
 };
 use crate::commands::BOOT_ART;
 use crate::config::{Allowed, AllowedFile, BotSettings, Data, load_file_config, ensure_config_template, load_shells};
@@ -297,6 +297,7 @@ async fn main() {
                 send(),
                 notify(),
                 purge_replies(),
+                warmode(),
             ],
             on_error: |error| {
                 Box::pin(async move {

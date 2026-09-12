@@ -43,23 +43,24 @@ pub(crate) async fn event_handler(
     data: &Data,
 ) -> Result<(), Error> {
     if let serenity::FullEvent::MessageDelete {
-        channel_id,
         deleted_message_id,
         ..
     } = event
     {
-        handle_delete(&ctx.http, *channel_id, *deleted_message_id).await;
+        let war = data.settings.read().await.war_mode;
+        handle_delete(&ctx.http, *deleted_message_id, war).await;
         return Ok(());
     }
     let serenity::FullEvent::Message { new_message } = event else {
         return Ok(());
     };
     let id = new_message.author.id.get();
-    let (owner, blocked) = {
+    let (owner, blocked, war) = {
         let a = data.allowed.read().await;
-        (id == a.owner, a.blocked.contains(&id))
+        let s = data.settings.read().await;
+        (id == a.owner, a.blocked.contains(&id), s.war_mode)
     };
-    if blocked {
+    if blocked && war {
         let me = match ctx.http.get_current_user().await {
             Ok(u) => u.id.get(),
             Err(_) => return Ok(()),

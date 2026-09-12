@@ -362,8 +362,8 @@ pub(crate) async fn post_response(
 
 pub(crate) async fn handle_delete(
     http: &std::sync::Arc<serenity::Http>,
-    _channel: serenity::ChannelId,
     id: serenity::MessageId,
+    war: bool,
 ) {
     let entry = match posted_registry()
         .lock()
@@ -382,6 +382,9 @@ pub(crate) async fn handle_delete(
         }
     }
     let age = entry.posted_at.elapsed().as_secs();
+    if !war {
+        return;
+    }
     let cooldown_ok = {
         let mut last = last_repost()
             .lock()

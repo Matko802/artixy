@@ -3,10 +3,25 @@ use std::path::PathBuf;
 
 use crate::{live::LiveMap, util::random_suffix, Error};
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+fn war_default_on() -> bool {
+    true
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct BotSettings {
     #[serde(default)]
     pub(crate) notify_channel: Option<u64>,
+    #[serde(default = "war_default_on")]
+    pub(crate) war_mode: bool,
+}
+
+impl Default for BotSettings {
+    fn default() -> Self {
+        Self {
+            notify_channel: None,
+            war_mode: war_default_on(),
+        }
+    }
 }
 
 pub(crate) struct Data {

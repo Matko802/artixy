@@ -55,7 +55,7 @@ pub(crate) async fn send_output(ctx: Context<'_>, cmd: &str, body: &str) -> Resu
 pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
-\n**Who can use me**\n`/users` / `/userlist` — show owner + managers\n`/useradd @user` — owner only: links them and creates their Linux account in Artix (name from discord name).\n`/userdel @user` — owner only: revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/run <command>` — run it for real inside the VM, prints the output\n\
+\n**Who can use me**\n`/users` / `/userlist` — show owner + managers\n`/useradd @user` — owner only: links them and creates their Linux account in Artix (name from discord name).\n`/userdel @user` — owner only: revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/run <command>` — run it for real inside the VM, prints the output\n\
 \n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`/live <command>` — follows one run live in a single message until it finishes. Starting another run stops it.\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
@@ -550,6 +550,29 @@ pub(crate) async fn notify(
             }
         },
     }
+    Ok(())
+}
+
+#[poise::command(slash_command, prefix_command)]
+pub(crate) async fn warmode(
+    ctx: Context<'_>,
+    #[description = "true to arm protections, false to stand down"] enabled: bool,
+) -> Result<(), Error> {
+    if !is_owner(ctx).await {
+        post_text(ctx, "Owner only.").await?;
+        return Ok(());
+    }
+    ctx.data().settings.write().await.war_mode = enabled;
+    save_settings(ctx.data()).await?;
+    post_text(
+        ctx,
+        if enabled {
+            "War mode on! >:3"
+        } else {
+            "war mode disabled, peace?"
+        },
+    )
+    .await?;
     Ok(())
 }
 
