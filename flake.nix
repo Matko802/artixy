@@ -16,7 +16,17 @@
         pkgs.rustPlatform.buildRustPackage {
           pname = "artixy";
           version = "0.1.0";
-          src = pkgs.lib.cleanSource ./.;
+          # Precise file set: the old cleanSource copied the whole 5GB+
+          # target/ dir into the store (hash + copy) on every build.
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./src
+              ./imgs
+            ];
+          };
           cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [ mold ];
           RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
@@ -51,7 +61,13 @@
 
       devShells = forAllSystems (pkgs:
         pkgs.mkShell {
-          buildInputs = [ pkgs.pkgsMusl.cargo pkgs.pkgsMusl.rustc ];
+          # GNU toolchain for fast iteration (dynamic linking); the static
+          # musl deploy build is unaffected (separate derivation above).
+          buildInputs = [ pkgs.cargo pkgs.rustc pkgs.sccache ];
+          shellHook = ''
+            export RUSTC_WRAPPER=sccache
+            export SCCACHE_DIR="''${SCCACHE_DIR:-$HOME/.cache/sccache}"
+          '';
         });
     };
 }
