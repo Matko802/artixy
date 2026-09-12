@@ -1,6 +1,10 @@
 use poise::serenity_prelude as serenity;
 
-use crate::{config::Data, Error};
+use crate::{
+    config::Data,
+    util::{attach_name, cap_file_body},
+    Error,
+};
 
 fn is_boo_message(s: &str) -> bool {
     s.to_lowercase()
@@ -8,16 +12,12 @@ fn is_boo_message(s: &str) -> bool {
         .any(|w| w == "boo")
 }
 
-fn artixy_fenced(s: &str) -> Option<String> {
+fn artixy_text(s: &str) -> Option<String> {
     let text = s.trim_end().strip_suffix(".artixy")?.trim();
     if text.is_empty() {
         return None;
     }
-    let fenced = format!("```ansi\n{}\n```", text);
-    if fenced.chars().count() > 2000 {
-        return None;
-    }
-    Some(fenced)
+    Some(text.to_string())
 }
 
 pub(crate) async fn event_handler(
@@ -39,14 +39,26 @@ pub(crate) async fn event_handler(
         }
         return Ok(());
     }
-    let Some(fenced) = artixy_fenced(&new_message.content) else {
+    let Some(text) = artixy_text(&new_message.content) else {
         return Ok(());
     };
-    let posted_ok = match &new_message.referenced_message {
-        Some(target) => target.reply(&ctx.http, &fenced).await.is_ok(),
-        None => new_message.channel_id.say(&ctx.http, &fenced).await.is_ok(),
+    let sent_ok = if text.chars().count() <= 2000 {
+        match &new_message.referenced_message {
+            Some(target) => target.reply(&ctx.http, &text).await.is_ok(),
+            None => new_message.channel_id.say(&ctx.http, &text).await.is_ok(),
+        }
+    } else {
+        let att = serenity::CreateAttachment::bytes(
+            cap_file_body(&text).into_bytes(),
+            attach_name(&text),
+        );
+        new_message
+            .channel_id
+            .send_message(&ctx.http, serenity::CreateMessage::new().add_file(att))
+            .await
+            .is_ok()
     };
-    if posted_ok {
+    if sent_ok {
         if let Err(e) = new_message.delete(&ctx.http).await {
             eprintln!("artixy-say: posted but failed to delete original: {}", e);
         }
@@ -72,23 +84,15 @@ mod tests {
     }
 
     #[test]
-    fn artixy_suffix_fences_ansi() {
-        assert_eq!(
-            artixy_fenced("hello .artixy"),
-            Some("```ansi\nhello\n```".into())
-        );
-        assert_eq!(
-            artixy_fenced("hello .artixy   "),
-            Some("```ansi\nhello\n```".into())
-        );
-        assert_eq!(artixy_fenced("a.artixy"), Some("```ansi\na\n```".into()));
-        assert_eq!(artixy_fenced(".artixy"), None);
-        assert_eq!(artixy_fenced("   .artixy  "), None);
-        assert_eq!(artixy_fenced(".artixy hello"), None);
-        assert_eq!(artixy_fenced("hello"), None);
-        assert_eq!(artixy_fenced(""), None);
-        assert_eq!(artixy_fenced(".ARTIXY"), None);
-        assert_eq!(artixy_fenced(&format!("{}.artixy", "y".repeat(1990))), None);
-        assert!(artixy_fenced(&format!("{}.artixy", "y".repeat(1980))).is_some());
+    fn artixy_suffix_returns_plain_text() {
+        assert_eq!(artixy_text("hello .artixy"), Some("hello".into()));
+        assert_eq!(artixy_text("hello .artixy   "), Some("hello".into()));
+        assert_eq!(artixy_text("a.artixy"), Some("a".into()));
+        assert_eq!(artixy_text(".artixy"), None);
+        assert_eq!(artixy_text("   .artixy  "), None);
+        assert_eq!(artixy_text(".artixy hello"), None);
+        assert_eq!(artixy_text("hello"), None);
+        assert_eq!(artixy_text(""), None);
+        assert_eq!(artixy_text(".ARTIXY"), None);
     }
 }
