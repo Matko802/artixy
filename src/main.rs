@@ -1,7 +1,6 @@
 mod commands;
 mod config;
 mod events;
-mod live;
 mod scrub;
 mod util;
 mod vm;
@@ -10,7 +9,7 @@ mod webhook;
 use poise::serenity_prelude as serenity;
 
 use crate::commands::{
-    botrestart, help, info, live, notify, ps, purge_replies, restart, run, send, shell, shot,
+    botrestart, help, info, notify, ps, purge_replies, restart, run, send, shell, shot,
     start, status, stop, user, useradd, userdel, userlist, users, warmode,
 };
 use crate::commands::BOOT_ART;
@@ -30,43 +29,6 @@ mod tests {
         assert!(out.contains("\x1b[0;30m███\x1b[0m"), "got {:?}", out);
         assert!(out.contains("\x1b[0;31m███\x1b[0m"), "got {:?}", out);
         assert!(!out.contains("40m"), "got {:?}", out);
-    }
-
-    #[test]
-    fn ansi_tail_shows_bottom_in_one_message() {
-        let lines: Vec<String> = (0..30).map(|i| format!("line {:02} {}", i, "x".repeat(70))).collect();
-        let body = lines.join("\n");
-        assert!(body.chars().count() > 2000);
-        let out = ansi_tail(&body);
-        assert!(out.starts_with("```ansi\n"), "ansi fence");
-        assert!(out.ends_with("\n```"), "closed fence");
-        assert!(out.chars().count() <= 2000, "fits Discord limit, got {}", out.chars().count());
-        assert!(out.contains("line 29"), "bottom kept");
-        assert!(!out.contains("line 00"), "head dropped");
-        assert!(out.contains('…'), "truncation marked");
-    }
-
-    #[test]
-    fn ansi_tail_short_output_unchanged_no_marker() {
-        let out = ansi_tail("\x1b[0;32m$ cmd\x1b[0m\nok");
-        assert!(out.contains("\x1b[0;32m$ cmd\x1b[0m"), "colors intact, got {:?}", out);
-        assert!(!out.contains('…'), "no marker when nothing dropped");
-        assert_eq!(ansi_tail(""), "```ansi\n(empty)\n```");
-    }
-
-    #[test]
-    fn ansi_tail_never_splits_a_line() {
-        let lines: Vec<String> = (0..40).map(|i| format!("\x1b[0;3{}mline {:02}\x1b[0m {}", i % 8, i, "y".repeat(60))).collect();
-        let out = ansi_tail(&lines.join("\n"));
-        assert!(out.chars().count() <= 2000);
-        let b = out.as_bytes();
-        let mut i = 0;
-        while i < b.len() {
-            if b[i] == b'[' {
-                assert!(i > 0 && b[i - 1] == 0x1b, "bare SGR remnant at byte {}", i);
-            }
-            i += 1;
-        }
     }
 
     #[test]
@@ -285,7 +247,6 @@ async fn main() {
             blocked: file_config.blocked_ids.clone(),
         }),
         vm,
-        live: Default::default(),
         settings: tokio::sync::RwLock::new(BotSettings {
             notify_channel: file_config.notify_channel,
             war_mode: file_config.war_mode,
@@ -311,7 +272,6 @@ async fn main() {
                 shell(),
                 botrestart(),
                 run(),
-                live(),
                 shot(),
                 send(),
                 notify(),

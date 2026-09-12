@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use crate::{
     config::persist_runtime,
-    live::{abort_live_for_channel, begin_live, cleanup_live_files},
     scrub::scrub_public_ip,
     util::{attach_name, cap_file_body, codeblock, deployed_via_nix, fence_inline, fit_bottom_lines, project_dir, random_suffix, sanitize_ansi, strip_sgr, valid_runas},
     vm::{agent_ping, guest_exec, linked_user, run_guest_cmd, user_shell, virsh, wait_agent},
@@ -55,7 +54,7 @@ pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
 \n**Who can use me**\n`/users` / `/userlist` — show owner + managers\n`/useradd @user` — owner only: links them and creates their Linux account in Artix (name from discord name).\n`/userdel @user` — owner only: revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/run <command>` — run it for real inside the VM, prints the output\n\
-\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`/live <command>` — follows one run live in a single message until it finishes. Starting another run stops it.\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n\
+\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it).\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
 #[poise::command(slash_command, prefix_command)]
@@ -299,20 +298,13 @@ pub(crate) async fn botrestart(ctx: Context<'_>) -> Result<(), Error> {
 pub(crate) async fn run(
     ctx: Context<'_>,
     #[description = "Command to run in the VM"] cmd: String,
-    #[description = "Follow output live instead of one reply"] live: Option<bool>,
 ) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
     }
-    if live.unwrap_or(false) {
-        return do_live(ctx, cmd).await;
-    }
     maybe_defer(ctx).await;
     let vm = ctx.data().vm.clone();
     let uid = ctx.author().id.get();
-    if let Some(old) = abort_live_for_channel(&ctx.data().live, ctx.channel_id()).await {
-        cleanup_live_files(&vm, &old.out_f, &old.code_f).await;
-    }
     let sh = user_shell(ctx.data(), uid).await;
     let runas = linked_user(ctx.data(), uid).await;
     let (body, code) = run_guest_cmd(&vm, &sh, &cmd, runas.as_deref(), 300).await?;
@@ -324,46 +316,6 @@ pub(crate) async fn run(
     send_output(ctx, &cmd, &body).await?;
     eprintln!("run for {}: exit {}", ctx.author().name, code);
     Ok(())
-}
-
-pub(crate) async fn do_live(ctx: Context<'_>, cmd: String) -> Result<(), Error> {
-    maybe_defer(ctx).await;
-    if cmd.trim().is_empty() {
-        post_text(ctx, "Usage: `/live <command>`.").await?;
-        return Ok(());
-    }
-    let vm = ctx.data().vm.clone();
-    if !agent_ping(&vm).await {
-        post_text(ctx, "Guest agent is silent. Install `qemu-guest-agent` in Artix first.")
-            .await?;
-        return Ok(());
-    }
-    let http = ctx.serenity_context().http.clone();
-    let ack = post_response(ctx, format!("`live: {}` starting…", cmd.trim()), Vec::new()).await?;
-    begin_live(
-        http,
-        ack,
-        ctx.author().id.get(),
-        &ctx.author().name,
-        vm,
-        cmd.trim().to_string(),
-        linked_user(ctx.data(), ctx.author().id.get()).await,
-        ctx.data().live.clone(),
-        !is_owner(ctx).await,
-    )
-    .await;
-    Ok(())
-}
-
-#[poise::command(slash_command, prefix_command)]
-pub(crate) async fn live(
-    ctx: Context<'_>,
-    #[description = "Command to follow live"] cmd: String,
-) -> Result<(), Error> {
-    if !need_auth(ctx).await? {
-        return Ok(());
-    }
-    do_live(ctx, cmd).await
 }
 
 #[poise::command(slash_command, prefix_command)]
