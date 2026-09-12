@@ -433,16 +433,19 @@ mod tests {
     #[test]
     fn terminal_key_maps_hotkeys_to_bytes() {
         use crate::live::terminal_key;
-        assert_eq!(terminal_key(".backspace"), Some("\x7f".to_string()));
+        assert_eq!(terminal_key(".return"), Some("\x7f".to_string()));
+        assert_eq!(terminal_key(".space"), Some(" ".to_string()));
         assert_eq!(terminal_key(".enter"), Some("\r".to_string()));
-        assert_eq!(terminal_key(".esc"), Some("\x1b".to_string()));
+        assert_eq!(terminal_key(".."), Some("\x1b".to_string()));
         assert_eq!(terminal_key(".up"), Some("\x1b[A".to_string()));
         assert_eq!(terminal_key(".down"), Some("\x1b[B".to_string()));
         assert_eq!(terminal_key(".right"), Some("\x1b[C".to_string()));
         assert_eq!(terminal_key(".left"), Some("\x1b[D".to_string()));
         assert_eq!(terminal_key(".right 5"), Some("\x1b[C".repeat(5)));
         assert_eq!(terminal_key(".up 1"), Some("\x1b[A".to_string()));
-        assert_eq!(terminal_key(".esc 3"), Some("\x1b".repeat(3)));
+        assert_eq!(terminal_key(".. 3"), Some("\x1b".repeat(3)));
+        assert_eq!(terminal_key(".space 4"), Some("    ".to_string()));
+        assert_eq!(terminal_key(".backspace"), None);
         assert_eq!(terminal_key("hi"), None);
         assert_eq!(terminal_key(""), None);
         assert_eq!(terminal_key(".ENTER"), None);

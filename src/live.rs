@@ -102,9 +102,10 @@ pub(crate) fn terminal_key(text: &str) -> Option<String> {
     const MAX_REPEAT: u32 = 100;
     let mut parts = text.split_whitespace();
     let base: &str = match parts.next()? {
-        ".backspace" => "\x7f",
+        ".return" => "\x7f",
+        ".space" => " ",
         ".enter" => "\r",
-        ".esc" => "\x1b",
+        ".." => "\x1b",
         ".up" => "\x1b[A",
         ".down" => "\x1b[B",
         ".right" => "\x1b[C",
