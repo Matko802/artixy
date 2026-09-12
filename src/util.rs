@@ -192,7 +192,8 @@ pub(crate) fn fit_bottom_lines(body: &str) -> (String, bool) {
 }
 
 pub(crate) fn plain_tail(body: &str) -> String {
-    let clean = strip_sgr(&body.replace('\r', "\n").trim_end().to_string());
+    let cr = body.replace('\r', "\n");
+    let clean = strip_sgr(after_last_clear(cr.trim_end()));
     let (fitted, truncated) = fit_bottom_lines(&clean);
     let t = if fitted.trim().is_empty() {
         "(empty)".to_string()
@@ -212,13 +213,48 @@ const LIVE_IMG_COL_PX: u32 = 10;
 const LIVE_IMG_ROW_PX: u32 = 20;
 const LIVE_IMG_PAD_PX: u32 = 10;
 
+/// Terminal emulators replace the screen on clear/home sequences instead of
+/// appending. Return everything after the last such sequence so animated
+/// redraws (clear + redraw loops) show the current frame, not stacked history.
+/// Must run on the raw text, before strip_sgr removes the sequences.
+pub(crate) fn after_last_clear(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut last = 0usize;
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == 0x1b && i + 1 < b.len() {
+            if b[i + 1] == b'c' {
+                // ESC c: full reset.
+                last = i + 2;
+                i += 2;
+                continue;
+            }
+            if b[i + 1] == b'[' {
+                let mut j = i + 2;
+                while j < b.len() && (b[j].is_ascii_digit() || b[j] == b';' || b[j] == b'?') {
+                    j += 1;
+                }
+                if j < b.len() && (b[j] == b'J' || b[j] == b'H' || b[j] == b'f') {
+                    // CSI J: erase display, CSI H/f: cursor home/position.
+                    last = j + 1;
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        i = (i + utf8_len(b[i])).min(b.len());
+    }
+    &s[last..]
+}
+
 /// Prepare terminal output for image rendering: turn carriage returns into
 /// newlines (so progress-bar redraws become lines instead of glued text),
 /// strip colors, expand tabs, keep the last MAX_ROWS lines, truncate lines
 /// to MAX_COLS chars.
 /// Returns (renderable text, image width, image height) sized to the text.
 pub(crate) fn frame_text(body: &str) -> (String, u32, u32) {
-    let clean = strip_sgr(&body.replace('\r', "\n"));
+    let cr = body.replace('\r', "\n");
+    let clean = strip_sgr(after_last_clear(&cr));
     let lines: Vec<&str> = clean.lines().collect();
     let start = lines.len().saturating_sub(LIVE_IMG_MAX_ROWS);
     let mut out: Vec<String> = Vec::new();

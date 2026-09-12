@@ -96,6 +96,34 @@ mod tests {
     }
 
     #[test]
+    fn after_last_clear_keeps_current_frame() {
+        assert_eq!(after_last_clear("a\nb"), "a\nb");
+        assert_eq!(after_last_clear("old\n\x1b[2Jnew"), "new");
+        assert_eq!(after_last_clear("old\n\x1b[Hnew"), "new");
+        assert_eq!(after_last_clear("old\n\x1bcnew"), "new");
+        assert_eq!(after_last_clear("one\x1b[Jtwo\x1b[2Jthree"), "three", "last clear wins");
+        assert_eq!(
+            after_last_clear("\x1b[0;32mok\x1b[0m"),
+            "\x1b[0;32mok\x1b[0m",
+            "color sequences kept for the strip step"
+        );
+        assert_eq!(
+            after_last_clear("a\x1b[?25lb"),
+            "a\x1b[?25lb",
+            "non-clear sequences ignored"
+        );
+        assert_eq!(after_last_clear(""), "");
+    }
+
+    #[test]
+    fn frame_text_collapses_redraw_loops() {
+        // jefetch-style: full block, clear, full block again.
+        let (text, _, _) = frame_text("block1\n\x1b[J\x1b[Hblock2");
+        assert!(!text.contains("block1"), "stale frame dropped, got {:?}", text);
+        assert!(text.contains("block2"), "current frame kept");
+    }
+
+    #[test]
     fn tool_path_finds_shell_and_rejects_junk() {
         let sh = tool_path("sh");
         assert!(sh.is_some(), "sh must resolve even with a minimal PATH");

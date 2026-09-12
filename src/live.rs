@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::{
     scrub::scrub_public_ip,
-    util::{frame_text, plain_tail, random_suffix, tool_path, valid_runas},
+    util::{after_last_clear, frame_text, plain_tail, random_suffix, tool_path, valid_runas},
     vm::{guest_exec, guest_launch_raw, guest_status},
     webhook::{edit_posted, resolve_poster, Poster},
 };
@@ -142,6 +142,9 @@ async fn live_message(
     header: &str,
     output: &str,
 ) -> (String, Vec<(String, Vec<u8>)>) {
+    // Collapse clear-screen redraws before adding our header, so the $ cmd
+    // line survives programs that clear the screen every frame.
+    let output = after_last_clear(output);
     let combined = if output.trim().is_empty() {
         header.to_string()
     } else {
@@ -318,7 +321,9 @@ pub(crate) async fn live_run(
         let done = guest_status(&vm, pid).await.unwrap_or(None);
         match done {
             Some(code) => {
-                let full = guest_exec(&vm, "/bin/cat", &[&out_f], true, 30)
+                // Capped tail, not full cat: a runaway command could have
+                // megabytes in the file; both consumers only keep the bottom.
+                let full = guest_exec(&vm, "/usr/bin/tail", &["-c", "500000", &out_f], true, 30)
                     .await
                     .map(|(_, o, _)| o)
                     .unwrap_or(fetched);
