@@ -2,7 +2,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::{
     scrub::scrub_public_ip,
-    util::{frame_text, plain_tail, random_suffix, tool_path, valid_runas, LIVE_IMG_H, LIVE_IMG_W},
+    util::{frame_text, plain_tail, random_suffix, tool_path, valid_runas},
     vm::{guest_exec, guest_launch_raw, guest_status},
     webhook::{edit_posted, resolve_poster, Poster},
 };
@@ -18,10 +18,10 @@ pub(crate) type LiveMap = std::sync::Arc<
 >;
 
 pub(crate) const LIVE_TIMEOUT_SECS: u64 = 600;
-pub(crate) const LIVE_POLL_SECS: u64 = 5;
+pub(crate) const LIVE_POLL_SECS: u64 = 1;
 /// First poll comes sooner: commands finishing inside this window get a plain
 /// text reply instead of the live image feed.
-pub(crate) const LIVE_QUICK_SECS: u64 = 3;
+pub(crate) const LIVE_QUICK_SECS: u64 = 1;
 /// Guest output fetched per poll for the image frame (bytes, not chars).
 const LIVE_FRAME_BYTES: &str = "200000";
 
@@ -70,15 +70,13 @@ fn esc_filter_arg(s: &str) -> String {
     s.replace('\\', "\\\\").replace(':', "\\:").replace(',', "\\,")
 }
 
-/// Render stripped terminal text to a fixed 500x500 PNG via ffmpeg drawtext.
-/// Returns PNG bytes, or None when rendering is unavailable (caller falls back to text).
-async fn render_frame(text: &str) -> Option<Vec<u8>> {
-    let font = match mono_font().await {
+/// Render stripped terminal text to a PNG via ffmpeg drawtext, sized to fit
+/// the text. Returns PNG bytes, or None when rendering is unavailable
+/// (caller falls back to text).
+async fn render_frame(font: Option<&str>, text: &str, w: u32, h: u32) -> Option<Vec<u8>> {
+    let font = match font {
         Some(f) => f,
-        None => {
-            eprintln!("live: no monospace font found (fc-match missing?); text fallback");
-            return None;
-        }
+        None => return None,
     };
     let ffmpeg = match tool_path("ffmpeg") {
         Some(p) => p,
@@ -92,7 +90,7 @@ async fn render_frame(text: &str) -> Option<Vec<u8>> {
     let txt = dir.join(format!("artixy-live-{}-{}.txt", std::process::id(), tag));
     let png = dir.join(format!("artixy-live-{}-{}.png", std::process::id(), tag));
     tokio::fs::write(&txt, text).await.ok()?;
-    let input = format!("color=c=#0b0e14:s={}x{}", LIVE_IMG_W, LIVE_IMG_H);
+    let input = format!("color=c=#0b0e14:s={}x{}", w, h);
     let vf = format!(
         "drawtext=fontfile={}:textfile={}:expansion=none:fontcolor=#e6e6e6:fontsize=16:x=10:y=10",
         esc_filter_arg(&font),
@@ -139,14 +137,18 @@ async fn render_frame(text: &str) -> Option<Vec<u8>> {
 
 /// Build the live message: short status text plus a rendered image of the
 /// output. Falls back to plain text when rendering is unavailable.
-async fn live_message(header: &str, output: &str) -> (String, Vec<(String, Vec<u8>)>) {
+async fn live_message(
+    font: Option<&str>,
+    header: &str,
+    output: &str,
+) -> (String, Vec<(String, Vec<u8>)>) {
     let combined = if output.trim().is_empty() {
         header.to_string()
     } else {
         format!("{}\n{}", header, output.trim_end())
     };
-    let img_text = frame_text(&combined);
-    match render_frame(&img_text).await {
+    let (img_text, w, h) = frame_text(&combined);
+    match render_frame(font, &img_text, w, h).await {
         Some(png) => (plain_tail(header), vec![("live.png".to_string(), png)]),
         None => (plain_tail(&combined), Vec::new()),
     }
@@ -277,7 +279,17 @@ pub(crate) async fn live_run(
         }
     };
     let started = std::time::Instant::now();
+    // Font lookup once per run (spawning fc-match every second would be waste).
+    let font = match mono_font().await {
+        Some(f) => Some(f),
+        None => {
+            eprintln!("live: no monospace font found (fc-match missing?); text fallback");
+            None
+        }
+    };
     let mut first = true;
+    let mut last_hash: u64 = 0;
+    let mut hashed_once = false;
     loop {
         let wait = if first { LIVE_QUICK_SECS } else { LIVE_POLL_SECS };
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
@@ -325,15 +337,27 @@ pub(crate) async fn live_run(
                     };
                     edit_posted(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await;
                 } else {
-                    let (text, files) = live_message(&header, &output).await;
+                    let (text, files) = live_message(font.as_deref(), &header, &output).await;
                     edit_posted(&poster, &http, channel, msg.id, text, files).await;
                 }
                 cleanup_live_files(&vm, &out_f, &code_f).await;
                 break;
             }
             None => {
+                // Skip render + edit entirely when nothing changed: keeps the
+                // 1s cadence cheap and stays clear of Discord rate limits.
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                fetched.hash(&mut hasher);
+                let digest = hasher.finish();
+                if hashed_once && digest == last_hash {
+                    first = false;
+                    continue;
+                }
+                last_hash = digest;
+                hashed_once = true;
                 let header = format!("$ {}\n…live", cmd);
-                let (text, files) = live_message(&header, fetched.trim_end()).await;
+                let (text, files) = live_message(font.as_deref(), &header, fetched.trim_end()).await;
                 if !edit_posted(&poster, &http, channel, msg.id, text, files).await {
                     cleanup_live_files(&vm, &out_f, &code_f).await;
                     break;
