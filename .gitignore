@@ -1,5 +1,3 @@
 /target
 .env
 *.env
-users.json
-shells.json
