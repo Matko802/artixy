@@ -292,9 +292,10 @@ pub(crate) fn current_frame(s: &str) -> &str {
 /// Prepare terminal output for image rendering: turn carriage returns into
 /// newlines (so progress-bar redraws become lines instead of glued text),
 /// strip colors, expand tabs, keep the last MAX_ROWS lines, truncate lines
-/// to MAX_COLS chars.
-/// Returns (renderable text, image width, image height) sized to the text.
-pub(crate) fn frame_text(body: &str) -> (String, u32, u32) {
+/// to MAX_COLS chars, drop leading/trailing blank rows.
+/// Returns (renderable text, image width, image height, text y offset) —
+/// short content is vertically centered instead of hugging the top edge.
+pub(crate) fn frame_text(body: &str) -> (String, u32, u32, u32) {
     let cr = normalize_nl(body);
     let clean = strip_sgr(after_last_clear(&cr));
     let lines: Vec<&str> = clean.lines().collect();
@@ -307,13 +308,21 @@ pub(crate) fn frame_text(body: &str) -> (String, u32, u32) {
         cols = cols.max(len);
         out.push(expanded[..len].iter().collect());
     }
+    while out.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        out.remove(0);
+    }
+    while out.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        out.pop();
+    }
     if out.is_empty() {
         out.push("(empty)".to_string());
         cols = cols.max(7);
     }
+    let content_h = out.len() as u32 * LIVE_IMG_ROW_PX;
     let w = (cols as u32 * LIVE_IMG_COL_PX + LIVE_IMG_PAD_PX * 2).max(LIVE_IMG_MIN_W);
-    let h = (out.len() as u32 * LIVE_IMG_ROW_PX + LIVE_IMG_PAD_PX * 2).max(LIVE_IMG_MIN_H);
-    (out.join("\n"), w, h)
+    let h = (content_h + LIVE_IMG_PAD_PX * 2).max(LIVE_IMG_MIN_H);
+    let y = LIVE_IMG_PAD_PX + h.saturating_sub(content_h + LIVE_IMG_PAD_PX * 2) / 2;
+    (out.join("\n"), w, h, y)
 }
 
 pub(crate) fn cap_file_body(clean: &str) -> String {

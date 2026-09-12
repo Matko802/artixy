@@ -118,34 +118,47 @@ mod tests {
 
     #[test]
     fn frame_text_caps_rows_cols_and_sizes_image() {
-        let (text, w, h) = frame_text("ab\ncde");
+        let (text, w, h, y) = frame_text("ab\ncde");
         assert_eq!(text, "ab\ncde");
         assert_eq!((w, h), (640, 400), "tiny content hits the floor, got {}x{}", w, h);
-        let (text, w, _) = frame_text(&"x".repeat(40));
+        assert_eq!(y, 20 + (400 - 2 * 48 - 40) / 2, "centered, got {}", y);
+        let (text, w, _, _) = frame_text(&"x".repeat(40));
         assert_eq!(text.chars().count(), 40);
         assert_eq!(w, 40 * 22 + 40, "cols drive width past the floor");
         let tall = (0..30).map(|i| format!("l{}", i)).collect::<Vec<_>>().join("\n");
-        let (_, _, h) = frame_text(&tall);
+        let (_, _, h, y) = frame_text(&tall);
         assert_eq!(h, 30 * 48 + 40, "rows drive height past the floor");
-        let (empty_text, _, _) = frame_text("");
+        assert_eq!(y, 20, "no centering once past the floor");
+        let (empty_text, _, _, _) = frame_text("");
         assert_eq!(empty_text, "(empty)");
         let long = (0..100).map(|i| format!("line {:03}", i)).collect::<Vec<_>>().join("\n");
-        let (text, _, h) = frame_text(&long);
+        let (text, _, h, _) = frame_text(&long);
         assert!(text.contains("line 099"), "bottom kept");
         assert!(!text.contains("line 000\n"), "head dropped");
         assert_eq!(h, 80 * 48 + 40, "rows capped at 80");
         let wide = "x".repeat(200);
-        let (text, w, _) = frame_text(&wide);
+        let (text, w, _, _) = frame_text(&wide);
         assert_eq!(text.chars().count(), 120, "cols capped at 120");
         assert_eq!(w, 120 * 22 + 40);
     }
 
     #[test]
+    fn frame_text_trims_blank_edges_but_keeps_middle() {
+        assert_eq!(frame_text("\n\nab\ncde\n\n\n").0, "ab\ncde", "edges trimmed");
+        assert_eq!(frame_text("   \n  \n").0, "(empty)", "all-blank stays placeholder");
+        assert_eq!(
+            frame_text("a\n\n\nb").0,
+            "a\n\n\nb",
+            "interior spacing kept"
+        );
+    }
+
+    #[test]
     fn frame_text_strips_ansi_expands_tabs_splits_cr() {
-        let (text, _, _) = frame_text("\x1b[0;32m$ cmd\x1b[0m\na\tb");
+        let (text, _, _, _) = frame_text("\x1b[0;32m$ cmd\x1b[0m\na\tb");
         assert!(!text.contains('\x1b'), "no escapes, got {:?}", text);
         assert!(text.contains("a        b"), "tabs expanded, got {:?}", text);
-        let (text, _, _) = frame_text("10%\r20%\r30%");
+        let (text, _, _, _) = frame_text("10%\r20%\r30%");
         assert_eq!(text, "10%\n20%\n30%", "progress redraws become lines, got {:?}", text);
     }
 
@@ -172,7 +185,7 @@ mod tests {
     #[test]
     fn frame_text_collapses_redraw_loops() {
         // jefetch-style: full block, clear, full block again.
-        let (text, _, _) = frame_text("block1\n\x1b[J\x1b[Hblock2");
+        let (text, _, _, _) = frame_text("block1\n\x1b[J\x1b[Hblock2");
         assert!(!text.contains("block1"), "stale frame dropped, got {:?}", text);
         assert!(text.contains("block2"), "current frame kept");
     }

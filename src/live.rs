@@ -96,7 +96,7 @@ fn esc_filter_arg(s: &str) -> String {
 /// Render stripped terminal text to a PNG via ffmpeg drawtext, sized to fit
 /// the text. Returns PNG bytes, or None when rendering is unavailable
 /// (caller falls back to text).
-async fn render_frame(font: Option<&str>, text: &str, w: u32, h: u32) -> Option<Vec<u8>> {
+async fn render_frame(font: Option<&str>, text: &str, w: u32, h: u32, y: u32) -> Option<Vec<u8>> {
     let font = match font {
         Some(f) => f,
         None => return None,
@@ -115,9 +115,10 @@ async fn render_frame(font: Option<&str>, text: &str, w: u32, h: u32) -> Option<
     tokio::fs::write(&txt, text).await.ok()?;
     let input = format!("color=c=#0b0e14:s={}x{}", w, h);
     let vf = format!(
-        "drawtext=fontfile={}:textfile={}:expansion=none:fontcolor=#e6e6e6:fontsize=32:x=20:y=20",
+        "drawtext=fontfile={}:textfile={}:expansion=none:fontcolor=#e6e6e6:fontsize=32:x=20:y={}",
         esc_filter_arg(&font),
         esc_filter_arg(&txt.to_string_lossy()),
+        y,
     );
     let png_s = png.to_string_lossy().to_string();
     let run = tokio::time::timeout(
@@ -168,8 +169,8 @@ async fn live_message(
 ) -> (String, Vec<(String, Vec<u8>)>) {
     let output = after_last_clear(output);
     let caption = format!("$ {}", cmd);
-    let (img_text, w, h) = frame_text(output);
-    match render_frame(font, &img_text, w, h).await {
+    let (img_text, w, h, y) = frame_text(output);
+    match render_frame(font, &img_text, w, h, y).await {
         Some(png) => (caption, vec![("live.png".to_string(), png)]),
         None => {
             let mut combined = caption.clone();
