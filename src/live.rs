@@ -14,6 +14,8 @@ pub(crate) struct LiveEntry {
     pub(crate) out_f: String,
     pub(crate) code_f: String,
     pub(crate) pid: Option<i64>,
+    pub(crate) msg_id: serenity::MessageId,
+    pub(crate) in_f: Option<String>,
 }
 pub(crate) type LiveMap = std::sync::Arc<
     tokio::sync::Mutex<std::collections::HashMap<serenity::ChannelId, LiveEntry>>,
@@ -34,18 +36,20 @@ const GUEST_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH";
 /// CMD_DATA (never embedded in the script text, so quotes in it are safe) and
 /// runs under `script(1)` on a pty sized exactly like our render window, so
 /// programs wrap and format for what the picture shows and switch to
-/// line-buffered streaming output. Child stdin is /dev/null (instant EOF);
-/// stdout/stderr stay on the pty. Falls back to a plain shell when `script`
-/// is missing. Returns exit code via the code file.
-pub(crate) fn build_runner(shell: &str, b64: &str, out_f: &str, code_f: &str) -> String {
+/// line-buffered streaming output. Child stdin comes from `input`: a fifo for
+/// interactive runs (replies to the live message are typed into it), or
+/// /dev/null for instant EOF. Stdout/stderr stay on the pty. Falls back to a
+/// plain shell when `script` is missing. Returns exit code via the code file.
+pub(crate) fn build_runner(shell: &str, b64: &str, out_f: &str, code_f: &str, input: &str) -> String {
     use crate::termrender::{TERM_COLS, TERM_ROWS};
     format!(
-        "export CMD_DATA=\"$(echo {b64} | base64 -d)\"; if command -v script >/dev/null 2>&1; then script -qec 'export TERM=xterm-256color; stty cols {cols} rows {rows} -echo; {shell} -c '\\''export PATH={path}; eval \"$CMD_DATA\"'\\'' </dev/null' /dev/null </dev/null; else {shell} -c 'export PATH={path}; eval \"$CMD_DATA\"'; fi > {out_f} 2>&1; echo $? > {code_f}",
+        "export CMD_DATA=\"$(echo {b64} | base64 -d)\"; if command -v script >/dev/null 2>&1; then script -qec 'export TERM=xterm-256color; stty cols {cols} rows {rows} -echo; {shell} -c '\\''export PATH={path}; eval \"$CMD_DATA\"'\\'' < {input}' /dev/null </dev/null; else {shell} -c 'export PATH={path}; eval \"$CMD_DATA\"' < {input}; fi > {out_f} 2>&1; echo $? > {code_f}",
         b64 = b64,
         cols = TERM_COLS,
         rows = TERM_ROWS,
         shell = shell,
         path = GUEST_PATH,
+        input = input,
         out_f = out_f,
         code_f = code_f,
     )
@@ -68,8 +72,35 @@ pub(crate) async fn remove_live_if_tag(live_map: &LiveMap, channel: serenity::Ch
     }
 }
 
-pub(crate) async fn cleanup_live_files(vm: &str, out_f: &str, code_f: &str) {
-    let _ = guest_exec(vm, "/bin/rm", &["-f", out_f, code_f], false, 10).await;
+pub(crate) async fn cleanup_live_files(vm: &str, out_f: &str, code_f: &str, in_f: Option<&str>) {
+    match in_f {
+        Some(f) => {
+            let _ = guest_exec(vm, "/bin/rm", &["-f", out_f, code_f, f], false, 10).await;
+        }
+        None => {
+            let _ = guest_exec(vm, "/bin/rm", &["-f", out_f, code_f], false, 10).await;
+        }
+    }
+}
+
+/// Type one message into a live session: appends the text plus Enter to the
+/// session fifo. The open blocks (up to the timeout) when nothing is reading,
+/// which is how a finished session reports itself. Returns true on delivery.
+pub(crate) async fn forward_terminal_input(vm: &str, fifo: &str, text: &str) -> bool {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let script = format!("timeout 8 bash -c 'echo {} | base64 -d >> {}'", b64, fifo);
+    match guest_exec(vm, "/bin/bash", &["-c", &script], false, 15).await {
+        Ok((0, _, _)) => true,
+        Ok((code, _, _)) => {
+            eprintln!("live: terminal input not delivered (rc {})", code);
+            false
+        }
+        Err(e) => {
+            eprintln!("live: terminal input failed ({})", e);
+            false
+        }
+    }
 }
 
 /// Best-effort purge of this bot's spool files and wrapper processes left
@@ -79,7 +110,7 @@ pub(crate) async fn cleanup_stale_live_files(vm: &str) {
     let _ = guest_exec(
         vm,
         "/bin/bash",
-        &["-c", "rm -f /tmp/podbot-live-*.out /tmp/podbot-live-*.code; pkill -f 'podbot-live-' 2>/dev/null; true"],
+        &["-c", "rm -f /tmp/podbot-live-*; pkill -f 'podbot-live-' 2>/dev/null; true"],
         false,
         15,
     )
@@ -143,9 +174,25 @@ pub(crate) async fn begin_run(
     let channel = ack.channel_id;
     let poster = resolve_poster(&http, channel).await;
     let tag = ack.id.get();
+    let ack_id = ack.id;
     let rand = random_suffix();
     let out_f = format!("/tmp/podbot-live-{}-{}.out", tag, rand);
     let code_f = format!("/tmp/podbot-live-{}-{}.code", tag, rand);
+    // Fifo for typed input (replies to the live message). Without it the run
+    // still works, just not interactively.
+    let in_f = format!("/tmp/podbot-live-{}-{}.in", tag, rand);
+    let in_opt = match guest_exec(
+        &vm,
+        "/bin/bash",
+        &["-c", &format!("rm -f {} && mkfifo -m 644 {}", in_f, in_f)],
+        false,
+        10,
+    )
+    .await
+    {
+        Ok((0, _, _)) => Some(in_f.clone()),
+        _ => None,
+    };
     if let Some(old) = abort_live_for_channel(&live_map, channel).await {
         let vm_clone = vm.clone();
         tokio::spawn(async move {
@@ -154,14 +201,20 @@ pub(crate) async fn begin_run(
             if let Some(pid) = old.pid {
                 crate::vm::guest_kill_tree(&vm_clone, pid).await;
             }
-            cleanup_live_files(&vm_clone, &old.out_f, &old.code_f).await;
+            cleanup_live_files(&vm_clone, &old.out_f, &old.code_f, old.in_f.as_deref()).await;
         });
     }
     let live_map2 = live_map.clone();
-    let (vm2, cmd2, runas2, out_f2, code_f2) =
-        (vm.clone(), cmd.clone(), runas.clone(), out_f.clone(), code_f.clone());
+    let (vm2, cmd2, runas2, out_f2, code_f2, in_f2) = (
+        vm.clone(),
+        cmd.clone(),
+        runas.clone(),
+        out_f.clone(),
+        code_f.clone(),
+        in_opt.clone(),
+    );
     let handle = tokio::spawn(async move {
-        live_run(http, ack, channel, tag, vm2, cmd2, runas2, out_f2, code_f2, live_map2, scrub_ip, poster).await;
+        live_run(http, ack, channel, tag, vm2, cmd2, runas2, out_f2, code_f2, in_f2, live_map2, scrub_ip, poster).await;
     })
     .abort_handle();
     live_map.lock().await.insert(
@@ -172,6 +225,8 @@ pub(crate) async fn begin_run(
             out_f,
             code_f,
             pid: None,
+            msg_id: ack_id,
+            in_f: in_opt,
         },
     );
     eprintln!("run started for {} (id {})", author_name, author_id);
@@ -187,6 +242,7 @@ pub(crate) async fn live_run(
     runas: Option<String>,
     out_f: String,
     code_f: String,
+    in_f: Option<String>,
     live_map: LiveMap,
     scrub_ip: bool,
     poster: Poster,
@@ -208,8 +264,9 @@ pub(crate) async fn live_run(
         }
     }
     let b64 = base64::engine::general_purpose::STANDARD.encode(cmd.as_bytes());
-    let script = build_runner("bash", &b64, &out_f, &code_f);
-    let script_sh = build_runner("sh", &b64, &out_f, &code_f);
+    let input = in_f.as_deref().unwrap_or("/dev/null");
+    let script = build_runner("bash", &b64, &out_f, &code_f, input);
+    let script_sh = build_runner("sh", &b64, &out_f, &code_f, input);
     let (lpath, largs): (&str, Vec<&str>) = match &runas {
         Some(u) => ("su", vec![u.as_str(), "-s", "/bin/bash", "-c", &script]),
         None => ("/bin/bash", vec!["-c", &script]),
@@ -237,6 +294,7 @@ pub(crate) async fn live_run(
                 Vec::new(),
             )
             .await;
+            cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
             remove_live_if_tag(&live_map, channel, tag).await;
             return;
         }
@@ -303,7 +361,7 @@ pub(crate) async fn live_run(
                 Vec::new(),
             )
             .await;
-            cleanup_live_files(&vm, &out_f, &code_f).await;
+            cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
             break;
         }
         // One generous fetch serves both the fallback text and the image frame.
@@ -341,7 +399,7 @@ pub(crate) async fn live_run(
                         live_message(fonts.as_ref(), &cmd, &output, &mut region).await;
                     edit_posted(&poster, &http, channel, msg.id, text, files).await;
                 }
-                cleanup_live_files(&vm, &out_f, &code_f).await;
+                cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
                 break;
             }
             None => {
@@ -362,7 +420,7 @@ pub(crate) async fn live_run(
                 let (text, files) =
                     live_message(fonts.as_ref(), &cmd, &fetched, &mut region).await;
                 if !edit_posted(&poster, &http, channel, msg.id, text, files).await {
-                    cleanup_live_files(&vm, &out_f, &code_f).await;
+                    cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
                     break;
                 }
             }

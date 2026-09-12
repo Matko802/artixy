@@ -139,18 +139,19 @@ mod tests {
 
     #[test]
     fn build_runner_wraps_pty_matching_render_window() {
-        let s = crate::live::build_runner("bash", "QkI2NA==", "/tmp/o.out", "/tmp/o.code");
+        let s = crate::live::build_runner("bash", "QkI2NA==", "/tmp/o.out", "/tmp/o.code", "/tmp/o.in");
         assert!(s.contains("stty cols 120 rows 40"), "pty matches render window");
         assert!(s.contains("TERM=xterm-256color"), "terminfo set");
         assert!(s.contains("CMD_DATA"), "command travels via env, not text");
         assert!(s.contains("script -qec"), "pty path first");
         assert!(s.contains("else bash -c"), "plain fallback");
-        assert!(s.contains("</dev/null"), "stdin EOFs instantly");
+        assert!(s.contains("< /tmp/o.in"), "child stdin is the input fifo");
         assert!(s.contains("> /tmp/o.out 2>&1"), "output captured");
         assert!(s.contains("echo $? > /tmp/o.code"), "exit code kept");
         assert!(!s.contains("$(cat)"), "no pipe-through-pty (EOF would hang)");
-        let sh = crate::live::build_runner("sh", "QkI2NA==", "/tmp/o.out", "/tmp/o.code");
+        let sh = crate::live::build_runner("sh", "QkI2NA==", "/tmp/o.out", "/tmp/o.code", "/dev/null");
         assert!(sh.contains("else sh -c"), "sh fallback mirrors bash");
+        assert!(sh.contains("< /dev/null"), "null input stays EOF-fast");
         eprintln!("RUNNER=<<{}>>", s);
     }
 

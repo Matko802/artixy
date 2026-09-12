@@ -1,7 +1,7 @@
 use poise::serenity_prelude as serenity;
 
 use crate::{
-    config::Data,
+    config::{access_allowed, Data},
     util::{attach_name, cap_file_body, strip_sgr},
     webhook::{handle_delete, is_posted_message, post_message},
     Error,
@@ -104,6 +104,41 @@ pub(crate) async fn event_handler(
     }
     if new_message.author.bot {
         return Ok(());
+    }
+    // Terminal input: a reply to the active live message is typed into the
+    // running command (the reply itself is deleted). Empty or attachment-only
+    // replies, strangers, and replies to anything else fall through below.
+    if new_message.attachments.is_empty() && !new_message.content.trim().is_empty() {
+        if let Some(refd) = new_message.referenced_message.as_ref() {
+            let target: Option<(serenity::MessageId, String)> = {
+                let m = data.live.lock().await;
+                m.get(&new_message.channel_id)
+                    .and_then(|e| e.in_f.clone().map(|f| (e.msg_id, f)))
+            };
+            if let Some((live_msg, fifo)) = target {
+                if refd.id == live_msg {
+                    let authed = {
+                        let a = data.allowed.read().await;
+                        access_allowed(a.owner, &a.users, &a.blocked, id)
+                    };
+                    if authed {
+                        let payload = format!("{}\n", new_message.content.trim_end());
+                        if crate::live::forward_terminal_input(&data.vm, &fifo, &payload).await {
+                            let _ = new_message.delete(&ctx.http).await;
+                        } else {
+                            let _ = post_message(
+                                &ctx.http,
+                                new_message.channel_id,
+                                "Live session already ended.".into(),
+                                Vec::new(),
+                            )
+                            .await;
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
     }
     if !owner {
         if is_boo_message(&new_message.content) {
