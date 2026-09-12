@@ -5,6 +5,7 @@ mod live;
 mod scrub;
 mod util;
 mod vm;
+mod webhook;
 
 use poise::serenity_prelude as serenity;
 use std::path::PathBuf;
@@ -235,6 +236,7 @@ async fn main() {
             .expect("OWNER_ID must be a number"),
     };
     ensure_config_template(owner);
+    crate::webhook::init_webhook_urls(file_config.webhook_urls);
     let _ = std::env::set_current_dir(project_dir());
     let vm = std::env::var("VM_NAME").unwrap_or_else(|_| "voidvm".into());
     let bot_settings: BotSettings = tokio::fs::read_to_string("settings.json")
@@ -315,9 +317,13 @@ async fn main() {
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 if let Some(ch) = data.settings.read().await.notify_channel {
-                    let _ = serenity::ChannelId::new(ch)
-                        .say(&ctx.http, format!("```\n{BOOT_ART}\n```"))
-                        .await;
+                    let _ = crate::webhook::post_message(
+                        &ctx.http,
+                        serenity::ChannelId::new(ch),
+                        format!("```\n{BOOT_ART}\n```"),
+                        Vec::new(),
+                    )
+                    .await;
                 }
                 Ok(data)
             })

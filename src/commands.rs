@@ -8,6 +8,7 @@ use crate::{
     scrub::scrub_public_ip,
     util::{attach_name, cap_file_body, codeblock, deployed_via_nix, fence_inline, fit_bottom_lines, project_dir, random_suffix, sanitize_ansi, strip_sgr, valid_runas},
     vm::{agent_ping, guest_exec, linked_user, run_guest_cmd, user_shell, virsh, wait_agent},
+    webhook::{is_own_message, mark_self_deleted, post_response, post_text},
     Context, Error,
 };
 
@@ -27,7 +28,7 @@ pub(crate) async fn need_auth(ctx: Context<'_>) -> Result<bool, Error> {
     }
     let u = ctx.author();
     eprintln!("denied: {} (id {})", u.name, u.id.get());
-    ctx.say("Not authorized. Ask the owner to run `/useradd <your discord id>`.")
+    post_text(ctx, "Not authorized. Ask the owner to run `/useradd <your discord id>`.")
         .await?;
     Ok(false)
 }
@@ -42,12 +43,12 @@ pub(crate) async fn send_output(ctx: Context<'_>, cmd: &str, body: &str) -> Resu
     let clean = sanitize_ansi(body.trim_end());
     let (fitted, truncated) = fit_bottom_lines(&clean);
     if !truncated {
-        ctx.say(fence_inline(&fitted)).await?;
+        post_text(ctx, fence_inline(&fitted)).await?;
         return Ok(());
     }
-    let att = serenity::CreateAttachment::bytes(cap_file_body(&strip_sgr(&clean)).into_bytes(), attach_name(cmd));
-    ctx.send(poise::CreateReply::default().attachment(att))
-        .await?;
+    let att_name = attach_name(cmd);
+    let att_bytes = cap_file_body(&strip_sgr(&clean)).into_bytes();
+    post_response(ctx, String::new(), vec![(att_name, att_bytes)]).await?;
     Ok(())
 }
 
@@ -60,7 +61,7 @@ pub(crate) const HELP: &str = "\
 
 #[poise::command(slash_command, prefix_command)]
 pub(crate) async fn help(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.say(HELP).await?;
+    post_text(ctx, HELP).await?;
     Ok(())
 }
 
@@ -71,10 +72,10 @@ pub(crate) async fn ps(ctx: Context<'_>) -> Result<(), Error> {
     }
     match virsh(&["list", "--all"]).await {
         Ok(o) => {
-            ctx.say(codeblock(&o)).await?;
+            post_text(ctx, codeblock(&o)).await?;
         }
         Err(e) => {
-            ctx.say(codeblock(&e.to_string())).await?;
+            post_text(ctx, codeblock(&e.to_string())).await?;
         }
     }
     Ok(())
@@ -91,7 +92,7 @@ pub(crate) async fn start(ctx: Context<'_>) -> Result<(), Error> {
     let mut started_here = false;
     let mut boot_t0: Option<std::time::Instant> = None;
     if state.trim() == "running" {
-        ctx.say(format!(
+        post_text(ctx, format!(
             "`{}` is already on. Waiting for the guest agent…",
             vm
         ))
@@ -101,14 +102,14 @@ pub(crate) async fn start(ctx: Context<'_>) -> Result<(), Error> {
             Ok(_) => {
                 started_here = true;
                 boot_t0 = Some(std::time::Instant::now());
-                ctx.say(format!(
+                post_text(ctx, format!(
                     "`{}` starting. Waiting for the guest agent…",
                     vm
                 ))
                 .await?;
             }
             Err(e) => {
-                ctx.say(codeblock(&e.to_string())).await?;
+                post_text(ctx, codeblock(&e.to_string())).await?;
                 return Ok(());
             }
         }
@@ -121,16 +122,16 @@ pub(crate) async fn start(ctx: Context<'_>) -> Result<(), Error> {
             } else {
                 format!("{}s", secs)
             };
-            ctx.say(format!("{} booted in {} (guest agent up).", vm, took)).await?;
+            post_text(ctx, format!("{} booted in {} (guest agent up).", vm, took)).await?;
         } else {
-            ctx.say(format!(
+            post_text(ctx, format!(
                 "`{}` is on and the guest agent answers.",
                 vm
             ))
             .await?;
         }
     } else {
-        ctx.say(format!("`{}` is on but the guest agent is silent. Inside Artix run `sudo pacman -S qemu-guest-agent` and enable its service, then `;start` again.", vm)).await?;
+        post_text(ctx, format!("`{}` is on but the guest agent is silent. Inside Artix run `sudo pacman -S qemu-guest-agent` and enable its service, then `;start` again.", vm)).await?;
     }
     Ok(())
 }
@@ -142,11 +143,11 @@ pub(crate) async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     }
     maybe_defer(ctx).await;
     let vm = ctx.data().vm.clone();
-    ctx.say(format!("stopping {}…", vm)).await?;
+    post_text(ctx, format!("stopping {}…", vm)).await?;
     match virsh(&["shutdown", &vm]).await {
         Ok(_) => {}
         Err(e) => {
-            ctx.say(codeblock(&e.to_string())).await?;
+            post_text(ctx, codeblock(&e.to_string())).await?;
             return Ok(());
         }
     }
@@ -158,11 +159,11 @@ pub(crate) async fn stop(ctx: Context<'_>) -> Result<(), Error> {
             .trim()
             == "shut off"
         {
-            ctx.say(format!("{} has stopped.", vm)).await?;
+            post_text(ctx, format!("{} has stopped.", vm)).await?;
             return Ok(());
         }
     }
-    ctx.say(format!("{} is still stopping — check `;status`.", vm))
+    post_text(ctx, format!("{} is still stopping — check `;status`.", vm))
         .await?;
     Ok(())
 }
@@ -175,10 +176,10 @@ pub(crate) async fn restart(ctx: Context<'_>) -> Result<(), Error> {
     let vm = ctx.data().vm.clone();
     match virsh(&["reboot", &vm]).await {
         Ok(_) => {
-            ctx.say(format!("`{}` rebooting.", vm)).await?;
+            post_text(ctx, format!("`{}` rebooting.", vm)).await?;
         }
         Err(e) => {
-            ctx.say(codeblock(&e.to_string())).await?;
+            post_text(ctx, codeblock(&e.to_string())).await?;
         }
     }
     Ok(())
@@ -197,10 +198,10 @@ pub(crate) async fn info(ctx: Context<'_>) -> Result<(), Error> {
             } else {
                 "guest agent: DOWN (install qemu-guest-agent in Artix)"
             };
-            ctx.say(codeblock(&format!("{}\n{}", o, agent))).await?;
+            post_text(ctx, codeblock(&format!("{}\n{}", o, agent))).await?;
         }
         Err(e) => {
-            ctx.say(codeblock(&e.to_string())).await?;
+            post_text(ctx, codeblock(&e.to_string())).await?;
         }
     }
     Ok(())
@@ -218,7 +219,7 @@ pub(crate) async fn shell(
     match name {
         None => {
             let cur = ctx.data().shells.read().await;
-            ctx.say(format!(
+            post_text(ctx, format!(
                 "Your shell: `{}`. Change with `/shell fish` or `/shell bash`.",
                 cur.get(&key).map(|s| s.as_str()).unwrap_or("bash")
             ))
@@ -227,7 +228,7 @@ pub(crate) async fn shell(
         Some(n) => {
             let n = n.trim().to_lowercase();
             if n != "fish" && n != "bash" {
-                ctx.say("Only `fish` or `bash`.").await?;
+                post_text(ctx, "Only `fish` or `bash`.").await?;
                 return Ok(());
             }
             {
@@ -236,7 +237,7 @@ pub(crate) async fn shell(
                 let data = serde_json::to_string_pretty(&*m)?;
                 save_json("shells.json", data).await?;
             }
-            ctx.say(format!("Your shell is now `{}`.", n)).await?;
+            post_text(ctx, format!("Your shell is now `{}`.", n)).await?;
         }
     }
     Ok(())
@@ -248,14 +249,14 @@ pub(crate) async fn botrestart(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     }
     if deployed_via_nix() {
-        ctx.say(
+        post_text(ctx, 
             "Deployed from Nix — I can't re-exec myself out of a read-only \
              `/nix/store`. Restart with `systemctl --user restart artixy`.",
         )
         .await?;
         return Ok(());
     }
-    ctx.say("Restarting…").await?;
+    post_text(ctx, "Restarting…").await?;
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("target/debug/artixy"));
     let log_path = "/tmp/artixy.log";
     if std::fs::symlink_metadata(log_path)
@@ -289,7 +290,7 @@ pub(crate) async fn botrestart(ctx: Context<'_>) -> Result<(), Error> {
     match spawned {
         Ok(_) => std::process::exit(0),
         Err(e) => {
-            ctx.say(codeblock(&format!("restart failed to spawn: {}", e)))
+            post_text(ctx, codeblock(&format!("restart failed to spawn: {}", e)))
                 .await?;
             Ok(())
         }
@@ -330,21 +331,17 @@ pub(crate) async fn run(
 pub(crate) async fn do_live(ctx: Context<'_>, cmd: String) -> Result<(), Error> {
     maybe_defer(ctx).await;
     if cmd.trim().is_empty() {
-        ctx.say("Usage: `/live <command>`.").await?;
+        post_text(ctx, "Usage: `/live <command>`.").await?;
         return Ok(());
     }
     let vm = ctx.data().vm.clone();
     if !agent_ping(&vm).await {
-        ctx.say("Guest agent is silent. Install `qemu-guest-agent` in Artix first.")
+        post_text(ctx, "Guest agent is silent. Install `qemu-guest-agent` in Artix first.")
             .await?;
         return Ok(());
     }
     let http = ctx.serenity_context().http.clone();
-    let ack = ctx
-        .say(format!("`live: {}` starting…", cmd.trim()))
-        .await?
-        .into_message()
-        .await?;
+    let ack = post_response(ctx, format!("`live: {}` starting…", cmd.trim()), Vec::new()).await?;
     begin_live(
         http,
         ack,
@@ -384,25 +381,25 @@ pub(crate) async fn shot(ctx: Context<'_>) -> Result<(), Error> {
         .await;
     match out {
         Ok(o) if o.status.success() => {
-            match serenity::CreateAttachment::path(&path).await {
-                Ok(att) => {
-                    if ctx
-                        .send(poise::CreateReply::default().attachment(att))
-                        .await
-                        .is_err()
-                    {
+            match tokio::fs::read(&path).await {
+                Ok(bytes) => {
+                    let name = std::path::Path::new(&path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "shot.png".into());
+                    if post_response(ctx, String::new(), vec![(name, bytes)]).await.is_err() {
                         eprintln!("shot send failed (missing Attach Files permission?)");
-                        ctx.say("Screenshot captured but I can't attach files here — give me the Attach Files permission.").await?;
+                        post_text(ctx, "Screenshot captured but I can't attach files here — give me the Attach Files permission.").await?;
                     }
                 }
                 Err(e) => {
-                    ctx.say(codeblock(&format!("attach failed: {}", e))).await?;
+                    post_text(ctx, codeblock(&format!("attach failed: {}", e))).await?;
                 }
             }
             let _ = tokio::fs::remove_file(&path).await;
         }
         _ => {
-            ctx.say("grim failed (are you in a Wayland session?).").await?;
+            post_text(ctx, "grim failed (are you in a Wayland session?).").await?;
         }
     }
     Ok(())
@@ -419,13 +416,13 @@ pub(crate) async fn send(
     maybe_defer(ctx).await;
     let p = path.trim();
     if !p.starts_with('/') {
-        ctx.say("Absolute path only.").await?;
+        post_text(ctx, "Absolute path only.").await?;
         return Ok(());
     }
     let root = match tokio::fs::canonicalize(project_dir()).await {
         Ok(r) => r,
         Err(e) => {
-            ctx.say(codeblock(&format!("can't resolve project dir: {}", e)))
+            post_text(ctx, codeblock(&format!("can't resolve project dir: {}", e)))
                 .await?;
             return Ok(());
         }
@@ -433,36 +430,36 @@ pub(crate) async fn send(
     let target = match tokio::fs::canonicalize(p).await {
         Ok(t) => t,
         Err(_) => {
-            ctx.say("No readable file there (must exist, absolute path, under the project dir, ~20MB max).")
+            post_text(ctx, "No readable file there (must exist, absolute path, under the project dir, ~20MB max).")
                 .await?;
             return Ok(());
         }
     };
     if !target.starts_with(&root) {
-        ctx.say("That path is outside the bot's project dir — not sending it.")
+        post_text(ctx, "That path is outside the bot's project dir — not sending it.")
             .await?;
         return Ok(());
     }
     match tokio::fs::metadata(&target).await {
         Ok(m) if m.is_file() && m.len() < 20 * 1024 * 1024 => {
-            match serenity::CreateAttachment::path(&target).await {
-                Ok(att) => {
-                    if ctx
-                        .send(poise::CreateReply::default().attachment(att))
-                        .await
-                        .is_err()
-                    {
+            match tokio::fs::read(&target).await {
+                Ok(bytes) => {
+                    let name = std::path::Path::new(&target)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "file.bin".into());
+                    if post_response(ctx, String::new(), vec![(name, bytes)]).await.is_err() {
                         eprintln!("send failed (missing Attach Files permission?)");
-                        ctx.say("File read but I can't attach files here — give me the Attach Files permission.").await?;
+                        post_text(ctx, "File read but I can't attach files here — give me the Attach Files permission.").await?;
                     }
                 }
                 Err(e) => {
-                    ctx.say(codeblock(&format!("attach failed: {}", e))).await?;
+                    post_text(ctx, codeblock(&format!("attach failed: {}", e))).await?;
                 }
             }
         }
         _ => {
-            ctx.say("No readable file there (absolute path under the project dir, ~20MB max).")
+            post_text(ctx, "No readable file there (absolute path under the project dir, ~20MB max).")
                 .await?;
         }
     }
@@ -485,7 +482,7 @@ pub(crate) async fn status(ctx: Context<'_>) -> Result<(), Error> {
     } else {
         "agent: n/a (off)"
     };
-    ctx.say(format!("`{}`: {} | {}", vm, state.trim(), agent))
+    post_text(ctx, format!("`{}`: {} | {}", vm, state.trim(), agent))
         .await?;
     Ok(())
 }
@@ -522,7 +519,7 @@ pub(crate) async fn notify(
     #[description = "channel ID for boot messages, or off"] what: Option<String>,
 ) -> Result<(), Error> {
     if !is_owner(ctx).await {
-        ctx.say("Owner only.").await?;
+        post_text(ctx, "Owner only.").await?;
         return Ok(());
     }
     match what.as_deref().map(str::trim) {
@@ -530,26 +527,26 @@ pub(crate) async fn notify(
             let s = ctx.data().settings.read().await;
             match s.notify_channel {
                 Some(id) => {
-                    ctx.say(format!("Boot messages go to <#{}>.", id)).await?;
+                    post_text(ctx, format!("Boot messages go to <#{}>.", id)).await?;
                 }
                 None => {
-                    ctx.say("Boot messages are OFF (no channel set).").await?;
+                    post_text(ctx, "Boot messages are OFF (no channel set).").await?;
                 }
             }
         }
         Some(v) if v.eq_ignore_ascii_case("off") => {
             ctx.data().settings.write().await.notify_channel = None;
             save_settings(ctx.data()).await?;
-            ctx.say("Boot messages OFF.").await?;
+            post_text(ctx, "Boot messages OFF.").await?;
         }
         Some(v) => match parse_channel(v) {
             Some(id) => {
                 ctx.data().settings.write().await.notify_channel = Some(id);
                 save_settings(ctx.data()).await?;
-                ctx.say(format!("Boot messages will go to `<#{id}>`.\n```\n{BOOT_ART}\n```")).await?;
+                post_text(ctx, format!("Boot messages will go to `<#{id}>`.\n```\n{BOOT_ART}\n```")).await?;
             }
             None => {
-                ctx.say("Usage: `/notify <channel-id>` or `/notify off`.").await?;
+                post_text(ctx, "Usage: `/notify <channel-id>` or `/notify off`.").await?;
             }
         },
     }
@@ -573,19 +570,19 @@ pub(crate) async fn purge_replies(
     #[description = "How many recent messages to scan (default 50, max 100)"] limit: Option<u8>,
 ) -> Result<(), Error> {
     if !is_owner(ctx).await {
-        ctx.say("Owner only.").await?;
+        post_text(ctx, "Owner only.").await?;
         return Ok(());
     }
     let Some(target_id) = parse_target_id(&target) else {
-        ctx.say("Usage: `/purge_replies <user-id> [limit]`.").await?;
+        post_text(ctx, "Usage: `/purge_replies <user-id> [limit]`.").await?;
         return Ok(());
     };
     maybe_defer(ctx).await;
     let http = ctx.serenity_context().http.clone();
     let bot_id = match http.get_current_user().await {
-        Ok(u) => u.id.get(),
+        Ok(u) => u.id,
         Err(e) => {
-            ctx.say(codeblock(&format!("could not learn my own id: {}", e))).await?;
+            post_text(ctx, codeblock(&format!("could not learn my own id: {}", e))).await?;
             return Ok(());
         }
     };
@@ -594,7 +591,7 @@ pub(crate) async fn purge_replies(
     let mut msgs = match channel.messages(&http, serenity::GetMessages::new().limit(n)).await {
         Ok(m) => m,
         Err(e) => {
-            ctx.say(codeblock(&format!("could not read channel history: {}", e))).await?;
+            post_text(ctx, codeblock(&format!("could not read channel history: {}", e))).await?;
             return Ok(());
         }
     };
@@ -619,11 +616,11 @@ pub(crate) async fn purge_replies(
         }
         authored += 1;
         let replied_to_me = match &m.referenced_message {
-            Some(r) => r.author.id.get() == bot_id,
+            Some(r) => is_own_message(r.author.id, r.id, bot_id),
             None => match &m.message_reference {
                 Some(r) => match r.message_id {
                     Some(mid) => match channel.message(&http, mid).await {
-                        Ok(orig) => orig.author.id.get() == bot_id,
+                        Ok(orig) => is_own_message(orig.author.id, orig.id, bot_id),
                         Err(_) => false,
                     },
                     None => false,
@@ -635,14 +632,17 @@ pub(crate) async fn purge_replies(
             continue;
         }
         match m.delete(&http).await {
-            Ok(_) => deleted += 1,
+            Ok(_) => {
+                mark_self_deleted(m.id);
+                deleted += 1;
+            }
             Err(e) => {
                 failed += 1;
                 eprintln!("purge_replies: failed to delete {}: {}", m.id.get(), e);
             }
         }
     }
-    ctx.say(format!(
+    post_text(ctx, format!(
         "Scanned {} recent messages ({} threads), `<@{target_id}>` authored {}, deleted {} replies to my messages, {} deletes failed.",
         scanned, thread_count, authored, deleted, failed
     ))
@@ -662,7 +662,7 @@ pub(crate) async fn userlist(ctx: Context<'_>) -> Result<(), Error> {
 
 #[poise::command(slash_command, prefix_command, subcommands("add", "del"))]
 pub(crate) async fn user(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.say("Usage: `;user add <discord id> [linuxname]` or `;user del <discord id>`.")
+    post_text(ctx, "Usage: `;user add <discord id> [linuxname]` or `;user del <discord id>`.")
         .await?;
     Ok(())
 }
@@ -719,7 +719,7 @@ pub(crate) async fn do_users(ctx: Context<'_>) -> Result<(), Error> {
             }
         }
     }
-    ctx.say(msg).await?;
+    post_text(ctx, msg).await?;
     Ok(())
 }
 
@@ -746,7 +746,7 @@ pub(crate) fn sanitize_discord_name(s: &str) -> Option<String> {
 
 pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error> {
     if !is_owner(ctx).await {
-        ctx.say("Owner only.").await?;
+        post_text(ctx, "Owner only.").await?;
         return Ok(());
     }
     maybe_defer(ctx).await;
@@ -764,10 +764,10 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
     if state.trim() != "running" {
         match virsh(&["start", &vm]).await {
             Ok(_) => {
-                ctx.say(format!("`{}` was off, starting it first…", vm)).await?;
+                post_text(ctx, format!("`{}` was off, starting it first…", vm)).await?;
             }
             Err(e) => {
-                ctx.say(format!(
+                post_text(ctx, format!(
                     "Authorized `{}` in the bot, but the VM won't start:\n{}",
                     uid,
                     codeblock(&e.to_string())
@@ -778,7 +778,7 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
         }
     }
     if !wait_agent(&vm, 60).await {
-            ctx.say(format!("Authorized `{}` in the bot, but the guest agent is silent — no Linux account created. Install `qemu-guest-agent` in Artix, then rerun `;useradd <@{}> {}`.", uid, uid, name)).await?;
+            post_text(ctx, format!("Authorized `{}` in the bot, but the guest agent is silent — no Linux account created. Install `qemu-guest-agent` in Artix, then rerun `;useradd <@{}> {}`.", uid, uid, name)).await?;
         return Ok(());
     }
     let mut rc = guest_exec(&vm, "/usr/bin/useradd", &["-m", "-s", "/bin/bash", &name], false, 30).await;
@@ -790,10 +790,10 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
     match rc {
         Ok((0, _, _)) => {}
         Ok((9, _, _)) => {
-            ctx.say(format!("Linux user `{}` already exists, linking it.", name)).await?;
+            post_text(ctx, format!("Linux user `{}` already exists, linking it.", name)).await?;
         }
         Ok((c, _, _)) => {
-            ctx.say(format!(
+            post_text(ctx, format!(
                 "Authorized `{}` in the bot, but `useradd` in the VM failed (code {}).",
                 uid, c
             ))
@@ -801,7 +801,7 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
             return Ok(());
         }
         Err(e) => {
-            ctx.say(format!(
+            post_text(ctx, format!(
                 "Authorized `{}` in the bot, but `useradd` in the VM failed:\n{}",
                 uid,
                 codeblock(&e.to_string())
@@ -815,7 +815,7 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
         a.linux.insert(uid.to_string(), name.clone());
         a.save().await?;
     }
-    ctx.say(format!(
+    post_text(ctx, format!(
         "added user \"{}\" linked to `{}` — account created, no password set.",
         name, uid
     ))
@@ -825,7 +825,7 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
 
 pub(crate) async fn do_userdel(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error> {
     if !is_owner(ctx).await {
-        ctx.say("Owner only.").await?;
+        post_text(ctx, "Owner only.").await?;
         return Ok(());
     }
     maybe_defer(ctx).await;
@@ -847,25 +847,25 @@ pub(crate) async fn do_userdel(ctx: Context<'_>, user: &serenity::User) -> Resul
                 }
                 match rc {
                     Ok((0, _, _)) => {
-                        ctx.say(format!("Removed <@{}> and deleted linux `{}`.", uid, n)).await?;
+                        post_text(ctx, format!("Removed <@{}> and deleted linux `{}`.", uid, n)).await?;
                     }
                     Ok((c, _, _)) => {
-                        ctx.say(format!("Removed <@{}> from the bot, but deleting linux `{}` failed (code {}). Remove it by hand in the VM.", uid, n, c)).await?;
+                        post_text(ctx, format!("Removed <@{}> from the bot, but deleting linux `{}` failed (code {}). Remove it by hand in the VM.", uid, n, c)).await?;
                     }
                     Err(e) => {
-                        ctx.say(format!("Removed <@{}> from the bot, but deleting linux `{}` failed:\n{}", uid, n, codeblock(&e.to_string()))).await?;
+                        post_text(ctx, format!("Removed <@{}> from the bot, but deleting linux `{}` failed:\n{}", uid, n, codeblock(&e.to_string()))).await?;
                     }
                 };
             }
             Some(n) => {
-                ctx.say(format!("Removed <@{}> (linked name `{}` looked invalid, left alone in the VM).", uid, n)).await?;
+                post_text(ctx, format!("Removed <@{}> (linked name `{}` looked invalid, left alone in the VM).", uid, n)).await?;
             }
             None => {
-                ctx.say(format!("Removed <@{}>.", uid)).await?;
+                post_text(ctx, format!("Removed <@{}>.", uid)).await?;
             }
         };
     } else {
-        ctx.say(format!("<@{}> was not a manager.", uid)).await?;
+        post_text(ctx, format!("<@{}> was not a manager.", uid)).await?;
     }
     Ok(())
 }

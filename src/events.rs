@@ -3,6 +3,7 @@ use poise::serenity_prelude as serenity;
 use crate::{
     config::Data,
     util::{attach_name, cap_file_body, strip_sgr},
+    webhook::{handle_delete, is_posted_message, post_message},
     Error,
 };
 
@@ -14,10 +15,17 @@ fn is_boo_message(s: &str) -> bool {
 
 const TAUNT: &str = "purged your message haha";
 
-fn blocked_reply_action(ref_author: Option<u64>, ref_content: &str, me: u64) -> (bool, bool) {
-    match ref_author {
-        Some(a) if a == me => (true, ref_content != TAUNT),
-        _ => (false, false),
+fn blocked_reply_action(
+    ref_author: Option<u64>,
+    ref_id: Option<serenity::MessageId>,
+    ref_content: &str,
+    me: u64,
+) -> (bool, bool) {
+    let mine = matches!(ref_author, Some(a) if a == me)
+        || ref_id.map(|id| is_posted_message(&id)).unwrap_or(false);
+    match mine {
+        true => (true, ref_content != TAUNT),
+        false => (false, false),
     }
 }
 fn artixy_text(s: &str) -> Option<String> {
@@ -34,6 +42,15 @@ pub(crate) async fn event_handler(
     _framework: poise::FrameworkContext<'_, Data, Error>,
     data: &Data,
 ) -> Result<(), Error> {
+    if let serenity::FullEvent::MessageDelete {
+        channel_id,
+        deleted_message_id,
+        ..
+    } = event
+    {
+        handle_delete(&ctx.http, *channel_id, *deleted_message_id).await;
+        return Ok(());
+    }
     let serenity::FullEvent::Message { new_message } = event else {
         return Ok(());
     };
@@ -48,13 +65,16 @@ pub(crate) async fn event_handler(
             Err(_) => return Ok(()),
         };
         let (delete, taunt) = match &new_message.referenced_message {
-            Some(r) => blocked_reply_action(Some(r.author.id.get()), &r.content, me),
+            Some(r) => blocked_reply_action(Some(r.author.id.get()), Some(r.id), &r.content, me),
             None => match &new_message.message_reference {
                 Some(r) => match r.message_id {
                     Some(mid) => match new_message.channel_id.message(&ctx.http, mid).await {
-                        Ok(orig) => {
-                            blocked_reply_action(Some(orig.author.id.get()), &orig.content, me)
-                        }
+                        Ok(orig) => blocked_reply_action(
+                            Some(orig.author.id.get()),
+                            Some(orig.id),
+                            &orig.content,
+                            me,
+                        ),
                         Err(_) => (false, false),
                     },
                     None => (false, false),
@@ -66,7 +86,7 @@ pub(crate) async fn event_handler(
             match new_message.delete(&ctx.http).await {
                 Ok(_) => {
                     if taunt {
-                        let _ = new_message.channel_id.say(&ctx.http, TAUNT).await;
+                        let _ = post_message(&ctx.http, new_message.channel_id, TAUNT.into(), Vec::new()).await;
                     }
                 }
                 Err(e) => {
@@ -123,18 +143,15 @@ pub(crate) async fn event_handler(
                 let _ = target.reply(&ctx.http, &text).await;
             }
             None => {
-                let _ = new_message.channel_id.say(&ctx.http, &text).await;
+                let _ = post_message(&ctx.http, new_message.channel_id, text, Vec::new()).await;
             }
         }
     } else {
-        let att = serenity::CreateAttachment::bytes(
-            cap_file_body(&strip_sgr(&text)).into_bytes(),
+        let att = (
             attach_name(&text),
+            cap_file_body(&strip_sgr(&text)).into_bytes(),
         );
-        let _ = new_message
-            .channel_id
-            .send_message(&ctx.http, serenity::CreateMessage::new().add_file(att))
-            .await;
+        let _ = post_message(&ctx.http, new_message.channel_id, String::new(), vec![att]).await;
     }
     Ok(())
 }
@@ -158,14 +175,14 @@ mod tests {
 
     #[test]
     fn blocked_reply_verdicts() {
-        assert_eq!(blocked_reply_action(Some(9), "trash talk", 9), (true, true));
+        assert_eq!(blocked_reply_action(Some(9), None, "trash talk", 9), (true, true));
         assert_eq!(
-            blocked_reply_action(Some(9), "purged your message haha", 9),
+            blocked_reply_action(Some(9), None, "purged your message haha", 9),
             (true, false)
         );
-        assert_eq!(blocked_reply_action(Some(3), "trash talk", 9), (false, false));
-        assert_eq!(blocked_reply_action(None, "trash talk", 9), (false, false));
-        assert_eq!(blocked_reply_action(None, "", 9), (false, false));
+        assert_eq!(blocked_reply_action(Some(3), None, "trash talk", 9), (false, false));
+        assert_eq!(blocked_reply_action(None, None, "trash talk", 9), (false, false));
+        assert_eq!(blocked_reply_action(None, None, "", 9), (false, false));
     }
 
     #[test]

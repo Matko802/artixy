@@ -4,6 +4,7 @@ use crate::{
     scrub::scrub_public_ip,
     util::{ansi_tail, codeblock, random_suffix, valid_runas},
     vm::{guest_exec, guest_launch_raw, guest_status},
+    webhook::{edit_posted, resolve_poster, Poster},
 };
 
 pub(crate) struct LiveEntry {
@@ -54,14 +55,18 @@ pub(crate) async fn begin_live(
 ) {
     if let Some(ref u) = runas {
         if !valid_runas(u) {
-            let _ = ack
-                .channel_id
-                .say(&http, codeblock("linked linux account is invalid; ask the owner to re-add you."))
-                .await;
+            let _ = crate::webhook::post_message(
+                &http,
+                ack.channel_id,
+                codeblock("linked linux account is invalid; ask the owner to re-add you."),
+                Vec::new(),
+            )
+            .await;
             return;
         }
     }
     let channel = ack.channel_id;
+    let poster = resolve_poster(&http, channel).await;
     let tag = ack.id.get();
     let rand = random_suffix();
     let out_f = format!("/tmp/podbot-live-{}-{}.out", tag, rand);
@@ -76,7 +81,7 @@ pub(crate) async fn begin_live(
     let (vm2, cmd2, runas2, out_f2, code_f2) =
         (vm.clone(), cmd.clone(), runas.clone(), out_f.clone(), code_f.clone());
     let handle = tokio::spawn(async move {
-        live_run(http, ack, channel, tag, vm2, cmd2, runas2, out_f2, code_f2, live_map2, scrub_ip).await;
+        live_run(http, ack, channel, tag, vm2, cmd2, runas2, out_f2, code_f2, live_map2, scrub_ip, poster).await;
     })
     .abort_handle();
     live_map.lock().await.insert(
@@ -93,7 +98,7 @@ pub(crate) async fn begin_live(
 
 pub(crate) async fn live_run(
     http: std::sync::Arc<serenity::Http>,
-    mut msg: serenity::Message,
+    msg: serenity::Message,
     channel: serenity::ChannelId,
     tag: u64,
     vm: String,
@@ -103,15 +108,15 @@ pub(crate) async fn live_run(
     code_f: String,
     live_map: LiveMap,
     scrub_ip: bool,
+    poster: Poster,
 ) {
     use base64::Engine as _;
     if let Some(ref u) = runas {
         if !valid_runas(u) {
-            let _ = msg
-                .edit(&http, serenity::EditMessage::new().content(codeblock(
-                    "linked linux account is invalid; ask the owner to re-add you.",
-                )))
-                .await;
+            edit_posted(&poster, &http, channel, msg.id, codeblock(
+                "linked linux account is invalid; ask the owner to re-add you.",
+            ))
+            .await;
             remove_live_if_tag(&live_map, channel, tag).await;
             return;
         }
@@ -143,9 +148,7 @@ pub(crate) async fn live_run(
     let pid = match launched {
         Ok(p) => p,
         Err(e) => {
-            let _ = msg
-                .edit(&http, serenity::EditMessage::new().content(codeblock(&e.to_string())))
-                .await;
+            edit_posted(&poster, &http, channel, msg.id, codeblock(&e.to_string())).await;
             remove_live_if_tag(&live_map, channel, tag).await;
             return;
         }
@@ -154,16 +157,17 @@ pub(crate) async fn live_run(
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(LIVE_POLL_SECS)).await;
         if started.elapsed().as_secs() > LIVE_TIMEOUT_SECS {
-            let _ = msg
-                .edit(
-                    &http,
-                    serenity::EditMessage::new().content(codeblock(&format!(
-                        "$ {}\n…stopped after {}s timeout; output truncated, process may still run in guest",
-                        cmd,
-                        LIVE_TIMEOUT_SECS
-                    ))),
-                )
-                .await;
+            edit_posted(
+                &poster,
+                &http,
+                channel,
+                msg.id,
+                codeblock(&format!(
+                    "$ {}\n…stopped after {}s timeout; output truncated, process may still run in guest",
+                    cmd, LIVE_TIMEOUT_SECS
+                )),
+            )
+            .await;
             cleanup_live_files(&vm, &out_f, &code_f).await;
             break;
         }
@@ -183,19 +187,13 @@ pub(crate) async fn live_run(
                 if code != 0 {
                     body.push_str(&format!("\n\u{1b}[0;31mexit {}\u{1b}[0m", code));
                 }
-                let _ = msg
-                    .edit(&http, serenity::EditMessage::new().content(ansi_tail(&body)))
-                    .await;
+                edit_posted(&poster, &http, channel, msg.id, ansi_tail(&body)).await;
                 cleanup_live_files(&vm, &out_f, &code_f).await;
                 break;
             }
             None => {
                 body.push_str("\n\u{1b}[0;33m…live\u{1b}[0m");
-                if msg
-                    .edit(&http, serenity::EditMessage::new().content(ansi_tail(&body)))
-                    .await
-                    .is_err()
-                {
+                if !edit_posted(&poster, &http, channel, msg.id, ansi_tail(&body)).await {
                     cleanup_live_files(&vm, &out_f, &code_f).await;
                     break;
                 }
@@ -204,4 +202,3 @@ pub(crate) async fn live_run(
     }
     remove_live_if_tag(&live_map, channel, tag).await;
 }
-

@@ -52,6 +52,8 @@ pub(crate) struct FileConfig {
     pub(crate) owner_id: Option<u64>,
     #[serde(default)]
     pub(crate) blocked_ids: Vec<u64>,
+    #[serde(default)]
+    pub(crate) webhook_urls: Vec<String>,
 }
 
 pub(crate) fn access_allowed(owner: u64, users: &[u64], blocked: &[u64], id: u64) -> bool {
@@ -84,7 +86,10 @@ pub(crate) fn ensure_config_template(owner_id: u64) {
             return;
         }
     }
-    let template = format!("owner_id = {}\nblocked_ids = []\n", owner_id);
+    let template = format!(
+        "owner_id = {}\nblocked_ids = []\nwebhook_urls = []\n",
+        owner_id
+    );
     let _ = std::fs::write(path, template);
 }
 
@@ -127,9 +132,10 @@ mod tests {
 
     #[test]
     fn file_config_parses_full() {
-        let c = parse("owner_id = 123\nblocked_ids = [4, 5]\n");
+        let c = parse("owner_id = 123\nblocked_ids = [4, 5]\nwebhook_urls = [\"https://discord.com/api/webhooks/1/abc\"]\n");
         assert_eq!(c.owner_id, Some(123));
         assert_eq!(c.blocked_ids, vec![4, 5]);
+        assert_eq!(c.webhook_urls, vec!["https://discord.com/api/webhooks/1/abc".to_string()]);
     }
 
     #[test]
