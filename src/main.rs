@@ -686,15 +686,26 @@ mod tests {
 
     #[test]
     fn live_edits_are_throttled_and_tolerant() {
-        assert!(
-            crate::live::LIVE_EDIT_MIN_INTERVAL.as_millis() >= 1000,
-            "edits throttled to survive rate limits"
+        assert_eq!(
+            crate::live::LIVE_EDIT_MIN_INTERVAL.as_millis(),
+            2000,
+            "updates at most every 2s"
         );
         assert!(
             crate::live::LIVE_EDIT_MAX_FAILS > 1,
             "transient 429s tolerated, got {}",
             crate::live::LIVE_EDIT_MAX_FAILS
         );
+    }
+
+    #[test]
+    fn throttled_changes_post_later_not_never() {
+        use crate::live::should_post_frame;
+        assert!(should_post_frame(None, 7, None, 2000));
+        assert!(!should_post_frame(Some(7), 7, Some(5000), 2000));
+        assert!(!should_post_frame(Some(5), 7, Some(500), 2000));
+        assert!(should_post_frame(Some(5), 7, Some(2000), 2000));
+        assert!(should_post_frame(Some(5), 7, None, 2000));
     }
 
     #[test]
