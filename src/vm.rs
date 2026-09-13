@@ -1,11 +1,28 @@
 use crate::{config::Data, Error};
 
+pub(crate) const VIRSH_TIMEOUT_SECS: u64 = 30;
+
+pub(crate) async fn cmd_output(bin: &str, args: &[&str], secs: u64) -> Result<std::process::Output, Error> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(secs.max(1)),
+        tokio::process::Command::new(bin).args(args).output(),
+    )
+    .await
+    {
+        Err(_) => Err(format!("{} {} timed out after {}s", bin, args.join(" "), secs.max(1)).into()),
+        Ok(Err(e)) => Err(e.into()),
+        Ok(Ok(out)) => Ok(out),
+    }
+}
+
+async fn virsh_output(args: &[&str]) -> Result<std::process::Output, Error> {
+    let mut full: Vec<&str> = vec!["--connect", "qemu:///system"];
+    full.extend_from_slice(args);
+    cmd_output("virsh", &full, VIRSH_TIMEOUT_SECS).await
+}
+
 pub(crate) async fn virsh(args: &[&str]) -> Result<String, Error> {
-    let out = tokio::process::Command::new("virsh")
-        .args(["--connect", "qemu:///system"])
-        .args(args)
-        .output()
-        .await?;
+    let out = virsh_output(args).await?;
     if !out.status.success() {
         return Err(format!(
             "virsh {} failed:\n{}",
@@ -18,16 +35,8 @@ pub(crate) async fn virsh(args: &[&str]) -> Result<String, Error> {
 }
 
 pub(crate) async fn agent_ping(vm: &str) -> bool {
-    let out = tokio::process::Command::new("virsh")
-        .args([
-            "--connect",
-            "qemu:///system",
-            "qemu-agent-command",
-            vm,
-            "{\"execute\":\"guest-ping\"}",
-        ])
-        .output()
-        .await;
+    let payload = serde_json::json!({"execute":"guest-ping"}).to_string();
+    let out = virsh_output(&["qemu-agent-command", vm, &payload]).await;
     matches!(out, Ok(o) if o.status.success())
 }
 
@@ -42,17 +51,8 @@ pub(crate) async fn wait_agent(vm: &str, secs: u64) -> bool {
 }
 
 pub(crate) async fn guest_status(vm: &str, pid: i64) -> Result<Option<i64>, Error> {
-    let st = tokio::process::Command::new("virsh")
-        .args([
-            "--connect",
-            "qemu:///system",
-            "qemu-agent-command",
-            vm,
-            &serde_json::json!({"execute":"guest-exec-status","arguments":{"pid":pid}})
-                .to_string(),
-        ])
-        .output()
-        .await?;
+    let payload = serde_json::json!({"execute":"guest-exec-status","arguments":{"pid":pid}}).to_string();
+    let st = virsh_output(&["qemu-agent-command", vm, &payload]).await?;
     if !st.status.success() {
         return Ok(None);
     }
@@ -80,17 +80,8 @@ pub(crate) async fn guest_exec(
     let deadline = std::time::Instant::now()
         + std::time::Duration::from_secs(timeout_s.max(1));
     loop {
-        let st = tokio::process::Command::new("virsh")
-            .args([
-                "--connect",
-                "qemu:///system",
-                "qemu-agent-command",
-                vm,
-                &serde_json::json!({"execute":"guest-exec-status","arguments":{"pid":pid}})
-                    .to_string(),
-            ])
-            .output()
-            .await?;
+        let payload = serde_json::json!({"execute":"guest-exec-status","arguments":{"pid":pid}}).to_string();
+        let st = virsh_output(&["qemu-agent-command", vm, &payload]).await?;
         if st.status.success() && !st.stdout.iter().all(|b| b.is_ascii_whitespace()) {
             if let Ok(s) = serde_json::from_slice::<serde_json::Value>(&st.stdout) {
                 if s["return"]["exited"].as_bool().unwrap_or(false) {
@@ -126,20 +117,12 @@ pub(crate) async fn guest_exec(
 
 pub(crate) async fn guest_launch_raw(vm: &str, path: &str, args: &[&str], capture: bool) -> Result<i64, Error> {
     for _ in 0..3 {
-        let out = tokio::process::Command::new("virsh")
-            .args([
-                "--connect",
-                "qemu:///system",
-                "qemu-agent-command",
-                vm,
-                &serde_json::json!({
-                    "execute": "guest-exec",
-                    "arguments": { "path": path, "arg": args, "capture-output": capture }
-                })
-                .to_string(),
-            ])
-            .output()
-            .await?;
+        let payload = serde_json::json!({
+            "execute": "guest-exec",
+            "arguments": { "path": path, "arg": args, "capture-output": capture }
+        })
+        .to_string();
+        let out = virsh_output(&["qemu-agent-command", vm, &payload]).await?;
         if !out.status.success() {
             return Err(format!(
                 "guest-exec launch failed:\n{}",

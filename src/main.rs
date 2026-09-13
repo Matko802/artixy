@@ -485,6 +485,18 @@ mod tests {
         assert_eq!(crate::live::expand_typed_input("  spaced   out  "), "  spaced   out  ");
     }
 
+    #[tokio::test]
+    async fn cmd_output_times_out_instead_of_hanging() {
+        let Some(sleep) = tool_path("sleep") else { return; };
+        let s = sleep.to_string_lossy().into_owned();
+        let t0 = std::time::Instant::now();
+        let r = crate::vm::cmd_output(&s, &["5"], 1).await;
+        assert!(r.is_err(), "wedged spawn must time out");
+        assert!(t0.elapsed().as_secs() < 5, "returned promptly");
+        let ok = crate::vm::cmd_output(&s, &["0"], 5).await;
+        assert!(ok.is_ok() && ok.map(|o| o.status.success()).unwrap_or(false));
+    }
+
     #[test]
     fn tool_path_finds_shell_and_rejects_junk() {
         let sh = tool_path("sh");

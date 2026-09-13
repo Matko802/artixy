@@ -31,6 +31,7 @@ pub(crate) const LIVE_QUICK: std::time::Duration = std::time::Duration::from_mil
 pub(crate) const LIVE_EDIT_MIN_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(2000);
 pub(crate) const LIVE_EDIT_MAX_FAILS: u8 = 5;
+pub(crate) const LIVE_GUEST_MAX_FAILS: u8 = 15;
 const LIVE_FRAME_BYTES: &str = "200000";
 
 const GUEST_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH";
@@ -319,11 +320,12 @@ async fn note_stalled_feed(
     http: &std::sync::Arc<serenity::Http>,
     channel: serenity::ChannelId,
     cmd: &str,
+    reason: &str,
 ) {
     let _ = post_message(
         http,
         channel,
-        plain_tail(&format!("$ {}\n…live updates stopped: Discord kept rejecting message edits", cmd)),
+        plain_tail(&format!("$ {}\n…live updates stopped: {}", cmd, reason)),
         Vec::new(),
     )
     .await;
@@ -548,6 +550,7 @@ pub(crate) async fn live_run(
     let mut answer_fails: u8 = 0;
     let mut last_edit: Option<std::time::Instant> = None;
     let mut edit_fails: u8 = 0;
+    let mut guest_fails: u8 = 0;
     let mut kfiles: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> =
         std::collections::HashMap::new();
     let (mut dsr_term, mut dsr_processor, dsr_writes) = crate::termrender::new_collecting_term();
@@ -591,12 +594,40 @@ pub(crate) async fn live_run(
             cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
             break;
         }
-        let fetched = guest_exec(&vm, "/usr/bin/tail", &["-c", LIVE_FRAME_BYTES, &out_f], true, 15)
-            .await
-            .map(|(_, o, _)| o)
-            .unwrap_or_default();
+        let fetched = match guest_exec(&vm, "/usr/bin/tail", &["-c", LIVE_FRAME_BYTES, &out_f], true, 15).await {
+            Ok((_, o, _)) => o,
+            Err(e) => {
+                guest_fails += 1;
+                eprintln!("live: guest fetch failed ({}/{}) for {}: {}", guest_fails, LIVE_GUEST_MAX_FAILS, out_f, e);
+                if guest_fails >= LIVE_GUEST_MAX_FAILS {
+                    note_stalled_feed(&http, channel, &cmd, "guest agent stopped answering").await;
+                    cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
+                    break;
+                }
+                first = false;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+        };
         let fetched = if scrub_ip { scrub_public_ip(&fetched) } else { fetched };
-        let done = guest_status(&vm, pid).await.unwrap_or(None);
+        let done = match guest_status(&vm, pid).await {
+            Ok(d) => {
+                guest_fails = 0;
+                d
+            }
+            Err(e) => {
+                guest_fails += 1;
+                eprintln!("live: guest status failed ({}/{}) for {}: {}", guest_fails, LIVE_GUEST_MAX_FAILS, out_f, e);
+                if guest_fails >= LIVE_GUEST_MAX_FAILS {
+                    note_stalled_feed(&http, channel, &cmd, "guest agent stopped answering").await;
+                    cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
+                    break;
+                }
+                first = false;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
+        };
         let fetch_ms = cycle_start.elapsed().as_millis();
         match done {
             Some(code) => {
@@ -626,14 +657,14 @@ pub(crate) async fn live_run(
                         edit_final(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await
                     };
                     if !posted {
-                        note_stalled_feed(&http, channel, &cmd).await;
+                        note_stalled_feed(&http, channel, &cmd, "Discord kept rejecting message edits").await;
                     }
                 } else {
                     kitty_file_blobs(&vm, &full, &mut kfiles).await;
                     let (text, files) =
                         live_message(fonts.as_ref(), &cmd, &output, &kfiles, &mut region).await;
                     if !edit_final(&poster, &http, channel, msg.id, text, files).await {
-                        note_stalled_feed(&http, channel, &cmd).await;
+                        note_stalled_feed(&http, channel, &cmd, "Discord kept rejecting message edits").await;
                     }
                 }
                 cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
@@ -703,7 +734,7 @@ pub(crate) async fn live_run(
                         edit_fails, LIVE_EDIT_MAX_FAILS, out_f
                     );
                     if edit_fails >= LIVE_EDIT_MAX_FAILS {
-                        note_stalled_feed(&http, channel, &cmd).await;
+                        note_stalled_feed(&http, channel, &cmd, "Discord kept rejecting message edits").await;
                         cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
                         break;
                     }
