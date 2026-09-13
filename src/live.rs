@@ -308,6 +308,13 @@ async fn edit_final(
     edit_posted(poster, http, channel, target, content, files).await
 }
 
+pub(crate) fn slow_cycle_note(fetch_ms: u128, render_ms: u128, edit_ms: u128) -> Option<String> {
+    let total = fetch_ms + render_ms + edit_ms;
+    if total < 3000 {
+        return None;
+    }
+    Some(format!("slow cycle {}ms (fetch {}ms render {}ms edit {}ms)", total, fetch_ms, render_ms, edit_ms))
+}
 async fn note_stalled_feed(
     http: &std::sync::Arc<serenity::Http>,
     channel: serenity::ChannelId,
@@ -548,6 +555,7 @@ pub(crate) async fn live_run(
     loop {
         let wait = if first { LIVE_QUICK } else { LIVE_POLL };
         tokio::time::sleep(wait).await;
+        let cycle_start = std::time::Instant::now();
         if LIVE_TIMEOUT_SECS != 0 && started.elapsed().as_secs() > LIVE_TIMEOUT_SECS {
             let huge = guest_exec(&vm, "/usr/bin/wc", &["-c", &out_f], true, 10)
                 .await
@@ -589,6 +597,7 @@ pub(crate) async fn live_run(
             .unwrap_or_default();
         let fetched = if scrub_ip { scrub_public_ip(&fetched) } else { fetched };
         let done = guest_status(&vm, pid).await.unwrap_or(None);
+        let fetch_ms = cycle_start.elapsed().as_millis();
         match done {
             Some(code) => {
                 let full = guest_exec(&vm, "/usr/bin/tail", &["-c", "500000", &out_f], true, 30)
@@ -670,13 +679,25 @@ pub(crate) async fn live_run(
                     }
                 }
                 kitty_file_blobs(&vm, &fetched, &mut kfiles).await;
+                let render_start = std::time::Instant::now();
                 let (text, files) =
                     live_message(fonts.as_ref(), &cmd, &fetched, &kfiles, &mut region).await;
+                let render_ms = render_start.elapsed().as_millis();
+                let edit_start = std::time::Instant::now();
                 if edit_posted(&poster, &http, channel, msg.id, text, files).await {
+                    let edit_ms = edit_start.elapsed().as_millis();
+                    if let Some(note) = slow_cycle_note(fetch_ms, render_ms, edit_ms) {
+                        eprintln!("live: {} for {}", note, out_f);
+                    }
                     last_edit = Some(std::time::Instant::now());
                     edit_fails = 0;
                 } else {
+                    let edit_ms = edit_start.elapsed().as_millis();
+                    if let Some(note) = slow_cycle_note(fetch_ms, render_ms, edit_ms) {
+                        eprintln!("live: {} for {} (edit failed)", note, out_f);
+                    }
                     edit_fails += 1;
+                    last_edit = Some(std::time::Instant::now());
                     eprintln!(
                         "live: edit {}/{} failed for {} (transient unless repeated)",
                         edit_fails, LIVE_EDIT_MAX_FAILS, out_f

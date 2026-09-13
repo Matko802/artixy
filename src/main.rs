@@ -696,6 +696,14 @@ mod tests {
     }
 
     #[test]
+    fn slow_cycle_note_flags_only_slow_loops() {
+        assert!(crate::live::slow_cycle_note(100, 200, 300).is_none());
+        let note = crate::live::slow_cycle_note(500, 800, 2000).expect("slow");
+        assert!(note.contains("3300ms"), "got {:?}", note);
+        assert!(note.contains("fetch 500ms"), "got {:?}", note);
+    }
+
+    #[test]
     fn random_suffix_looks_unique_hex() {
         let a = random_suffix();
         let b = random_suffix();
