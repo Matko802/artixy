@@ -138,7 +138,7 @@ pub(crate) async fn start(ctx: Context<'_>) -> Result<(), Error> {
             } else {
                 format!("{}s", secs)
             };
-            post_text(ctx, format!("{} booted in {} (guest agent up).", vm, took)).await?;
+            post_text(ctx, format!("{} booted in {}.", vm, took)).await?;
         } else {
             post_text(ctx, format!(
                 "`{}` is on and the guest agent answers.",
@@ -147,7 +147,7 @@ pub(crate) async fn start(ctx: Context<'_>) -> Result<(), Error> {
             .await?;
         }
     } else {
-        post_text(ctx, format!("`{}` is on but the guest agent is silent. Inside Artix run `sudo pacman -S qemu-guest-agent` and enable its service, then `;start` again.", vm)).await?;
+        post_text(ctx, "Artix bot is on /start to boot artix").await?;
     }
     Ok(())
 }
