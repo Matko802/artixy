@@ -26,8 +26,8 @@ pub(crate) type LiveMap = std::sync::Arc<
 >;
 
 pub(crate) const LIVE_TIMEOUT_SECS: u64 = 0; // 0 = no timeout, interactive apps stay alive
-pub(crate) const LIVE_POLL_SECS: u64 = 1;
-pub(crate) const LIVE_QUICK_SECS: u64 = 1;
+pub(crate) const LIVE_POLL: std::time::Duration = std::time::Duration::from_millis(180);
+pub(crate) const LIVE_QUICK: std::time::Duration = std::time::Duration::from_millis(180);
 const LIVE_FRAME_BYTES: &str = "200000";
 
 const GUEST_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH";
@@ -138,15 +138,27 @@ pub(crate) fn terminal_key(text: &str) -> Option<String> {
     let first = parts.next()?;
     let lower = first.to_ascii_lowercase();
     let base = if lower.starts_with(";ctrl+") {
-        if lower.len() != 7 {
-            return None;
+        let suffix = &lower[6..];
+        if suffix.len() == 1 {
+            let ch = suffix.chars().next()?;
+            if !('a'..='z').contains(&ch) {
+                return None;
+            }
+            let code = (ch as u8 - b'a' + 1) as char;
+            code.to_string()
+        } else {
+            match suffix {
+                "return" => "\x7f".to_string(),
+                "space" => "\x00".to_string(),
+                "enter" => "\n".to_string(),
+                "esc" => "\x1b".to_string(),
+                "up" => "\x1b[1;5A".to_string(),
+                "down" => "\x1b[1;5B".to_string(),
+                "right" => "\x1b[1;5C".to_string(),
+                "left" => "\x1b[1;5D".to_string(),
+                _ => return None,
+            }
         }
-        let ch = lower.chars().nth(6)?;
-        if !('a'..='z').contains(&ch) {
-            return None;
-        }
-        let code = (ch as u8 - b'a' + 1) as char;
-        code.to_string()
     } else {
         match lower.as_str() {
             ";return" => "\x7f".to_string(),
@@ -416,8 +428,8 @@ pub(crate) async fn live_run(
     let (mut dsr_term, mut dsr_processor, dsr_writes) = crate::termrender::new_collecting_term();
     let mut prev_fetched = String::new();
     loop {
-        let wait = if first { LIVE_QUICK_SECS } else { LIVE_POLL_SECS };
-        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        let wait = if first { LIVE_QUICK } else { LIVE_POLL };
+        tokio::time::sleep(wait).await;
         if LIVE_TIMEOUT_SECS != 0 && started.elapsed().as_secs() > LIVE_TIMEOUT_SECS {
             let huge = guest_exec(&vm, "/usr/bin/wc", &["-c", &out_f], true, 10)
                 .await
