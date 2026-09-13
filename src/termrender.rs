@@ -395,5 +395,28 @@ pub(crate) fn render_terminal(
             blit(&mut img, w, h, gx, gy, m.width as i32, m.height as i32, bmp, fg);
         }
     }
+    {
+        let cursor = term.grid().cursor.point;
+        let cl = cursor.line.0;
+        let cc = cursor.column.0;
+        if cl >= first as i32 && cl < (first as i32 + rows as i32) && (cc as u32) < cols_q {
+            let r = (cl - first as i32) as usize;
+            let cx = cc as i32 * fonts.cell_w as i32 + PAD as i32;
+            let cy = y0 + r as i32 * fonts.cell_h as i32;
+            let cw: i32 = 2;
+            let ch_h = fonts.cell_h as i32 - 4;
+            let cur_x = cx + 1;
+            let cur_y = cy + 2;
+            let cur_color = FG;
+            for y in cur_y..(cur_y + ch_h) {
+                for x in cur_x..(cur_x + cw) {
+                    if x >= 0 && x < w as i32 && y >= 0 && y < h as i32 {
+                        let p = ((y as u32 * w + x as u32) * 3) as usize;
+                        img[p..p + 3].copy_from_slice(&cur_color);
+                    }
+                }
+            }
+        }
+    }
     crate::pngencode::encode_rgb(w, h, &img)
 }
