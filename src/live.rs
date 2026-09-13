@@ -29,9 +29,24 @@ pub(crate) const LIVE_TIMEOUT_SECS: u64 = 0; // 0 = no timeout, interactive apps
 pub(crate) const LIVE_POLL: std::time::Duration = std::time::Duration::from_millis(180);
 pub(crate) const LIVE_QUICK: std::time::Duration = std::time::Duration::from_millis(180);
 pub(crate) const LIVE_EDIT_MIN_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(3000);
+    std::time::Duration::from_millis(2000);
 pub(crate) const LIVE_EDIT_MAX_FAILS: u8 = 5;
 pub(crate) const LIVE_GUEST_MAX_FAILS: u8 = 15;
+
+pub(crate) fn frame_due(
+    posted_hash: Option<u64>,
+    digest: u64,
+    elapsed_since_edit_ms: Option<u64>,
+    min_interval_ms: u64,
+) -> bool {
+    if Some(digest) == posted_hash {
+        return false;
+    }
+    match elapsed_since_edit_ms {
+        None => true,
+        Some(e) => e >= min_interval_ms,
+    }
+}
 const LIVE_FRAME_BYTES: &str = "200000";
 
 const GUEST_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH";
@@ -548,9 +563,10 @@ pub(crate) async fn live_run(
     let mut first = true;
     let mut region: Option<(u32, u32)> = None;
     let mut answer_fails: u8 = 0;
-    let mut last_edit: Option<std::time::Instant> = None;
+    let mut last_edit: Option<std::time::Instant> = Some(std::time::Instant::now());
     let mut edit_fails: u8 = 0;
     let mut guest_fails: u8 = 0;
+    let mut posted_hash: Option<u64> = None;
     let mut kfiles: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> =
         std::collections::HashMap::new();
     let (mut dsr_term, mut dsr_processor, dsr_writes) = crate::termrender::new_collecting_term();
@@ -703,11 +719,19 @@ pub(crate) async fn live_run(
                     }
                 }
                 prev_fetched = fetched.clone();
-                if let Some(t) = last_edit {
-                    if t.elapsed() < LIVE_EDIT_MIN_INTERVAL {
-                        first = false;
-                        continue;
-                    }
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                fetched.hash(&mut hasher);
+                let digest = hasher.finish();
+                let since_edit = last_edit.map(|t| t.elapsed().as_millis() as u64);
+                if !frame_due(
+                    posted_hash,
+                    digest,
+                    since_edit,
+                    LIVE_EDIT_MIN_INTERVAL.as_millis() as u64,
+                ) {
+                    first = false;
+                    continue;
                 }
                 kitty_file_blobs(&vm, &fetched, &mut kfiles).await;
                 let render_start = std::time::Instant::now();
@@ -722,6 +746,7 @@ pub(crate) async fn live_run(
                     }
                     last_edit = Some(std::time::Instant::now());
                     edit_fails = 0;
+                    posted_hash = Some(digest);
                 } else {
                     let edit_ms = edit_start.elapsed().as_millis();
                     if let Some(note) = slow_cycle_note(fetch_ms, render_ms, edit_ms) {

@@ -739,14 +739,24 @@ mod tests {
     fn live_edits_are_throttled_and_tolerant() {
         assert_eq!(
             crate::live::LIVE_EDIT_MIN_INTERVAL.as_millis(),
-            3000,
-            "updates at most every 3s"
+            2000,
+            "updates at most every 2s"
         );
         assert!(
             crate::live::LIVE_EDIT_MAX_FAILS > 1,
             "transient 429s tolerated, got {}",
             crate::live::LIVE_EDIT_MAX_FAILS
         );
+    }
+
+    #[test]
+    fn frame_due_posts_changes_on_steady_cadence() {
+        use crate::live::frame_due;
+        assert!(!frame_due(None, 9, Some(100), 2000));
+        assert!(!frame_due(Some(7), 7, Some(5000), 2000));
+        assert!(!frame_due(Some(5), 7, Some(500), 2000));
+        assert!(frame_due(Some(5), 7, Some(2000), 2000));
+        assert!(frame_due(None, 9, None, 2000));
     }
 
     #[test]
