@@ -695,16 +695,6 @@ mod tests {
     }
 
     #[test]
-    fn throttled_changes_post_later_not_never() {
-        use crate::live::should_post_frame;
-        assert!(should_post_frame(None, 7, None, 2000));
-        assert!(!should_post_frame(Some(7), 7, Some(5000), 2000));
-        assert!(!should_post_frame(Some(5), 7, Some(500), 2000));
-        assert!(should_post_frame(Some(5), 7, Some(2000), 2000));
-        assert!(should_post_frame(Some(5), 7, None, 2000));
-    }
-
-    #[test]
     fn random_suffix_looks_unique_hex() {
         let a = random_suffix();
         let b = random_suffix();

@@ -31,21 +31,6 @@ pub(crate) const LIVE_QUICK: std::time::Duration = std::time::Duration::from_mil
 pub(crate) const LIVE_EDIT_MIN_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(2000);
 pub(crate) const LIVE_EDIT_MAX_FAILS: u8 = 5;
-
-pub(crate) fn should_post_frame(
-    posted_hash: Option<u64>,
-    digest: u64,
-    elapsed_since_edit_ms: Option<u64>,
-    min_interval_ms: u64,
-) -> bool {
-    if Some(digest) == posted_hash {
-        return false;
-    }
-    match elapsed_since_edit_ms {
-        None => true,
-        Some(e) => e >= min_interval_ms,
-    }
-}
 const LIVE_FRAME_BYTES: &str = "200000";
 
 const GUEST_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH";
@@ -520,7 +505,6 @@ pub(crate) async fn live_run(
     let mut first = true;
     let mut region: Option<(u32, u32)> = None;
     let mut answer_fails: u8 = 0;
-    let mut posted_hash: Option<u64> = None;
     let mut last_edit: Option<std::time::Instant> = None;
     let mut edit_fails: u8 = 0;
     let (mut dsr_term, mut dsr_processor, dsr_writes) = crate::termrender::new_collecting_term();
@@ -627,26 +611,17 @@ pub(crate) async fn live_run(
                     }
                 }
                 prev_fetched = fetched.clone();
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                fetched.hash(&mut hasher);
-                let digest = hasher.finish();
-                let since_edit = last_edit.map(|t| t.elapsed().as_millis() as u64);
-                if !should_post_frame(
-                    posted_hash,
-                    digest,
-                    since_edit,
-                    LIVE_EDIT_MIN_INTERVAL.as_millis() as u64,
-                ) {
-                    first = false;
-                    continue;
+                if let Some(t) = last_edit {
+                    if t.elapsed() < LIVE_EDIT_MIN_INTERVAL {
+                        first = false;
+                        continue;
+                    }
                 }
                 let (text, files) =
                     live_message(fonts.as_ref(), &cmd, &fetched, &mut region).await;
                 if edit_posted(&poster, &http, channel, msg.id, text, files).await {
                     last_edit = Some(std::time::Instant::now());
                     edit_fails = 0;
-                    posted_hash = Some(digest);
                 } else {
                     edit_fails += 1;
                     eprintln!(
