@@ -1016,28 +1016,17 @@ pub(crate) async fn purge_replies(
     Ok(())
 }
 
-pub(crate) enum UserReq {
-    Add(u64),
-    Remove(u64),
-    List,
-    Invalid,
-}
-
-pub(crate) fn parse_user_args(s: &str) -> UserReq {
-    let mut parts = s.split_whitespace();
-    let verb = parts.next().unwrap_or("").to_ascii_lowercase();
-    match verb.as_str() {
-        "list" if parts.next().is_none() => UserReq::List,
-        "add" | "remove" | "del" => {
-            let target = parts.next().unwrap_or("");
-            match (parse_target_id(target), parts.next()) {
-                (Some(uid), None) if verb == "add" => UserReq::Add(uid),
-                (Some(uid), None) => UserReq::Remove(uid),
-                _ => UserReq::Invalid,
-            }
-        }
-        _ => UserReq::Invalid,
-    }
+#[poise::command(
+    slash_command,
+    prefix_command,
+    subcommands("add", "remove", "list"),
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
+pub(crate) async fn user(ctx: Context<'_>) -> Result<(), Error> {
+    post_text(ctx, "Usage: `/user add @user`, `/user remove @user` or `/user list`.")
+        .await?;
+    Ok(())
 }
 
 #[poise::command(
@@ -1046,37 +1035,34 @@ pub(crate) fn parse_user_args(s: &str) -> UserReq {
     install_context = "Guild|User",
     interaction_context = "Guild|BotDm|PrivateChannel"
 )]
-pub(crate) async fn user(
+pub(crate) async fn add(
     ctx: Context<'_>,
-    #[description = "add @user | remove @user | list"]
-    #[rest]
-    args: String,
+    #[description = "User to authorize"] user: serenity::User,
 ) -> Result<(), Error> {
-    match parse_user_args(&args) {
-        UserReq::List => do_users(ctx).await,
-        UserReq::Add(uid) => {
-            match serenity::UserId::new(uid).to_user(ctx.http()).await {
-                Ok(u) => do_useradd(ctx, &u).await,
-                Err(_) => {
-                    post_text(ctx, "User not found — bad ID or I cannot see them.").await?;
-                    Ok(())
-                }
-            }
-        }
-        UserReq::Remove(uid) => {
-            match serenity::UserId::new(uid).to_user(ctx.http()).await {
-                Ok(u) => do_userdel(ctx, &u).await,
-                Err(_) => {
-                    post_text(ctx, "User not found — bad ID or I cannot see them.").await?;
-                    Ok(())
-                }
-            }
-        }
-        UserReq::Invalid => {
-            post_text(ctx, "Usage: `/user add @user`, `/user remove @user` or `/user list`.").await?;
-            Ok(())
-        }
-    }
+    do_useradd(ctx, &user).await
+}
+
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
+pub(crate) async fn remove(
+    ctx: Context<'_>,
+    #[description = "User to remove"] user: serenity::User,
+) -> Result<(), Error> {
+    do_userdel(ctx, &user).await
+}
+
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
+pub(crate) async fn list(ctx: Context<'_>) -> Result<(), Error> {
+    do_users(ctx).await
 }
 
 pub(crate) async fn uname(http: &serenity::Http, uid: u64) -> String {

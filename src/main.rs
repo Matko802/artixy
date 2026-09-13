@@ -466,22 +466,6 @@ mod tests {
     }
 
     #[test]
-    fn user_args_parse_single_field() {
-        assert!(matches!(crate::commands::parse_user_args("list"), crate::commands::UserReq::List));
-        assert!(matches!(crate::commands::parse_user_args("  LIST  "), crate::commands::UserReq::List));
-        assert!(matches!(crate::commands::parse_user_args("add <@123>"), crate::commands::UserReq::Add(123)));
-        assert!(matches!(crate::commands::parse_user_args("add 123"), crate::commands::UserReq::Add(123)));
-        assert!(matches!(crate::commands::parse_user_args("add <@!123>"), crate::commands::UserReq::Add(123)));
-        assert!(matches!(crate::commands::parse_user_args("remove 456"), crate::commands::UserReq::Remove(456)));
-        assert!(matches!(crate::commands::parse_user_args("del <@456>"), crate::commands::UserReq::Remove(456)));
-        assert!(matches!(crate::commands::parse_user_args(""), crate::commands::UserReq::Invalid));
-        assert!(matches!(crate::commands::parse_user_args("add"), crate::commands::UserReq::Invalid));
-        assert!(matches!(crate::commands::parse_user_args("add 1 2"), crate::commands::UserReq::Invalid));
-        assert!(matches!(crate::commands::parse_user_args("list x"), crate::commands::UserReq::Invalid));
-        assert!(matches!(crate::commands::parse_user_args("ban 123"), crate::commands::UserReq::Invalid));
-    }
-
-    #[test]
     fn sh_escape_quotes_safely() {
         assert_eq!(crate::commands::sh_escape("simple"), "'simple'");
         assert_eq!(crate::commands::sh_escape("a'b"), "'a'\\''b'");
