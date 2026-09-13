@@ -508,6 +508,37 @@ mod tests {
     }
 
     #[test]
+    fn render_produces_visible_pixels_for_ansi_output() {
+        let Some(reg) = crate::termrender::system_font_bytes("DejaVu Sans Mono") else {
+            eprintln!("no system fonts, skipping render smoke test");
+            return;
+        };
+        let bold = crate::termrender::system_font_bytes("DejaVu Sans Mono:weight=bold")
+            .unwrap_or_else(|| reg.clone());
+        let Some(fonts) = crate::termrender::TermFonts::load(&reg, &bold) else {
+            eprintln!("fonts do not parse, skipping render smoke test");
+            return;
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(b"\x1b[0;32m$ jefetch --static\x1b[0m\n");
+        out.extend_from_slice("▗▒▓▓ hello world\n".as_bytes());
+        out.extend_from_slice(b"plain tail");
+        let mut region = None;
+        let png = crate::termrender::render_terminal(
+            &fonts,
+            &out,
+            &std::collections::HashMap::new(),
+            &mut region,
+        )
+        .expect("renders");
+        let (w, h, rgba) = crate::pngencode::decode_png_rgba(&png).expect("own output decodes");
+        assert!(w > 100 && h > 50, "sane dims, got {}x{}", w, h);
+        let bg = [0x0bu8, 0x0e, 0x14];
+        let nonbg = rgba.chunks_exact(4).filter(|p| p[..3] != bg[..]).count();
+        assert!(nonbg > 1000, "text must paint pixels, got {}", nonbg);
+    }
+
+    #[test]
     fn new_bytes_since_never_splits_utf8() {
         assert_eq!(crate::termrender::new_bytes_since("a", "ťx"), "ťx");
         assert_eq!(crate::termrender::new_bytes_since("abť", "bťcd"), "cd");

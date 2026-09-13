@@ -579,6 +579,34 @@ mod tests {
     }
 
     #[test]
+    fn feed_matches_plain_emulation_on_ansi_soup() {
+        let mut soup = Vec::new();
+        soup.extend_from_slice(b"\x1b]0;test title\x07");
+        soup.extend_from_slice("\x1b[0;32m$ jefetch --static\x1b[0m\n".as_bytes());
+        soup.extend_from_slice("\x1b[38;5;196mred256\x1b[0m \x1b[38;2;1;2;3mrgb\x1b[0m\n".as_bytes());
+        soup.extend_from_slice("▗▒▓▓▓▓▓▒▒▒▄▄░▒▒▒▓▒ CPU-> x\n".as_bytes());
+        soup.extend_from_slice("┌─┐\t│tab│\n".as_bytes());
+        soup.extend_from_slice(b"plain tail");
+        let term_a = crate::termrender::emulate_output(&soup);
+        let (mut term_b, mut proc_b) = test_term();
+        let placed = feed_with_kitty(&mut term_b, &mut proc_b, &soup, &HashMap::new(), 10, 20);
+        assert!(placed.is_empty());
+        let (ga, gb) = (term_a.grid(), term_b.grid());
+        use alacritty_terminal::index::{Column, Line};
+        use crate::termrender::{resolve_color, TERM_COLS, TERM_ROWS};
+        for row in 0..TERM_ROWS {
+            for col in 0..TERM_COLS {
+                let a = &ga[Line(row as i32)][Column(col)];
+                let b = &gb[Line(row as i32)][Column(col)];
+                assert_eq!(a.c, b.c, "char at {}:{}", row, col);
+                assert_eq!(resolve_color(a.fg), resolve_color(b.fg), "fg at {}:{}", row, col);
+                assert_eq!(resolve_color(a.bg), resolve_color(b.bg), "bg at {}:{}", row, col);
+            }
+        }
+        assert_eq!(ga.cursor.point, gb.cursor.point);
+    }
+
+    #[test]
     fn png_decode_round_trips_encoder() {
         let mut rgb = vec![0u8; 5 * 4 * 3];
         for (k, px) in rgb.chunks_exact_mut(3).enumerate() {
