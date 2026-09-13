@@ -353,14 +353,24 @@ pub(crate) async fn post_response(
             return Ok(msg);
         }
     }
-    let mut builder = poise::CreateReply::default();
-    if !content.is_empty() {
-        builder = builder.content(content);
+    match direct_send(&http, channel, content.clone(), files.clone()).await {
+        Ok(msg) => {
+            if let poise::Context::Application(actx) = ctx {
+                let _ = actx.interaction.delete_response(&http).await;
+            }
+            Ok(msg)
+        }
+        Err(_) => {
+            let mut builder = poise::CreateReply::default();
+            if !content.is_empty() {
+                builder = builder.content(content);
+            }
+            for (name, bytes) in files {
+                builder = builder.attachment(serenity::CreateAttachment::bytes(bytes, name));
+            }
+            Ok(ctx.send(builder).await?.into_message().await?)
+        }
     }
-    for (name, bytes) in files {
-        builder = builder.attachment(serenity::CreateAttachment::bytes(bytes, name));
-    }
-    Ok(ctx.send(builder).await?.into_message().await?)
 }
 
 pub(crate) async fn handle_delete(
