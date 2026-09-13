@@ -225,8 +225,7 @@ mod tests {
         let mut region = None;
         let png = render_terminal(&fonts, &raw, &mut region).expect("renders");
         std::fs::write("/tmp/termproof.png", &png).unwrap();
-        let (w, h) = fonts.canvas();
-        eprintln!("rendered {}x{} ({} bytes)", w, h, png.len());
+        eprintln!("rendered {} bytes, region {:?}", png.len(), region);
         assert!(png.len() > 20_000, "a real frame is not tiny");
     }
 
@@ -651,15 +650,29 @@ async fn main() {
     let mut file_config = load_file_config();
     let token: String = match file_config.discord_token.clone() {
         Some(t) => t,
-        None => std::env::var("DISCORD_TOKEN")
-            .expect("set discord_token in ~/.config/artixy/config.toml or DISCORD_TOKEN env"),
+        None => std::env::var("DISCORD_TOKEN").unwrap_or_else(|_| {
+            eprintln!(
+                "error: set discord_token in {} or DISCORD_TOKEN env",
+                config_file_path().display()
+            );
+            std::process::exit(1);
+        }),
     };
     let owner: u64 = match file_config.owner_id {
         Some(id) => id,
         None => std::env::var("OWNER_ID")
-            .expect("set owner_id in ~/.config/artixy/config.toml or OWNER_ID env")
+            .unwrap_or_else(|_| {
+                eprintln!(
+                    "error: set owner_id in {} or OWNER_ID env",
+                    config_file_path().display()
+                );
+                std::process::exit(1);
+            })
             .parse()
-            .expect("OWNER_ID must be a number"),
+            .unwrap_or_else(|_| {
+                eprintln!("error: OWNER_ID must be a number");
+                std::process::exit(1);
+            }),
     };
     ensure_config_template();
     if fresh_config {
@@ -698,7 +711,13 @@ async fn main() {
                 .ok()
                 .filter(|s| !s.trim().is_empty())
         })
-        .expect("set vm_name in ~/.config/artixy/config.toml or VM_NAME env");
+        .unwrap_or_else(|| {
+            eprintln!(
+                "warning: vm_name not set in {} or VM_NAME env — VM commands will reply with a friendly error until you set it",
+                config_file_path().display()
+            );
+            String::new()
+        });
     let data = Data {
         allowed: tokio::sync::RwLock::new(Allowed {
             owner,

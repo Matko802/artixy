@@ -14,8 +14,8 @@ use alacritty_terminal::{
 
 pub(crate) const TERM_COLS: usize = 120;
 pub(crate) const TERM_ROWS: usize = 40;
-const FONT_PX: f32 = 28.0;
-const PAD: u32 = 10;
+const FONT_PX: f32 = 16.0;
+const PAD: u32 = 6;
 const COL_STEP: usize = 20;
 const ROW_STEP: usize = 8;
 const MIN_COLS: u32 = 60;
@@ -77,13 +77,6 @@ impl TermFonts {
         };
         let cell_h = (ascent as u32 + descent + 4).max(1);
         Some(Self { regular, bold, cell_w, cell_h, ascent })
-    }
-
-    pub fn canvas(&self) -> (u32, u32) {
-        (
-            TERM_COLS as u32 * self.cell_w + PAD * 2,
-            TERM_ROWS as u32 * self.cell_h + PAD * 2,
-        )
     }
 }
 

@@ -16,12 +16,16 @@ pub(crate) struct LiveEntry {
     pub(crate) pid: Option<i64>,
     pub(crate) msg_id: serenity::MessageId,
     pub(crate) in_f: Option<String>,
+    pub(crate) author_id: serenity::UserId,
+    pub(crate) channel: serenity::ChannelId,
 }
 pub(crate) type LiveMap = std::sync::Arc<
-    tokio::sync::Mutex<std::collections::HashMap<serenity::ChannelId, LiveEntry>>,
+    tokio::sync::Mutex<
+        std::collections::HashMap<(serenity::ChannelId, serenity::UserId), LiveEntry>,
+    >,
 >;
 
-pub(crate) const LIVE_TIMEOUT_SECS: u64 = 600;
+pub(crate) const LIVE_TIMEOUT_SECS: u64 = 0; // 0 = no timeout, interactive apps stay alive
 pub(crate) const LIVE_POLL_SECS: u64 = 1;
 pub(crate) const LIVE_QUICK_SECS: u64 = 1;
 const LIVE_FRAME_BYTES: &str = "200000";
@@ -48,21 +52,48 @@ pub(crate) fn mkfifo_script(path: &str, runas: Option<&str>) -> String {
         None => format!("rm -f {path} && mkfifo -m 600 {path}"),
     }
 }
-pub(crate) async fn abort_live_for_channel(
+pub(crate) async fn abort_live_for_user(
     live_map: &LiveMap,
     channel: serenity::ChannelId,
+    user: serenity::UserId,
 ) -> Option<LiveEntry> {
-    let old = live_map.lock().await.remove(&channel);
+    let old = live_map.lock().await.remove(&(channel, user));
     if let Some(ref e) = old {
         e.handle.abort();
     }
     old
 }
 
-pub(crate) async fn remove_live_if_tag(live_map: &LiveMap, channel: serenity::ChannelId, tag: u64) {
+// legacy name kept for any external callers — now per-user
+#[allow(dead_code)]
+pub(crate) async fn abort_live_for_channel(
+    live_map: &LiveMap,
+    channel: serenity::ChannelId,
+) -> Option<LiveEntry> {
+    // fallback: remove any one entry for that channel (used only for non-live cleanups)
     let mut m = live_map.lock().await;
-    if m.get(&channel).map(|e| e.tag) == Some(tag) {
-        m.remove(&channel);
+    let key = m.keys().find(|(c, _)| *c == channel).cloned();
+    if let Some(k) = key {
+        let old = m.remove(&k);
+        if let Some(ref e) = &old {
+            e.handle.abort();
+        }
+        old
+    } else {
+        None
+    }
+}
+
+pub(crate) async fn remove_live_if_tag(
+    live_map: &LiveMap,
+    channel: serenity::ChannelId,
+    user: serenity::UserId,
+    tag: u64,
+) {
+    let mut m = live_map.lock().await;
+    let key = (channel, user);
+    if m.get(&key).map(|e| e.tag) == Some(tag) {
+        m.remove(&key);
     }
 }
 
@@ -216,6 +247,7 @@ pub(crate) async fn begin_run(
     let poster = resolve_poster(&http, channel).await;
     let tag = ack.id.get();
     let ack_id = ack.id;
+    let author_user = serenity::UserId::new(author_id);
     let rand = random_suffix();
     let out_f = format!("/tmp/podbot-live-{}-{}.out", tag, rand);
     let code_f = format!("/tmp/podbot-live-{}-{}.code", tag, rand);
@@ -232,7 +264,7 @@ pub(crate) async fn begin_run(
         Ok((0, _, _)) => Some(in_f.clone()),
         _ => None,
     };
-    if let Some(old) = abort_live_for_channel(&live_map, channel).await {
+    if let Some(old) = abort_live_for_user(&live_map, channel, author_user).await {
         let vm_clone = vm.clone();
         tokio::spawn(async move {
             if let Some(pid) = old.pid {
@@ -250,12 +282,16 @@ pub(crate) async fn begin_run(
         code_f.clone(),
         in_opt.clone(),
     );
+    let author_for_run = author_user;
     let handle = tokio::spawn(async move {
-        live_run(http, ack, channel, tag, vm2, cmd2, runas2, out_f2, code_f2, in_f2, live_map2, scrub_ip, poster).await;
+        live_run(
+            http, ack, channel, tag, vm2, cmd2, runas2, out_f2, code_f2, in_f2, live_map2, scrub_ip, poster, author_for_run,
+        )
+        .await;
     })
     .abort_handle();
     live_map.lock().await.insert(
-        channel,
+        (channel, author_user),
         LiveEntry {
             handle,
             tag,
@@ -264,6 +300,8 @@ pub(crate) async fn begin_run(
             pid: None,
             msg_id: ack_id,
             in_f: in_opt,
+            author_id: author_user,
+            channel,
         },
     );
     eprintln!("run started for {} (id {})", author_name, author_id);
@@ -283,6 +321,7 @@ pub(crate) async fn live_run(
     live_map: LiveMap,
     scrub_ip: bool,
     poster: Poster,
+    author: serenity::UserId,
 ) {
     use base64::Engine as _;
     if let Some(ref u) = runas {
@@ -296,7 +335,7 @@ pub(crate) async fn live_run(
                 Vec::new(),
             )
             .await;
-            remove_live_if_tag(&live_map, channel, tag).await;
+            remove_live_if_tag(&live_map, channel, author, tag).await;
             return;
         }
     }
@@ -332,13 +371,13 @@ pub(crate) async fn live_run(
             )
             .await;
             cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
-            remove_live_if_tag(&live_map, channel, tag).await;
+            remove_live_if_tag(&live_map, channel, author, tag).await;
             return;
         }
     };
     {
         let mut m = live_map.lock().await;
-        if let Some(e) = m.get_mut(&channel) {
+        if let Some(e) = m.get_mut(&(channel, author)) {
             if e.tag == tag {
                 e.pid = Some(pid);
             }
@@ -362,7 +401,7 @@ pub(crate) async fn live_run(
     loop {
         let wait = if first { LIVE_QUICK_SECS } else { LIVE_POLL_SECS };
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-        if started.elapsed().as_secs() > LIVE_TIMEOUT_SECS {
+        if LIVE_TIMEOUT_SECS != 0 && started.elapsed().as_secs() > LIVE_TIMEOUT_SECS {
             let huge = guest_exec(&vm, "/usr/bin/wc", &["-c", &out_f], true, 10)
                 .await
                 .map(|(_, o, _)| {
@@ -468,5 +507,5 @@ pub(crate) async fn live_run(
         }
         first = false;
     }
-    remove_live_if_tag(&live_map, channel, tag).await;
+    remove_live_if_tag(&live_map, channel, author, tag).await;
 }

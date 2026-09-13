@@ -6,7 +6,7 @@ use crate::{
     live::begin_run,
     util::{attach_name, cap_file_body, codeblock, deployed_via_nix, project_dir, random_suffix, strip_sgr, valid_runas},
     vm::{agent_ping, guest_exec, linked_user, virsh, wait_agent},
-    webhook::{is_own_message, mark_self_deleted, post_message, post_response, post_text},
+    webhook::{is_own_message, mark_self_deleted, post_response, post_text},
     Context, Error,
 };
 
@@ -35,6 +35,22 @@ pub(crate) async fn maybe_defer(ctx: Context<'_>) {
     if matches!(ctx, poise::Context::Application(_)) {
         let _ = ctx.defer().await;
     }
+}
+
+async fn require_vm(ctx: Context<'_>) -> Option<String> {
+    let vm = ctx.data().vm.clone();
+    if vm.trim().is_empty() {
+        let _ = post_text(
+            ctx,
+            format!(
+                "VM not configured — set `vm_name` in `{}` or `VM_NAME` env, then restart the bot.",
+                crate::config::config_file_path().display()
+            ),
+        )
+        .await;
+        return None;
+    }
+    Some(vm)
 }
 
 pub(crate) const HELP: &str = "\
@@ -87,7 +103,7 @@ pub(crate) async fn start(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     }
     maybe_defer(ctx).await;
-    let vm = ctx.data().vm.clone();
+    let Some(vm) = require_vm(ctx).await else { return Ok(()); };
     let state = virsh(&["domstate", &vm]).await.unwrap_or_default();
     let mut started_here = false;
     let mut boot_t0: Option<std::time::Instant> = None;
@@ -147,7 +163,7 @@ pub(crate) async fn stop(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     }
     maybe_defer(ctx).await;
-    let vm = ctx.data().vm.clone();
+    let Some(vm) = require_vm(ctx).await else { return Ok(()); };
     post_text(ctx, format!("stopping {}…", vm)).await?;
     match virsh(&["shutdown", &vm]).await {
         Ok(_) => {}
@@ -183,7 +199,7 @@ pub(crate) async fn restart(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
     }
-    let vm = ctx.data().vm.clone();
+    let Some(vm) = require_vm(ctx).await else { return Ok(()); };
     match virsh(&["reboot", &vm]).await {
         Ok(_) => {
             post_text(ctx, format!("`{}` rebooting.", vm)).await?;
@@ -205,7 +221,7 @@ pub(crate) async fn info(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
     }
-    let vm = ctx.data().vm.clone();
+    let Some(vm) = require_vm(ctx).await else { return Ok(()); };
     match virsh(&["dominfo", &vm]).await {
         Ok(o) => {
             let agent = if agent_ping(&vm).await {
@@ -339,7 +355,7 @@ pub(crate) async fn run(
         return Ok(());
     }
     maybe_defer(ctx).await;
-    let vm = ctx.data().vm.clone();
+    let Some(vm) = require_vm(ctx).await else { return Ok(()); };
     if !agent_ping(&vm).await {
         post_text(ctx, "Guest agent is silent. Install `qemu-guest-agent` in Artix first.")
             .await?;
@@ -438,10 +454,12 @@ pub(crate) async fn say(
             }
         }
     } else if text.chars().count() <= 2000 {
-        let _ = post_message(&http, channel, text, Vec::new()).await;
+        post_text(ctx, text).await?;
+        return Ok(());
     } else {
         let att = (attach_name(&text), cap_file_body(&strip_sgr(&text)).into_bytes());
-        let _ = post_message(&http, channel, String::new(), vec![att]).await;
+        post_response(ctx, String::new(), vec![att]).await?;
+        return Ok(());
     }
     if let poise::Context::Application(actx) = ctx {
         let _ = actx.interaction.delete_response(&http).await;
@@ -567,7 +585,7 @@ pub(crate) async fn status(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
     }
-    let vm = ctx.data().vm.clone();
+    let Some(vm) = require_vm(ctx).await else { return Ok(()); };
     let state = virsh(&["domstate", &vm]).await.unwrap_or_else(|e| e.to_string());
     let agent = if state.trim() == "running" {
         if agent_ping(&vm).await {
@@ -934,7 +952,7 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
             persist_runtime(ctx.data()).await?;
         }
     }
-    let vm = ctx.data().vm.clone();
+    let Some(vm) = require_vm(ctx).await else { return Ok(()); };
     let state = virsh(&["domstate", &vm]).await.unwrap_or_default();
     if state.trim() != "running" {
         match virsh(&["start", &vm]).await {
@@ -1013,7 +1031,7 @@ pub(crate) async fn do_userdel(ctx: Context<'_>, user: &serenity::User) -> Resul
         persist_runtime(ctx.data()).await?;
         match linked {
             Some(n) if valid_runas(&n) => {
-                let vm = ctx.data().vm.clone();
+                let Some(vm) = require_vm(ctx).await else { return Ok(()); };
                 let mut rc = guest_exec(&vm, "/usr/sbin/userdel", &["-r", &n], false, 30).await;
                 if let Err(e) = &rc {
                     if e.to_string().contains("No such file") {

@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn config_round_trip_preserves_everything() {
-        let mut cfg = FileConfig {
+        let cfg = FileConfig {
             owner_id: Some(1),
             blocked_ids: vec![2],
             webhook_urls: vec!["https://discord.com/api/webhooks/3/tok".to_string()],

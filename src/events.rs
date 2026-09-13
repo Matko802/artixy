@@ -107,45 +107,79 @@ pub(crate) async fn event_handler(
         return Ok(());
     }
     if new_message.attachments.is_empty() && !new_message.content.trim().is_empty() {
-        if let Some(refd) = new_message.referenced_message.as_ref() {
-            let target: Option<(serenity::MessageId, String)> = {
+        let refd_id = new_message
+            .referenced_message
+            .as_ref()
+            .map(|r| r.id)
+            .or(new_message.message_reference.as_ref().and_then(|r| r.message_id));
+        if let Some(target_id) = refd_id {
+            let live_hit = {
                 let m = data.live.lock().await;
-                m.get(&new_message.channel_id)
-                    .and_then(|e| e.in_f.clone().map(|f| (e.msg_id, f)))
+                m.iter()
+                    .find(|(_, e)| e.msg_id == target_id)
+                    .map(|(_, e)| (e.author_id, e.in_f.clone(), e.channel))
             };
-            if let Some((live_msg, fifo)) = target {
-                if refd.id == live_msg {
-                    let authed = {
-                        let a = data.allowed.read().await;
-                        access_allowed(a.owner, &a.users, &a.blocked, id)
-                    };
-                    if authed {
-                        let trimmed = new_message.content.trim_end();
-                        let payload = match crate::live::terminal_key(trimmed) {
-                            Some(key) => key,
-                            None => format!("{}\n", trimmed),
-                        };
-                        let runas = linked_user(data, id).await;
-                        if crate::live::forward_terminal_input(&data.vm, &fifo, runas.as_deref(), &payload).await {
-                            let _ = new_message.delete(&ctx.http).await;
-                        } else {
-                            let _ = post_message(
+            if let Some((owner_id, fifo_opt, live_channel)) = live_hit {
+                if owner_id.get() != id {
+                    let _ = new_message.delete(&ctx.http).await;
+                    let dm_text = "That live session belongs to someone else — typing into it is blocked.";
+                    if let Ok(dm) = new_message.author.create_dm_channel(&ctx.http).await {
+                        let _ = dm
+                            .send_message(
                                 &ctx.http,
-                                new_message.channel_id,
-                                "Couldn't type into that session (ended, or it's someone else's)."
-                                    .into(),
-                                Vec::new(),
+                                serenity::CreateMessage::new().content(dm_text),
                             )
                             .await;
-                        }
-                        return Ok(());
+                    }
+                    return Ok(());
+                }
+                let Some(fifo) = fifo_opt else {
+                    let _ = new_message.delete(&ctx.http).await;
+                    if let Ok(dm) = new_message.author.create_dm_channel(&ctx.http).await {
+                        let _ = dm
+                            .send_message(
+                                &ctx.http,
+                                serenity::CreateMessage::new()
+                                    .content("That live session isn't interactive (fifo missing)."),
+                            )
+                            .await;
+                    }
+                    return Ok(());
+                };
+                let authed = {
+                    let a = data.allowed.read().await;
+                    access_allowed(a.owner, &a.users, &a.blocked, id)
+                };
+                if !authed {
+                    return Ok(());
+                }
+                let trimmed = new_message.content.trim_end();
+                let payload = match crate::live::terminal_key(trimmed) {
+                    Some(key) => key,
+                    None => format!("{}\n", trimmed),
+                };
+                let runas = linked_user(data, id).await;
+                let ok =
+                    crate::live::forward_terminal_input(&data.vm, &fifo, runas.as_deref(), &payload).await;
+                let _ = new_message.delete(&ctx.http).await;
+                if !ok {
+                    if let Ok(dm) = new_message.author.create_dm_channel(&ctx.http).await {
+                        let _ = dm
+                            .send_message(
+                                &ctx.http,
+                                serenity::CreateMessage::new()
+                                    .content("Couldn't type into that session (it just ended)."),
+                            )
+                            .await;
                     }
                 }
+                let _ = live_channel;
+                return Ok(());
             }
         }
     }
     if !owner {
-        if is_boo_message(&new_message.content) {
+        if war && is_boo_message(&new_message.content) {
             let _ = new_message.reply(&ctx.http, "boo on you! :3").await;
         }
         return Ok(());

@@ -40,6 +40,7 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&crc32(&c).to_be_bytes());
 }
 
+#[cfg(test)]
 fn zlib_stream(raw: &[u8]) -> Vec<u8> {
     // Filter-0 scanlines, then one zlib stream (stored blocks) + adler32.
     let mut out = Vec::with_capacity(raw.len() + raw.len() / 1000 + 16);
