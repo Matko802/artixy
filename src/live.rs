@@ -28,6 +28,9 @@ pub(crate) type LiveMap = std::sync::Arc<
 pub(crate) const LIVE_TIMEOUT_SECS: u64 = 0; // 0 = no timeout, interactive apps stay alive
 pub(crate) const LIVE_POLL: std::time::Duration = std::time::Duration::from_millis(180);
 pub(crate) const LIVE_QUICK: std::time::Duration = std::time::Duration::from_millis(180);
+pub(crate) const LIVE_EDIT_MIN_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(1500);
+pub(crate) const LIVE_EDIT_MAX_FAILS: u8 = 5;
 const LIVE_FRAME_BYTES: &str = "200000";
 
 const GUEST_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH";
@@ -53,7 +56,7 @@ pub(crate) fn build_runner(
         None => "cd \"$HOME\" 2>/dev/null || cd /tmp; ".to_string(),
     };
     format!(
-        "export CMD_DATA=\"$(echo {b64} | base64 -d)\"; if command -v script >/dev/null 2>&1; then script -qec \"export TERM=xterm-256color; stty cols {cols} rows {rows}; {shell} -c 'export PATH={path}; {home_cd}eval \\\"\\$CMD_DATA\\\"'\" /dev/null <> {input}; else {shell} -c 'export PATH={path}; {home_cd}eval \"$CMD_DATA\"' <> {input}; fi > {out_f} 2>&1; echo $? > {code_f}",
+        "export CMD_DATA=\"$(echo {b64} | base64 -d)\"; if command -v script >/dev/null 2>&1; then script -qec \"export TERM=xterm-256color TERM_PROGRAM=rustyterm COLORTERM=truecolor; stty cols {cols} rows {rows}; {shell} -c 'export PATH={path}; {home_cd}eval \\\"\\$CMD_DATA\\\"'\" /dev/null <> {input}; else {shell} -c 'export TERM_PROGRAM=rustyterm COLORTERM=truecolor; export PATH={path}; {home_cd}eval \"$CMD_DATA\"' <> {input}; fi > {out_f} 2>&1; echo $? > {code_f}",
         b64 = b64,
         cols = TERM_COLS,
         rows = TERM_ROWS,
@@ -246,6 +249,21 @@ fn load_terminal_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
     let bold = crate::termrender::system_font_bytes("DejaVu Sans Mono:weight=bold")
         .unwrap_or_else(|| reg.clone());
     Some((reg, bold))
+}
+
+async fn edit_final(
+    poster: &Poster,
+    http: &std::sync::Arc<serenity::Http>,
+    channel: serenity::ChannelId,
+    target: serenity::MessageId,
+    content: String,
+    files: Vec<(String, Vec<u8>)>,
+) {
+    if edit_posted(poster, http, channel, target, content.clone(), files.clone()).await {
+        return;
+    }
+    tokio::time::sleep(LIVE_EDIT_MIN_INTERVAL).await;
+    edit_posted(poster, http, channel, target, content, files).await;
 }
 
 async fn live_message(
@@ -447,6 +465,8 @@ pub(crate) async fn live_run(
     let mut answer_fails: u8 = 0;
     let mut last_hash: u64 = 0;
     let mut hashed_once = false;
+    let mut last_edit: Option<std::time::Instant> = None;
+    let mut edit_fails: u8 = 0;
     let (mut dsr_term, mut dsr_processor, dsr_writes) = crate::termrender::new_collecting_term();
     let mut prev_fetched = String::new();
     loop {
@@ -515,14 +535,14 @@ pub(crate) async fn live_run(
                     if is_long && fonts.is_some() {
                         let (text, files) =
                             live_message(fonts.as_ref(), &cmd, &output, &mut region).await;
-                        edit_posted(&poster, &http, channel, msg.id, text, files).await;
+                        edit_final(&poster, &http, channel, msg.id, text, files).await;
                     } else {
-                        edit_posted(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await;
+                        edit_final(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await;
                     }
                 } else {
                     let (text, files) =
                         live_message(fonts.as_ref(), &cmd, &output, &mut region).await;
-                    edit_posted(&poster, &http, channel, msg.id, text, files).await;
+                    edit_final(&poster, &http, channel, msg.id, text, files).await;
                 }
                 cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
                 break;
@@ -561,11 +581,28 @@ pub(crate) async fn live_run(
                 }
                 last_hash = digest;
                 hashed_once = true;
+                if !first {
+                    if let Some(t) = last_edit {
+                        if t.elapsed() < LIVE_EDIT_MIN_INTERVAL {
+                            continue;
+                        }
+                    }
+                }
                 let (text, files) =
                     live_message(fonts.as_ref(), &cmd, &fetched, &mut region).await;
-                if !edit_posted(&poster, &http, channel, msg.id, text, files).await {
-                    cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
-                    break;
+                if edit_posted(&poster, &http, channel, msg.id, text, files).await {
+                    last_edit = Some(std::time::Instant::now());
+                    edit_fails = 0;
+                } else {
+                    edit_fails += 1;
+                    eprintln!(
+                        "live: edit {}/{} failed for {} (transient unless repeated)",
+                        edit_fails, LIVE_EDIT_MAX_FAILS, out_f
+                    );
+                    if edit_fails >= LIVE_EDIT_MAX_FAILS {
+                        cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
+                        break;
+                    }
                 }
             }
         }

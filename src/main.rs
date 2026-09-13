@@ -145,6 +145,8 @@ mod tests {
         assert!(!s.contains("$(cat)"), "no pipe-through-pty (EOF would hang)");
         assert!(s.contains("cd ~matko802"), "starts in the user's home, not the daemon cwd");
         assert!(s.contains("cd /tmp"), "writable fallback so git/makepkg never land in /etc/dinit.d");
+        assert!(s.contains("TERM_PROGRAM=rustyterm"), "fetch tools report rustyterm");
+        assert!(s.contains("COLORTERM=truecolor"), "truecolor advertised");
         let sh = crate::live::build_runner("sh", "QkI2NA==", "/tmp/o.out", "/tmp/o.code", "/dev/null", None);
         assert!(sh.contains("else sh -c"), "sh fallback mirrors bash");
         assert!(sh.contains("<> /dev/null"), "null input stays EOF-fast");
@@ -680,6 +682,19 @@ mod tests {
         assert!(crate::commands::sudoers_script("a/b").is_none());
         assert!(crate::commands::sudoers_script("a b").is_none());
         assert!(crate::commands::sudoers_script("").is_none());
+    }
+
+    #[test]
+    fn live_edits_are_throttled_and_tolerant() {
+        assert!(
+            crate::live::LIVE_EDIT_MIN_INTERVAL.as_millis() >= 1000,
+            "edits throttled to survive rate limits"
+        );
+        assert!(
+            crate::live::LIVE_EDIT_MAX_FAILS > 1,
+            "transient 429s tolerated, got {}",
+            crate::live::LIVE_EDIT_MAX_FAILS
+        );
     }
 
     #[test]
