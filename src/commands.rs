@@ -1048,7 +1048,10 @@ pub(crate) fn sudoers_script(user: &str) -> Option<String> {
         chmod 0440 \"$f.tmp\"; mv -f \"$f.tmp\" \"$f\"; chmod 0440 \"$f\"; \
         if command -v visudo >/dev/null 2>&1; then visudo -c -f \"$f\" >/dev/null; fi; \
         if getent group wheel >/dev/null 2>&1; then usermod -aG wheel \"$u\" || true; \
-        elif getent group sudo >/dev/null 2>&1; then usermod -aG sudo \"$u\" || true; fi; true",
+        elif getent group sudo >/dev/null 2>&1; then usermod -aG sudo \"$u\" || true; fi; \
+        h=\"$(getent passwd \"$u\" | cut -d: -f6)\"; \
+        if [ -n \"$h\" ] && [ -d \"$h\" ]; then chown \"$u\" \"$h\" 2>/dev/null || true; \
+        for d in \"$h/.cargo\" \"$h/.rustup\"; do [ -e \"$d\" ] && chown -R \"$u\" \"$d\" 2>/dev/null || true; done; fi; true",
         u = user,
     ))
 }
