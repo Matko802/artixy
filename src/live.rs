@@ -5,7 +5,7 @@ use crate::{
     termrender::TermFonts,
     util::{plain_tail, random_suffix, valid_runas},
     vm::{guest_exec, guest_launch_raw, guest_status},
-    webhook::{edit_posted, resolve_poster, Poster},
+    webhook::{edit_posted, post_message, resolve_poster, Poster},
 };
 
 pub(crate) struct LiveEntry {
@@ -300,12 +300,26 @@ async fn edit_final(
     target: serenity::MessageId,
     content: String,
     files: Vec<(String, Vec<u8>)>,
-) {
+) -> bool {
     if edit_posted(poster, http, channel, target, content.clone(), files.clone()).await {
-        return;
+        return true;
     }
     tokio::time::sleep(LIVE_EDIT_MIN_INTERVAL).await;
-    edit_posted(poster, http, channel, target, content, files).await;
+    edit_posted(poster, http, channel, target, content, files).await
+}
+
+async fn note_stalled_feed(
+    http: &std::sync::Arc<serenity::Http>,
+    channel: serenity::ChannelId,
+    cmd: &str,
+) {
+    let _ = post_message(
+        http,
+        channel,
+        plain_tail(&format!("$ {}\n…live updates stopped: Discord kept rejecting message edits", cmd)),
+        Vec::new(),
+    )
+    .await;
 }
 
 async fn kitty_file_blobs(
@@ -595,18 +609,23 @@ pub(crate) async fn live_run(
                     };
                     let is_long = combined.chars().count() > 1800;
                     kitty_file_blobs(&vm, &full, &mut kfiles).await;
-                    if is_long && fonts.is_some() {
+                    let posted = if is_long && fonts.is_some() {
                         let (text, files) =
                             live_message(fonts.as_ref(), &cmd, &output, &kfiles, &mut region).await;
-                        edit_final(&poster, &http, channel, msg.id, text, files).await;
+                        edit_final(&poster, &http, channel, msg.id, text, files).await
                     } else {
-                        edit_final(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await;
+                        edit_final(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await
+                    };
+                    if !posted {
+                        note_stalled_feed(&http, channel, &cmd).await;
                     }
                 } else {
                     kitty_file_blobs(&vm, &full, &mut kfiles).await;
                     let (text, files) =
                         live_message(fonts.as_ref(), &cmd, &output, &kfiles, &mut region).await;
-                    edit_final(&poster, &http, channel, msg.id, text, files).await;
+                    if !edit_final(&poster, &http, channel, msg.id, text, files).await {
+                        note_stalled_feed(&http, channel, &cmd).await;
+                    }
                 }
                 cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
                 break;
@@ -663,6 +682,7 @@ pub(crate) async fn live_run(
                         edit_fails, LIVE_EDIT_MAX_FAILS, out_f
                     );
                     if edit_fails >= LIVE_EDIT_MAX_FAILS {
+                        note_stalled_feed(&http, channel, &cmd).await;
                         cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
                         break;
                     }
