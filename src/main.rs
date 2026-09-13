@@ -13,7 +13,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::commands::{
     botrestart, help, info, notify, ps, purge_replies, restart, run, sayas, send, shell, shot,
-    start, status, stop, user, useradd, userdel, userlist, users, warmode,
+    start, status, stop, upload, user, warmode,
 };
 use crate::commands::BOOT_ART;
 use crate::config::{Allowed, AllowedFile, BotSettings, Data, apply_legacy_import, config_file_path, ensure_config_template, load_file_config, save_json};
@@ -36,11 +36,7 @@ mod tests {
             stop(),
             restart(),
             info(),
-            users(),
-            userlist(),
             user(),
-            useradd(),
-            userdel(),
             shell(),
             botrestart(),
             run(),
@@ -50,8 +46,9 @@ mod tests {
             notify(),
             purge_replies(),
             warmode(),
+            upload(),
         ];
-        assert_eq!(cmds.len(), 21, "test must mirror the framework command list");
+        assert_eq!(cmds.len(), 18, "test must mirror the framework command list");
         for cmd in &cmds {
             let builder = cmd
                 .create_as_slash_command()
@@ -467,6 +464,29 @@ mod tests {
     }
 
     #[test]
+    fn user_args_parse_single_field() {
+        assert!(matches!(crate::commands::parse_user_args("list"), crate::commands::UserReq::List));
+        assert!(matches!(crate::commands::parse_user_args("  LIST  "), crate::commands::UserReq::List));
+        assert!(matches!(crate::commands::parse_user_args("add <@123>"), crate::commands::UserReq::Add(123)));
+        assert!(matches!(crate::commands::parse_user_args("add 123"), crate::commands::UserReq::Add(123)));
+        assert!(matches!(crate::commands::parse_user_args("add <@!123>"), crate::commands::UserReq::Add(123)));
+        assert!(matches!(crate::commands::parse_user_args("remove 456"), crate::commands::UserReq::Remove(456)));
+        assert!(matches!(crate::commands::parse_user_args("del <@456>"), crate::commands::UserReq::Remove(456)));
+        assert!(matches!(crate::commands::parse_user_args(""), crate::commands::UserReq::Invalid));
+        assert!(matches!(crate::commands::parse_user_args("add"), crate::commands::UserReq::Invalid));
+        assert!(matches!(crate::commands::parse_user_args("add 1 2"), crate::commands::UserReq::Invalid));
+        assert!(matches!(crate::commands::parse_user_args("list x"), crate::commands::UserReq::Invalid));
+        assert!(matches!(crate::commands::parse_user_args("ban 123"), crate::commands::UserReq::Invalid));
+    }
+
+    #[test]
+    fn sh_escape_quotes_safely() {
+        assert_eq!(crate::commands::sh_escape("simple"), "'simple'");
+        assert_eq!(crate::commands::sh_escape("a'b"), "'a'\\''b'");
+        assert_eq!(crate::commands::sh_escape("/tmp/a b"), "'/tmp/a b'");
+    }
+
+    #[test]
     fn tool_path_finds_shell_and_rejects_junk() {
         let sh = tool_path("sh");
         assert!(sh.is_some(), "sh must resolve even with a minimal PATH");
@@ -773,11 +793,7 @@ async fn main() {
                 stop(),
                 restart(),
                 info(),
-                users(),
-                userlist(),
                 user(),
-                useradd(),
-                userdel(),
                 shell(),
                 botrestart(),
                 run(),
@@ -787,6 +803,7 @@ async fn main() {
                 notify(),
                 purge_replies(),
                 warmode(),
+                upload(),
             ],
             on_error: |error| {
                 Box::pin(async move {

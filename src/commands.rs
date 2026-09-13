@@ -26,7 +26,7 @@ pub(crate) async fn need_auth(ctx: Context<'_>) -> Result<bool, Error> {
     }
     let u = ctx.author();
     eprintln!("denied: {} (id {})", u.name, u.id.get());
-    post_text(ctx, "Not authorized. Ask the owner to run `/useradd <your discord id>`.")
+    post_text(ctx, "Not authorized. Ask the owner to run `/user add @you`.")
         .await?;
     Ok(false)
 }
@@ -56,7 +56,7 @@ async fn require_vm(ctx: Context<'_>) -> Option<String> {
 pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
-\n**Who can use me**\n`/users` / `/userlist` — show owner + managers\n`/useradd @user` — owner only: links them, creates their Linux account in Artix (name from discord name) and grants passwordless sudo (re-run it to repair sudo for all linked users).\n`/userdel @user` — owner only: revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
+\n**Who can use me**\n`/user` — one command: `/user list` shows owner + managers, `/user add @user` (owner only) links them and creates their Linux account in Artix, `/user remove @user` (owner only) revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
 \n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to]` — owner only: `no args` toggles auto say-as-artix mode, `message` sends that as artix (reply_to = message ID/link). Output is ephemeral (only you see it).\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
@@ -670,6 +670,137 @@ pub(crate) async fn send(
     Ok(())
 }
 
+pub(crate) fn sh_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+async fn guest_mkdir(vm: &str, dir: &str) -> Result<(), Error> {
+    let rc = guest_exec(vm, "/bin/mkdir", &["-p", "--", dir], false, 15).await;
+    let rc = match rc {
+        Err(e) if e.to_string().contains("No such file") => {
+            guest_exec(vm, "/usr/bin/mkdir", &["-p", "--", dir], false, 15).await?
+        }
+        other => other?,
+    };
+    if rc.0 == 0 {
+        Ok(())
+    } else {
+        Err(format!("mkdir failed (code {})", rc.0).into())
+    }
+}
+
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
+pub(crate) async fn upload(
+    ctx: Context<'_>,
+    #[description = "File to upload into the VM"] file: serenity::Attachment,
+    #[description = "Absolute destination dir in the VM (created if missing)"] dir: String,
+) -> Result<(), Error> {
+    use base64::Engine as _;
+    if !need_auth(ctx).await? {
+        return Ok(());
+    }
+    maybe_defer(ctx).await;
+    if file.size as u64 > 20 * 1024 * 1024 {
+        post_text(ctx, "That file is over ~20MB — too big to upload.").await?;
+        return Ok(());
+    }
+    let dir = dir.trim();
+    if !dir.starts_with('/') {
+        post_text(ctx, "Absolute dir only.").await?;
+        return Ok(());
+    }
+    let Some(name) = std::path::Path::new(&file.filename)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty() && n != "." && n != "..")
+    else {
+        post_text(ctx, "Bad file name.").await?;
+        return Ok(());
+    };
+    let Some(vm) = require_vm(ctx).await else { return Ok(()); };
+    let bytes = match file.download().await {
+        Ok(b) => b,
+        Err(e) => {
+            post_text(ctx, codeblock(&format!("download failed: {}", e))).await?;
+            return Ok(());
+        }
+    };
+    if bytes.len() as u64 > 20 * 1024 * 1024 {
+        post_text(ctx, "That file is over ~20MB — too big to upload.").await?;
+        return Ok(());
+    }
+    if let Err(e) = guest_mkdir(&vm, dir).await {
+        post_text(ctx, codeblock(&format!("mkdir failed: {}", e))).await?;
+        return Ok(());
+    }
+    let dest = format!("{}/{}", dir.trim_end_matches('/'), name);
+    let tmp = format!("/tmp/artixy-up-{}.b64", random_suffix());
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let mut first = true;
+    for piece in b64.as_bytes().chunks(512 * 1024) {
+        let piece = String::from_utf8_lossy(piece).into_owned();
+        let op = if first { ">" } else { ">>" };
+        first = false;
+        let script = format!("printf '%s' '{piece}' {op} {}", sh_escape(&tmp));
+        let rc = guest_exec(&vm, "/bin/bash", &["-c", &script], false, 30).await;
+        let (code, _, _) = match rc {
+            Err(e) if e.to_string().contains("No such file") => {
+                guest_exec(&vm, "/bin/sh", &["-c", &script], false, 30).await?
+            }
+            other => other?,
+        };
+        if code != 0 {
+            let _ = guest_exec(&vm, "/bin/rm", &["-f", &tmp], false, 10).await;
+            post_text(ctx, codeblock(&format!("upload failed (code {})", code))).await?;
+            return Ok(());
+        }
+    }
+    let script = format!(
+        "base64 -d {} > {} && rm -f {} && wc -c < {}",
+        sh_escape(&tmp),
+        sh_escape(&dest),
+        sh_escape(&tmp),
+        sh_escape(&dest)
+    );
+    let rc = guest_exec(&vm, "/bin/bash", &["-c", &script], true, 60).await;
+    let (code, out, _) = match rc {
+        Err(e) if e.to_string().contains("No such file") => {
+            guest_exec(&vm, "/bin/sh", &["-c", &script], true, 60).await?
+        }
+        other => other?,
+    };
+    if code != 0 {
+        let _ = guest_exec(&vm, "/bin/rm", &["-f", &tmp], false, 10).await;
+        post_text(ctx, codeblock(&format!("decode failed (code {})", code))).await?;
+        return Ok(());
+    }
+    let landed: u64 = out.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    if landed != bytes.len() as u64 {
+        post_text(ctx, codeblock(&format!("size mismatch: sent {} but landed {}", bytes.len(), landed))).await?;
+        return Ok(());
+    }
+    let mut suffix = String::new();
+    if let Some(u) = linked_user(ctx.data(), ctx.author().id.get()).await.filter(|u| valid_runas(u)) {
+        let rc = guest_exec(&vm, "/usr/bin/chown", &[&format!("{u}:"), &dest], false, 15).await;
+        let rc = match rc {
+            Err(e) if e.to_string().contains("No such file") => {
+                guest_exec(&vm, "/bin/chown", &[&format!("{u}:"), &dest], false, 15).await
+            }
+            other => other,
+        };
+        if !matches!(rc, Ok((0, _, _))) {
+            suffix = " (root-owned, use sudo)".to_string();
+        }
+    }
+    post_text(ctx, format!("uploaded `{}` ({} bytes) to `{}`{}.", name, bytes.len(), dest, suffix)).await?;
+    Ok(())
+}
+
 #[poise::command(
     slash_command,
     prefix_command,
@@ -694,32 +825,6 @@ pub(crate) async fn status(ctx: Context<'_>) -> Result<(), Error> {
     post_text(ctx, format!("`{}`: {} | {}", vm, state.trim(), agent))
         .await?;
     Ok(())
-}
-
-#[poise::command(
-    slash_command,
-    prefix_command,
-    install_context = "Guild|User",
-    interaction_context = "Guild|BotDm|PrivateChannel"
-)]
-pub(crate) async fn useradd(
-    ctx: Context<'_>,
-    #[description = "User to authorize"] user: serenity::User,
-) -> Result<(), Error> {
-    do_useradd(ctx, &user).await
-}
-
-#[poise::command(
-    slash_command,
-    prefix_command,
-    install_context = "Guild|User",
-    interaction_context = "Guild|BotDm|PrivateChannel"
-)]
-pub(crate) async fn userdel(
-    ctx: Context<'_>,
-    #[description = "User to remove"] user: serenity::User,
-) -> Result<(), Error> {
-    do_userdel(ctx, &user).await
 }
 
 pub(crate) const BOOT_ART: &str = r"          .        :-------:
@@ -911,14 +1016,28 @@ pub(crate) async fn purge_replies(
     Ok(())
 }
 
-#[poise::command(
-    slash_command,
-    prefix_command,
-    install_context = "Guild|User",
-    interaction_context = "Guild|BotDm|PrivateChannel"
-)]
-pub(crate) async fn users(ctx: Context<'_>) -> Result<(), Error> {
-    do_users(ctx).await
+pub(crate) enum UserReq {
+    Add(u64),
+    Remove(u64),
+    List,
+    Invalid,
+}
+
+pub(crate) fn parse_user_args(s: &str) -> UserReq {
+    let mut parts = s.split_whitespace();
+    let verb = parts.next().unwrap_or("").to_ascii_lowercase();
+    match verb.as_str() {
+        "list" if parts.next().is_none() => UserReq::List,
+        "add" | "remove" | "del" => {
+            let target = parts.next().unwrap_or("");
+            match (parse_target_id(target), parts.next()) {
+                (Some(uid), None) if verb == "add" => UserReq::Add(uid),
+                (Some(uid), None) => UserReq::Remove(uid),
+                _ => UserReq::Invalid,
+            }
+        }
+        _ => UserReq::Invalid,
+    }
 }
 
 #[poise::command(
@@ -927,47 +1046,37 @@ pub(crate) async fn users(ctx: Context<'_>) -> Result<(), Error> {
     install_context = "Guild|User",
     interaction_context = "Guild|BotDm|PrivateChannel"
 )]
-pub(crate) async fn userlist(ctx: Context<'_>) -> Result<(), Error> {
-    do_users(ctx).await
-}
-
-#[poise::command(
-    slash_command,
-    prefix_command,
-    subcommands("add", "del"),
-    install_context = "Guild|User",
-    interaction_context = "Guild|BotDm|PrivateChannel"
-)]
-pub(crate) async fn user(ctx: Context<'_>) -> Result<(), Error> {
-    post_text(ctx, "Usage: `;user add <discord id> [linuxname]` or `;user del <discord id>`.")
-        .await?;
-    Ok(())
-}
-
-#[poise::command(
-    slash_command,
-    prefix_command,
-    install_context = "Guild|User",
-    interaction_context = "Guild|BotDm|PrivateChannel"
-)]
-pub(crate) async fn add(
+pub(crate) async fn user(
     ctx: Context<'_>,
-    #[description = "User to authorize"] user: serenity::User,
+    #[description = "add @user | remove @user | list"]
+    #[rest]
+    args: String,
 ) -> Result<(), Error> {
-    do_useradd(ctx, &user).await
-}
-
-#[poise::command(
-    slash_command,
-    prefix_command,
-    install_context = "Guild|User",
-    interaction_context = "Guild|BotDm|PrivateChannel"
-)]
-pub(crate) async fn del(
-    ctx: Context<'_>,
-    #[description = "User to remove"] user: serenity::User,
-) -> Result<(), Error> {
-    do_userdel(ctx, &user).await
+    match parse_user_args(&args) {
+        UserReq::List => do_users(ctx).await,
+        UserReq::Add(uid) => {
+            match serenity::UserId::new(uid).to_user(ctx.http()).await {
+                Ok(u) => do_useradd(ctx, &u).await,
+                Err(_) => {
+                    post_text(ctx, "User not found — bad ID or I cannot see them.").await?;
+                    Ok(())
+                }
+            }
+        }
+        UserReq::Remove(uid) => {
+            match serenity::UserId::new(uid).to_user(ctx.http()).await {
+                Ok(u) => do_userdel(ctx, &u).await,
+                Err(_) => {
+                    post_text(ctx, "User not found — bad ID or I cannot see them.").await?;
+                    Ok(())
+                }
+            }
+        }
+        UserReq::Invalid => {
+            post_text(ctx, "Usage: `/user add @user`, `/user remove @user` or `/user list`.").await?;
+            Ok(())
+        }
+    }
 }
 
 pub(crate) async fn uname(http: &serenity::Http, uid: u64) -> String {
@@ -996,7 +1105,7 @@ pub(crate) async fn do_users(ctx: Context<'_>) -> Result<(), Error> {
         uname(ctx.http(), owner).await
     );
     if pairs.is_empty() {
-        msg.push_str(" none yet — owner runs `/useradd @user`");
+        msg.push_str(" none yet — owner runs `/user add @user`");
     } else {
         for (u, n) in pairs {
             let name = uname(ctx.http(), u).await;
@@ -1109,7 +1218,7 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
         }
     }
     if !wait_agent(&vm, 60).await {
-            post_text(ctx, format!("Authorized `{}` in the bot, but the guest agent is silent — no Linux account created. Install `qemu-guest-agent` in Artix, then rerun `;useradd <@{}> {}`.", uid, uid, name)).await?;
+            post_text(ctx, format!("Authorized `{}` in the bot, but the guest agent is silent — no Linux account created. Install `qemu-guest-agent` in Artix, then rerun `/user add @user`.", uid)).await?;
         return Ok(());
     }
     let mut rc = guest_exec(&vm, "/usr/bin/useradd", &["-m", "-s", "/bin/bash", &name], false, 30).await;
@@ -1175,7 +1284,7 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
         .await?;
     } else {
         post_text(ctx, format!(
-            "added user \"{}\" linked to `{}` — account created, but passwordless sudo failed for: `{}`. Re-run `/useradd` once the guest is healthy.",
+            "added user \"{}\" linked to `{}` — account created, but passwordless sudo failed for: `{}`. Re-run `/user add @user` once the guest is healthy.",
             name,
             uid,
             sudo_failed.join("`, `")
