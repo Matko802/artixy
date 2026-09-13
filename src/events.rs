@@ -157,10 +157,7 @@ pub(crate) async fn event_handler(
                 if trimmed.is_empty() {
                     return Ok(());
                 }
-                let payload = match crate::live::terminal_key(trimmed) {
-                    Some(key) => key,
-                    None => trimmed.to_string(),
-                };
+                let payload = crate::live::expand_typed_input(trimmed);
                 let runas = linked_user(data, id).await;
                 let ok =
                     crate::live::forward_terminal_input(&data.vm, &fifo, runas.as_deref(), &payload).await;

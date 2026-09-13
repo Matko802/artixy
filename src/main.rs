@@ -489,6 +489,18 @@ mod tests {
     }
 
     #[test]
+    fn typed_input_mixes_keys_and_text() {
+        assert_eq!(crate::live::expand_typed_input(";enter hello"), "\rhello");
+        assert_eq!(crate::live::expand_typed_input(";up 3"), "\x1b[A".repeat(3));
+        assert_eq!(crate::live::expand_typed_input(";up ;down hi"), "\x1b[A\x1b[Bhi");
+        assert_eq!(crate::live::expand_typed_input(";ctrl+c ls"), "\x03ls");
+        assert_eq!(crate::live::expand_typed_input("echo a;up"), "echo a;up");
+        assert_eq!(crate::live::expand_typed_input("use ;enter 2 times"), "use ;enter 2 times");
+        assert_eq!(crate::live::expand_typed_input("ls\\n;enter pwd"), "ls\n\rpwd");
+        assert_eq!(crate::live::expand_typed_input("  spaced   out  "), "  spaced   out  ");
+    }
+
+    #[test]
     fn tool_path_finds_shell_and_rejects_junk() {
         let sh = tool_path("sh");
         assert!(sh.is_some(), "sh must resolve even with a minimal PATH");

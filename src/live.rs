@@ -169,12 +169,26 @@ pub(crate) fn pending_queries(output: &str, answered_kitty: bool, answered_da: b
     found.sort();
     found.into_iter().map(|(_, answer)| answer).collect()
 }
+const MAX_KEY_REPEAT: u32 = 100;
 pub(crate) fn terminal_key(text: &str) -> Option<String> {
-    const MAX_REPEAT: u32 = 100;
     let mut parts = text.split_whitespace();
-    let first = parts.next()?;
-    let lower = first.to_ascii_lowercase();
-    let base = if lower.starts_with(";ctrl+") {
+    let base = key_base(parts.next()?)?;
+    let count = match parts.next() {
+        None => 1,
+        Some(n) => {
+            let n: u32 = n.parse().ok()?;
+            if n == 0 || n > MAX_KEY_REPEAT || parts.next().is_some() {
+                return None;
+            }
+            n
+        }
+    };
+    Some(base.repeat(count as usize))
+}
+
+fn key_base(word: &str) -> Option<String> {
+    let lower = word.to_ascii_lowercase();
+    if lower.starts_with(";ctrl+") {
         let suffix = &lower[6..];
         if suffix.len() == 1 {
             let ch = suffix.chars().next()?;
@@ -182,44 +196,71 @@ pub(crate) fn terminal_key(text: &str) -> Option<String> {
                 return None;
             }
             let code = (ch as u8 - b'a' + 1) as char;
-            code.to_string()
-        } else {
-            match suffix {
-                "return" => "\x7f".to_string(),
-                "space" => "\x00".to_string(),
-                "enter" => "\n".to_string(),
-                "esc" => "\x1b".to_string(),
-                "up" => "\x1b[1;5A".to_string(),
-                "down" => "\x1b[1;5B".to_string(),
-                "right" => "\x1b[1;5C".to_string(),
-                "left" => "\x1b[1;5D".to_string(),
-                _ => return None,
+            return Some(code.to_string());
+        }
+        return match suffix {
+            "return" => Some("\x7f".to_string()),
+            "space" => Some("\x00".to_string()),
+            "enter" => Some("\n".to_string()),
+            "esc" => Some("\x1b".to_string()),
+            "up" => Some("\x1b[1;5A".to_string()),
+            "down" => Some("\x1b[1;5B".to_string()),
+            "right" => Some("\x1b[1;5C".to_string()),
+            "left" => Some("\x1b[1;5D".to_string()),
+            _ => None,
+        };
+    }
+    match lower.as_str() {
+        ";return" => Some("\x7f".to_string()),
+        ";space" => Some(" ".to_string()),
+        ";enter" => Some("\r".to_string()),
+        ";esc" => Some("\x1b".to_string()),
+        ";up" => Some("\x1b[A".to_string()),
+        ";down" => Some("\x1b[B".to_string()),
+        ";right" => Some("\x1b[C".to_string()),
+        ";left" => Some("\x1b[D".to_string()),
+        _ => None,
+    }
+}
+pub(crate) fn unescape_typed_input(text: &str) -> String {
+    text.replace("\\n", "\n")
+}
+fn expand_line(line: &str) -> String {
+    let mut words = line.split_whitespace().peekable();
+    match words.peek() {
+        Some(w) if key_base(w).is_some() => {}
+        _ => return line.to_string(),
+    }
+    let mut out = String::new();
+    while let Some(word) = words.next() {
+        match key_base(word) {
+            None => {
+                let off = word.as_ptr() as usize - line.as_ptr() as usize;
+                out.push_str(&line[off..]);
+                break;
+            }
+            Some(base) => {
+                let mut count = 1u32;
+                if let Some(&nxt) = words.peek() {
+                    if let Ok(n) = nxt.parse::<u32>() {
+                        if n >= 1 && n <= MAX_KEY_REPEAT {
+                            count = n;
+                            words.next();
+                        }
+                    }
+                }
+                out.push_str(&base.repeat(count as usize));
             }
         }
-    } else {
-        match lower.as_str() {
-            ";return" => "\x7f".to_string(),
-            ";space" => " ".to_string(),
-            ";enter" => "\r".to_string(),
-            ";esc" => "\x1b".to_string(),
-            ";up" => "\x1b[A".to_string(),
-            ";down" => "\x1b[B".to_string(),
-            ";right" => "\x1b[C".to_string(),
-            ";left" => "\x1b[D".to_string(),
-            _ => return None,
-        }
-    };
-    let count = match parts.next() {
-        None => 1,
-        Some(n) => {
-            let n: u32 = n.parse().ok()?;
-            if n == 0 || n > MAX_REPEAT || parts.next().is_some() {
-                return None;
-            }
-            n
-        }
-    };
-    Some(base.repeat(count as usize))
+    }
+    out
+}
+pub(crate) fn expand_typed_input(text: &str) -> String {
+    unescape_typed_input(text)
+        .split('\n')
+        .map(expand_line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 pub(crate) async fn forward_terminal_input(
     vm: &str,
