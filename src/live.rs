@@ -32,15 +32,34 @@ const LIVE_FRAME_BYTES: &str = "200000";
 
 const GUEST_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH";
 
-pub(crate) fn build_runner(shell: &str, b64: &str, out_f: &str, code_f: &str, input: &str) -> String {
+pub(crate) fn build_runner(
+    shell: &str,
+    b64: &str,
+    out_f: &str,
+    code_f: &str,
+    input: &str,
+    runas: Option<&str>,
+) -> String {
     use crate::termrender::{TERM_COLS, TERM_ROWS};
+    // Guest-exec inherits qemu-ga's cwd (often / or a root-owned service dir
+    // like /etc/dinit.d), and plain `su user` keeps root's $HOME. Both break
+    // builds: `git clone` can't mkdir and `makepkg` refuses with
+    // "You do not have write permission for $BUILDDIR".
+    // So the inner shell always cds somewhere writable first. With a login
+    // `su -` (see live_run) ~ and $HOME already point at the user's home;
+    // the `cd ~user` prefix covers non-login fallbacks too.
+    let home_cd = match runas.filter(|u| valid_runas(u)) {
+        Some(u) => format!("cd ~{u} 2>/dev/null || cd \"$HOME\" 2>/dev/null || cd /tmp; "),
+        None => "cd \"$HOME\" 2>/dev/null || cd /tmp; ".to_string(),
+    };
     format!(
-        "export CMD_DATA=\"$(echo {b64} | base64 -d)\"; if command -v script >/dev/null 2>&1; then script -qec \"export TERM=xterm-256color; stty cols {cols} rows {rows}; {shell} -c 'export PATH={path}; eval \\\"\\$CMD_DATA\\\"'\" /dev/null <> {input}; else {shell} -c 'export PATH={path}; eval \"$CMD_DATA\"' <> {input}; fi > {out_f} 2>&1; echo $? > {code_f}",
+        "export CMD_DATA=\"$(echo {b64} | base64 -d)\"; if command -v script >/dev/null 2>&1; then script -qec \"export TERM=xterm-256color; stty cols {cols} rows {rows}; {shell} -c 'export PATH={path}; {home_cd}eval \\\"\\$CMD_DATA\\\"'\" /dev/null <> {input}; else {shell} -c 'export PATH={path}; {home_cd}eval \"$CMD_DATA\"' <> {input}; fi > {out_f} 2>&1; echo $? > {code_f}",
         b64 = b64,
         cols = TERM_COLS,
         rows = TERM_ROWS,
         shell = shell,
         path = GUEST_PATH,
+        home_cd = home_cd,
         input = input,
         out_f = out_f,
         code_f = code_f,
@@ -370,17 +389,20 @@ pub(crate) async fn live_run(
     }
     let b64 = base64::engine::general_purpose::STANDARD.encode(cmd.as_bytes());
     let input = in_f.as_deref().unwrap_or("/dev/null");
-    let script = build_runner("bash", &b64, &out_f, &code_f, input);
-    let script_sh = build_runner("sh", &b64, &out_f, &code_f, input);
+    let script = build_runner("bash", &b64, &out_f, &code_f, input, runas.as_deref());
+    let script_sh = build_runner("sh", &b64, &out_f, &code_f, input, runas.as_deref());
+    // `su -` (login) sets HOME/USER and cds into the user's home. Plain
+    // `su user` keeps qemu-ga's cwd (e.g. /etc/dinit.d) and HOME=/root,
+    // which breaks git/makepkg with "Permission denied" / bad $BUILDDIR.
     let (lpath, largs): (&str, Vec<&str>) = match &runas {
-        Some(u) => ("su", vec![u.as_str(), "-s", "/bin/bash", "-c", &script]),
+        Some(u) => ("su", vec!["-", u.as_str(), "-s", "/bin/bash", "-c", &script]),
         None => ("/bin/bash", vec!["-c", &script]),
     };
     let launched = guest_launch_raw(&vm, lpath, &largs, false).await;
     let launched = match launched {
         Err(e) if e.to_string().contains("No such file") => match &runas {
             Some(u) => {
-                guest_launch_raw(&vm, "su", &[u.as_str(), "-s", "/bin/sh", "-c", &script_sh], false)
+                guest_launch_raw(&vm, "su", &["-", u.as_str(), "-s", "/bin/sh", "-c", &script_sh], false)
                     .await
             }
             None => guest_launch_raw(&vm, "/bin/sh", &["-c", &script_sh], false).await,
