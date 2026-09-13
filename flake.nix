@@ -3,18 +3,19 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-    crane.url = "github:ipetkov/crane";
   };
 
   outputs =
-    { self, nixpkgs, crane }:
+    { self, nixpkgs }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f (nixpkgs.legacyPackages.${system}));
 
-      mkArtixy = pkgs: mold:
-        let
-          craneLib = crane.mkLib pkgs;
+      artixy =
+        { pkgs, mold }:
+        pkgs.rustPlatform.buildRustPackage {
+          pname = "artixy";
+          version = "0.1.0";
           src = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
@@ -24,20 +25,17 @@
               ./imgs
             ];
           };
-          # cache deps separately — src changes rebuild only artixy, not 243 crates
-          cargoArtifacts = craneLib.buildDepsOnly {
-            inherit src;
-            strictDeps = true;
-          };
-        in craneLib.buildPackage {
-          inherit src cargoArtifacts;
-          strictDeps = true;
+          cargoLock.lockFile = ./Cargo.lock;
           nativeBuildInputs = [ mold ];
           RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
-          doCheck = false;
+          meta = {
+            mainProgram = "artixy";
+            description = "Discord bot managing an Artix VM via libvirt";
+            homepage = "https://github.com/Matko802/artixy";
+            license = pkgs.lib.licenses.mit;
+            platforms = pkgs.lib.platforms.linux;
+          };
         };
-
-      artixy = { pkgs, mold }: mkArtixy pkgs mold;
     in
     {
       packages = forAllSystems (pkgs:
