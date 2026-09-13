@@ -170,6 +170,7 @@ pub(crate) fn pending_queries(output: &str, answered_kitty: bool, answered_da: b
     found.into_iter().map(|(_, answer)| answer).collect()
 }
 const MAX_KEY_REPEAT: u32 = 100;
+#[allow(dead_code)]
 pub(crate) fn terminal_key(text: &str) -> Option<String> {
     let mut parts = text.split_whitespace();
     let base = key_base(parts.next()?)?;
