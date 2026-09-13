@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod events;
+mod kitty;
 mod live;
 mod pngencode;
 mod scrub;
@@ -225,7 +226,7 @@ mod tests {
             crate::termrender::system_font_bytes("DejaVu Sans Mono:weight=bold").unwrap_or_else(|| reg.clone());
         let fonts = TermFonts::load(&reg, &bold).expect("fonts parse");
         let mut region = None;
-        let png = render_terminal(&fonts, &raw, &mut region).expect("renders");
+        let png = render_terminal(&fonts, &raw, &std::collections::HashMap::new(), &mut region).expect("renders");
         std::fs::write("/tmp/termproof.png", &png).unwrap();
         eprintln!("rendered {} bytes, region {:?}", png.len(), region);
         assert!(png.len() > 20_000, "a real frame is not tiny");

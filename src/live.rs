@@ -308,14 +308,34 @@ async fn edit_final(
     edit_posted(poster, http, channel, target, content, files).await;
 }
 
+async fn kitty_file_blobs(
+    vm: &str,
+    text: &str,
+    cache: &mut std::collections::HashMap<Vec<u8>, Option<Vec<u8>>>,
+) {
+    if cache.len() > 32 {
+        return;
+    }
+    let mut fetched = 0;
+    for p in crate::kitty::needed_guest_files(text.as_bytes()) {
+        if cache.contains_key(&p) || fetched >= 4 {
+            continue;
+        }
+        fetched += 1;
+        let got = crate::vm::guest_file_b64(vm, &String::from_utf8_lossy(&p), 16_000_000).await;
+        cache.insert(p, got);
+    }
+}
+
 async fn live_message(
     fonts: Option<&TermFonts>,
     cmd: &str,
     output: &str,
+    kfiles: &std::collections::HashMap<Vec<u8>, Option<Vec<u8>>>,
     region: &mut Option<(u32, u32)>,
 ) -> (String, Vec<(String, Vec<u8>)>) {
     let caption = format!("$ {}", cmd);
-    match fonts.and_then(|f| crate::termrender::render_terminal(f, output.as_bytes(), region)) {
+    match fonts.and_then(|f| crate::termrender::render_terminal(f, output.as_bytes(), kfiles, region)) {
         Some(png) => (caption, vec![("live.png".to_string(), png)]),
         None => {
             let mut combined = caption.clone();
@@ -507,6 +527,8 @@ pub(crate) async fn live_run(
     let mut answer_fails: u8 = 0;
     let mut last_edit: Option<std::time::Instant> = None;
     let mut edit_fails: u8 = 0;
+    let mut kfiles: std::collections::HashMap<Vec<u8>, Option<Vec<u8>>> =
+        std::collections::HashMap::new();
     let (mut dsr_term, mut dsr_processor, dsr_writes) = crate::termrender::new_collecting_term();
     let mut prev_fetched = String::new();
     loop {
@@ -572,16 +594,18 @@ pub(crate) async fn live_run(
                         format!("{}\n{}", header, output.trim_end())
                     };
                     let is_long = combined.chars().count() > 1800;
+                    kitty_file_blobs(&vm, &full, &mut kfiles).await;
                     if is_long && fonts.is_some() {
                         let (text, files) =
-                            live_message(fonts.as_ref(), &cmd, &output, &mut region).await;
+                            live_message(fonts.as_ref(), &cmd, &output, &kfiles, &mut region).await;
                         edit_final(&poster, &http, channel, msg.id, text, files).await;
                     } else {
                         edit_final(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await;
                     }
                 } else {
+                    kitty_file_blobs(&vm, &full, &mut kfiles).await;
                     let (text, files) =
-                        live_message(fonts.as_ref(), &cmd, &output, &mut region).await;
+                        live_message(fonts.as_ref(), &cmd, &output, &kfiles, &mut region).await;
                     edit_final(&poster, &http, channel, msg.id, text, files).await;
                 }
                 cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
@@ -607,6 +631,15 @@ pub(crate) async fn live_run(
                                 }
                                 if answer_fails >= ANSWER_ATTEMPTS * 4 { break; }
                             }
+                            for probe in crate::kitty::graphics_query_answers(new_bytes.as_bytes()) {
+                                let text = String::from_utf8_lossy(&probe).into_owned();
+                                if forward_terminal_input(&vm, fifo, runas.as_deref(), &text).await {
+                                    eprintln!("live: answered kitty graphics probe in {}", out_f);
+                                } else {
+                                    answer_fails += 1;
+                                }
+                                if answer_fails >= ANSWER_ATTEMPTS * 4 { break; }
+                            }
                         }
                     }
                 }
@@ -617,8 +650,9 @@ pub(crate) async fn live_run(
                         continue;
                     }
                 }
+                kitty_file_blobs(&vm, &fetched, &mut kfiles).await;
                 let (text, files) =
-                    live_message(fonts.as_ref(), &cmd, &fetched, &mut region).await;
+                    live_message(fonts.as_ref(), &cmd, &fetched, &kfiles, &mut region).await;
                 if edit_posted(&poster, &http, channel, msg.id, text, files).await {
                     last_edit = Some(std::time::Instant::now());
                     edit_fails = 0;

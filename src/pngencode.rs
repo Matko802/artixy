@@ -127,3 +127,147 @@ pub(crate) fn encode_rgb_stored(width: u32, height: u32, rgb: &[u8]) -> Option<V
     chunk(&mut out, b"IEND", &[]);
     Some(out)
 }
+
+fn paeth(a: u8, b: u8, c: u8) -> u8 {
+    let (a, b, c) = (a as i32, b as i32, c as i32);
+    let p = a + b - c;
+    let pa = (p - a).abs();
+    let pb = (p - b).abs();
+    let pc = (p - c).abs();
+    if pa <= pb && pa <= pc {
+        a as u8
+    } else if pb <= pc {
+        b as u8
+    } else {
+        c as u8
+    }
+}
+
+pub(crate) fn decode_png_rgba(png: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    if png.len() < 8 || &png[..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    let mut i = 8usize;
+    let mut w = 0u32;
+    let mut h = 0u32;
+    let mut color = 0u8;
+    let mut seen_ihdr = false;
+    let mut idat: Vec<u8> = Vec::new();
+    while i + 8 <= png.len() {
+        let len = u32::from_be_bytes([png[i], png[i + 1], png[i + 2], png[i + 3]]) as usize;
+        let kind = [png[i + 4], png[i + 5], png[i + 6], png[i + 7]];
+        let ds = i + 8;
+        let de = ds.checked_add(len)?;
+        if de.checked_add(4)? > png.len() {
+            return None;
+        }
+        match &kind {
+            b"IHDR" => {
+                if len != 13 || seen_ihdr {
+                    return None;
+                }
+                w = u32::from_be_bytes([png[ds], png[ds + 1], png[ds + 2], png[ds + 3]]);
+                h = u32::from_be_bytes([png[ds + 4], png[ds + 5], png[ds + 6], png[ds + 7]]);
+                if png[ds + 8] != 8 || png[ds + 10] != 0 || png[ds + 11] != 0 || png[ds + 12] != 0 {
+                    return None;
+                }
+                color = png[ds + 9];
+                if !matches!(color, 0 | 2 | 4 | 6) {
+                    return None;
+                }
+                if w == 0 || h == 0 || w > 4096 || h > 4096 {
+                    return None;
+                }
+                seen_ihdr = true;
+            }
+            b"IDAT" => {
+                if !seen_ihdr {
+                    return None;
+                }
+                if idat.len().checked_add(len)? > 32_000_000 {
+                    return None;
+                }
+                idat.extend_from_slice(&png[ds..de]);
+            }
+            b"IEND" => break,
+            _ => {}
+        }
+        i = de + 4;
+    }
+    if !seen_ihdr || idat.is_empty() {
+        return None;
+    }
+    let ch = match color {
+        0 => 1usize,
+        2 => 3,
+        4 => 2,
+        6 => 4,
+        _ => return None,
+    };
+    let stride = (w as usize).checked_mul(ch)?;
+    let raw = miniz_oxide::inflate::decompress_to_vec_zlib(&idat).ok()?;
+    if raw.len() != (h as usize).checked_mul(stride + 1)? {
+        return None;
+    }
+    let mut px = vec![0u8; (h as usize).checked_mul(stride)?];
+    let mut prev = vec![0u8; stride];
+    for (row, line) in raw.chunks_exact(stride + 1).enumerate() {
+        let dst = &mut px[row * stride..(row + 1) * stride];
+        let src = &line[1..];
+        match line[0] {
+            0 => dst.copy_from_slice(src),
+            1 => {
+                for k in 0..stride {
+                    let a = if k >= ch { dst[k - ch] } else { 0 };
+                    dst[k] = src[k].wrapping_add(a);
+                }
+            }
+            2 => {
+                for k in 0..stride {
+                    dst[k] = src[k].wrapping_add(prev[k]);
+                }
+            }
+            3 => {
+                for k in 0..stride {
+                    let a = if k >= ch { dst[k - ch] } else { 0 };
+                    dst[k] = src[k].wrapping_add(((a as u16 + prev[k] as u16) / 2) as u8);
+                }
+            }
+            4 => {
+                for k in 0..stride {
+                    let a = if k >= ch { dst[k - ch] } else { 0 };
+                    let b = prev[k];
+                    let c = if k >= ch { prev[k - ch] } else { 0 };
+                    dst[k] = src[k].wrapping_add(paeth(a, b, c));
+                }
+            }
+            _ => return None,
+        }
+        prev.copy_from_slice(dst);
+    }
+    let rgba = match color {
+        6 => px,
+        2 => {
+            let mut o = Vec::with_capacity(px.len() / 3 * 4);
+            for p in px.chunks_exact(3) {
+                o.extend_from_slice(&[p[0], p[1], p[2], 0xff]);
+            }
+            o
+        }
+        4 => {
+            let mut o = Vec::with_capacity(px.len() / 2 * 4);
+            for p in px.chunks_exact(2) {
+                o.extend_from_slice(&[p[0], p[0], p[0], p[1]]);
+            }
+            o
+        }
+        _ => {
+            let mut o = Vec::with_capacity(px.len() * 4);
+            for &g in &px {
+                o.extend_from_slice(&[g, g, g, 0xff]);
+            }
+            o
+        }
+    };
+    Some((w, h, rgba))
+}

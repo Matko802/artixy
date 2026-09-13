@@ -26,7 +26,7 @@ const BG: [u8; 3] = [0x0b, 0x0e, 0x14];
 const FG: [u8; 3] = [0xe6, 0xe6, 0xe6];
 
 #[derive(Debug, Clone, Copy)]
-struct TermDims;
+pub(crate) struct TermDims;
 
 impl Dimensions for TermDims {
     fn total_lines(&self) -> usize {
@@ -277,6 +277,7 @@ fn blit(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn emulate_output(output: &[u8]) -> Term<VoidListener> {
     let mut term: Term<VoidListener> = Term::new(
         Config { scrolling_history: TERM_ROWS, ..Default::default() },
@@ -328,13 +329,90 @@ pub(crate) fn quantize_region(cols: usize, rows: usize, lock: Option<(u32, u32)>
     (w, h)
 }
 
+pub(crate) fn scale_rgba_nearest(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (dw as usize) * (dh as usize) * 4];
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return out;
+    }
+    if src.len() < (sw as usize) * (sh as usize) * 4 {
+        return out;
+    }
+    for y in 0..dh as usize {
+        let sy = (y as u64 * sh as u64 / dh as u64) as usize;
+        for x in 0..dw as usize {
+            let sx = (x as u64 * sw as u64 / dw as u64) as usize;
+            let s = (sy * sw as usize + sx) * 4;
+            let d = (y * dw as usize + x) * 4;
+            out[d..d + 4].copy_from_slice(&src[s..s + 4]);
+        }
+    }
+    out
+}
+
+fn blit_rgba(
+    img: &mut [u8],
+    w: u32,
+    h: u32,
+    x0: i32,
+    y0: i32,
+    bw: i32,
+    bh: i32,
+    rgba: &[u8],
+) {
+    if bw <= 0 || bh <= 0 || rgba.is_empty() {
+        return;
+    }
+    for (i, px) in rgba.chunks_exact(4).enumerate() {
+        let a = px[3] as u32;
+        if a == 0 {
+            continue;
+        }
+        let bx = x0 + (i as i32 % bw);
+        let by = y0 + (i as i32 / bw);
+        if bx < 0 || by < 0 || bx >= w as i32 || by >= h as i32 {
+            continue;
+        }
+        let p = ((by as u32 * w + bx as u32) * 3) as usize;
+        if a == 255 {
+            img[p..p + 3].copy_from_slice(&px[..3]);
+        } else {
+            for c in 0..3 {
+                img[p + c] = ((px[c] as u32 * a + img[p + c] as u32 * (255 - a)) / 255) as u8;
+            }
+        }
+    }
+}
+
 pub(crate) fn render_terminal(
     fonts: &TermFonts,
     output: &[u8],
+    files: &std::collections::HashMap<Vec<u8>, Option<Vec<u8>>>,
     region: &mut Option<(u32, u32)>,
 ) -> Option<Vec<u8>> {
-    let term = emulate_output(output);
+    let mut term: Term<VoidListener> = Term::new(
+        Config { scrolling_history: TERM_ROWS, ..Default::default() },
+        &TermDims,
+        VoidListener,
+    );
+    let mut processor: vte::ansi::Processor = vte::ansi::Processor::new();
+    let images = crate::kitty::feed_with_kitty(
+        &mut term,
+        &mut processor,
+        output,
+        files,
+        fonts.cell_w,
+        fonts.cell_h,
+    );
     let (first, rows, cols) = content_region(&term);
+    let (mut rows, mut cols) = (rows, cols);
+    for im in &images {
+        let bottom = im.line - first as i32 + im.rows as i32;
+        if bottom <= 0 {
+            continue;
+        }
+        rows = rows.max(bottom as usize);
+        cols = cols.max(im.col + im.cols);
+    }
     let (cols_q, rows_q) = quantize_region(cols, rows, *region);
     *region = Some((cols_q, rows_q));
     let w = cols_q * fonts.cell_w + PAD * 2;
@@ -393,6 +471,9 @@ pub(crate) fn render_terminal(
             if ch == ' ' || ch.is_control() {
                 continue;
             }
+            if ('\u{10EEEE}'..='\u{10EFFF}').contains(&ch) {
+                continue;
+            }
             let font = if bold { &fonts.bold } else { &fonts.regular };
             let (m, bmp) = cache
                 .entry((ch, bold))
@@ -401,6 +482,23 @@ pub(crate) fn render_terminal(
             let baseline = cy + fonts.ascent;
             let gy = baseline - (m.ymin + m.height as i32);
             blit(&mut img, w, h, gx, gy, m.width as i32, m.height as i32, bmp, fg);
+        }
+    }
+    {
+        let mut order: Vec<&crate::kitty::KittyImage> = images.iter().collect();
+        order.sort_by_key(|im| im.z);
+        for im in order {
+            let dw = im.cols as u32 * fonts.cell_w;
+            let dh = im.rows as u32 * fonts.cell_h;
+            if dw == 0 || dh == 0 {
+                continue;
+            }
+            let scaled = scale_rgba_nearest(&im.rgba, im.pw, im.ph, dw, dh);
+            let ox = (im.cell_dx * fonts.cell_w as i64 + im.px_dx) as i32;
+            let oy = (im.cell_dy * fonts.cell_h as i64 + im.px_dy) as i32;
+            let ix = PAD as i32 + im.col as i32 * fonts.cell_w as i32 + ox;
+            let iy = y0 + (im.line - first as i32) * fonts.cell_h as i32 + oy;
+            blit_rgba(&mut img, w, h, ix, iy, dw as i32, dh as i32, &scaled);
         }
     }
     {

@@ -176,6 +176,25 @@ pub(crate) fn kill_tree_script(pid: i64) -> String {
     )
 }
 
+pub(crate) async fn guest_file_b64(vm: &str, path: &str, max_b64: usize) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    for bin in ["/usr/bin/base64", "/bin/base64"] {
+        match guest_exec(vm, bin, &["-w0", "--", path], true, 20).await {
+            Ok((0, o, _)) => {
+                if o.is_empty() || o.len() > max_b64 {
+                    return None;
+                }
+                return base64::engine::general_purpose::STANDARD
+                    .decode(o.trim_end())
+                    .ok();
+            }
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
 pub(crate) async fn guest_kill_tree(vm: &str, pid: i64) {
     let snippet = kill_tree_script(pid);
     let _ = guest_exec(vm, "/bin/bash", &["-c", &snippet], false, 15).await;
