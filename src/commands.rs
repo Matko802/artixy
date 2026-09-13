@@ -1016,17 +1016,14 @@ pub(crate) async fn purge_replies(
     Ok(())
 }
 
-#[poise::command(
-    slash_command,
-    prefix_command,
-    subcommands("add", "remove", "list"),
-    install_context = "Guild|User",
-    interaction_context = "Guild|BotDm|PrivateChannel"
-)]
-pub(crate) async fn user(ctx: Context<'_>) -> Result<(), Error> {
-    post_text(ctx, "Usage: `/user add @user`, `/user remove @user` or `/user list`.")
-        .await?;
-    Ok(())
+#[derive(Debug, Clone, Copy, PartialEq, poise::ChoiceParameter)]
+pub(crate) enum UserAction {
+    #[name = "add"]
+    Add,
+    #[name = "list"]
+    List,
+    #[name = "remove"]
+    Remove,
 }
 
 #[poise::command(
@@ -1035,34 +1032,24 @@ pub(crate) async fn user(ctx: Context<'_>) -> Result<(), Error> {
     install_context = "Guild|User",
     interaction_context = "Guild|BotDm|PrivateChannel"
 )]
-pub(crate) async fn add(
+pub(crate) async fn user(
     ctx: Context<'_>,
-    #[description = "User to authorize"] user: serenity::User,
+    #[description = "What to do"] action: UserAction,
+    #[description = "User for add/remove"] user: Option<serenity::User>,
 ) -> Result<(), Error> {
-    do_useradd(ctx, &user).await
-}
-
-#[poise::command(
-    slash_command,
-    prefix_command,
-    install_context = "Guild|User",
-    interaction_context = "Guild|BotDm|PrivateChannel"
-)]
-pub(crate) async fn remove(
-    ctx: Context<'_>,
-    #[description = "User to remove"] user: serenity::User,
-) -> Result<(), Error> {
-    do_userdel(ctx, &user).await
-}
-
-#[poise::command(
-    slash_command,
-    prefix_command,
-    install_context = "Guild|User",
-    interaction_context = "Guild|BotDm|PrivateChannel"
-)]
-pub(crate) async fn list(ctx: Context<'_>) -> Result<(), Error> {
-    do_users(ctx).await
+    match (action, user) {
+        (UserAction::Add, Some(u)) => do_useradd(ctx, &u).await,
+        (UserAction::Add, None) => {
+            post_text(ctx, "Pick a user: `/user action:add user:@user`.").await?;
+            Ok(())
+        }
+        (UserAction::Remove, Some(u)) => do_userdel(ctx, &u).await,
+        (UserAction::Remove, None) => {
+            post_text(ctx, "Pick a user: `/user action:remove user:@user`.").await?;
+            Ok(())
+        }
+        (UserAction::List, _) => do_users(ctx).await,
+    }
 }
 
 pub(crate) async fn uname(http: &serenity::Http, uid: u64) -> String {
