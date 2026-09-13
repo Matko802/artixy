@@ -108,12 +108,15 @@ pub(crate) async fn cleanup_live_files(vm: &str, out_f: &str, code_f: &str, in_f
     }
 }
 
-const KITTY_QUERY: &str = "\x1b[?u";
 const KITTY_ANSWER: &str = "\x1b[?0u";
-const DA_QUERY: &str = "\x1b[c";
 const DA_ANSWER: &str = "\x1b[?1;2c";
 const ANSWER_ATTEMPTS: u8 = 3;
+#[allow(dead_code)]
+const KITTY_QUERY: &str = "\x1b[?u";
+#[allow(dead_code)]
+const DA_QUERY: &str = "\x1b[c";
 
+#[allow(dead_code)]
 pub(crate) fn pending_queries(output: &str, answered_kitty: bool, answered_da: bool) -> Vec<&'static str> {
     let mut found: Vec<(usize, &'static str)> = Vec::new();
     if !answered_kitty {
@@ -132,16 +135,30 @@ pub(crate) fn pending_queries(output: &str, answered_kitty: bool, answered_da: b
 pub(crate) fn terminal_key(text: &str) -> Option<String> {
     const MAX_REPEAT: u32 = 100;
     let mut parts = text.split_whitespace();
-    let base: &str = match parts.next()? {
-        ".return" => "\x7f",
-        ".space" => " ",
-        ".enter" => "\r",
-        ".." => "\x1b",
-        ".up" => "\x1b[A",
-        ".down" => "\x1b[B",
-        ".right" => "\x1b[C",
-        ".left" => "\x1b[D",
-        _ => return None,
+    let first = parts.next()?;
+    let lower = first.to_ascii_lowercase();
+    let base = if lower.starts_with(";ctrl+") {
+        if lower.len() != 7 {
+            return None;
+        }
+        let ch = lower.chars().nth(6)?;
+        if !('a'..='z').contains(&ch) {
+            return None;
+        }
+        let code = (ch as u8 - b'a' + 1) as char;
+        code.to_string()
+    } else {
+        match lower.as_str() {
+            ";return" => "\x7f".to_string(),
+            ";space" => " ".to_string(),
+            ";enter" => "\r".to_string(),
+            ";esc" => "\x1b".to_string(),
+            ";up" => "\x1b[A".to_string(),
+            ";down" => "\x1b[B".to_string(),
+            ";right" => "\x1b[C".to_string(),
+            ";left" => "\x1b[D".to_string(),
+            _ => return None,
+        }
     };
     let count = match parts.next() {
         None => 1,
@@ -393,11 +410,11 @@ pub(crate) async fn live_run(
     };
     let mut first = true;
     let mut region: Option<(u32, u32)> = None;
-    let mut answered_kitty = false;
-    let mut answered_da = false;
     let mut answer_fails: u8 = 0;
     let mut last_hash: u64 = 0;
     let mut hashed_once = false;
+    let (mut dsr_term, mut dsr_processor, dsr_writes) = crate::termrender::new_collecting_term();
+    let mut prev_fetched = String::new();
     loop {
         let wait = if first { LIVE_QUICK_SECS } else { LIVE_POLL_SECS };
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
@@ -460,7 +477,14 @@ pub(crate) async fn live_run(
                     } else {
                         format!("{}\n{}", header, output.trim_end())
                     };
-                    edit_posted(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await;
+                    let is_long = combined.chars().count() > 1800;
+                    if is_long && fonts.is_some() {
+                        let (text, files) =
+                            live_message(fonts.as_ref(), &cmd, &output, &mut region).await;
+                        edit_posted(&poster, &http, channel, msg.id, text, files).await;
+                    } else {
+                        edit_posted(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await;
+                    }
                 } else {
                     let (text, files) =
                         live_message(fonts.as_ref(), &cmd, &output, &mut region).await;
@@ -471,22 +495,28 @@ pub(crate) async fn live_run(
             }
             None => {
                 if let Some(ref fifo) = in_f {
-                    if answer_fails < ANSWER_ATTEMPTS * 2 {
-                        for answer in pending_queries(&fetched, answered_kitty, answered_da) {
-                            let is_kitty = answer == KITTY_ANSWER;
-                            if forward_terminal_input(&vm, fifo, runas.as_deref(), answer).await {
-                                eprintln!("live: answered a terminal query in {}", out_f);
-                                if is_kitty {
-                                    answered_kitty = true;
+                    if answer_fails < ANSWER_ATTEMPTS * 4 {
+                        let new_bytes = crate::termrender::new_bytes_since(&prev_fetched, &fetched);
+                        if !new_bytes.is_empty() {
+                            dsr_processor.advance(&mut dsr_term, new_bytes.as_bytes());
+                            let pending: Vec<String> = {
+                                let mut w = dsr_writes.lock().unwrap();
+                                let v = w.clone();
+                                w.clear();
+                                v
+                            };
+                            for answer in pending {
+                                if forward_terminal_input(&vm, fifo, runas.as_deref(), &answer).await {
+                                    eprintln!("live: answered pty query in {}: {:?}", out_f, answer.escape_debug());
                                 } else {
-                                    answered_da = true;
+                                    answer_fails += 1;
                                 }
-                            } else {
-                                answer_fails += 1;
+                                if answer_fails >= ANSWER_ATTEMPTS * 4 { break; }
                             }
                         }
                     }
                 }
+                prev_fetched = fetched.clone();
                 use std::hash::{Hash, Hasher};
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 fetched.hash(&mut hasher);

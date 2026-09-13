@@ -1,14 +1,15 @@
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::{
-    event::VoidListener,
+    event::{Event, EventListener, VoidListener, WindowSize},
     grid::Dimensions,
     index::{Column, Line},
     term::{cell::Flags, Config, Term},
     vte::{
         self,
-        ansi::{Color, NamedColor},
+        ansi::{Color, NamedColor, Rgb},
     },
 };
 
@@ -39,6 +40,63 @@ impl Dimensions for TermDims {
     fn columns(&self) -> usize {
         TERM_COLS
     }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct CollectingListener {
+    pub writes: Arc<Mutex<Vec<String>>>,
+}
+
+impl EventListener for CollectingListener {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::PtyWrite(s) => self.writes.lock().unwrap().push(s),
+            Event::TextAreaSizeRequest(f) => {
+                let size = WindowSize {
+                    num_cols: TERM_COLS as u16,
+                    num_lines: TERM_ROWS as u16,
+                    cell_width: 10,
+                    cell_height: 20,
+                };
+                self.writes.lock().unwrap().push(f(size));
+            },
+            Event::ColorRequest(idx, f) => {
+                let rgb = Rgb { r: 0, g: 0, b: 0 };
+                let _ = idx;
+                self.writes.lock().unwrap().push(f(rgb));
+            },
+            _ => {},
+        }
+    }
+}
+
+pub(crate) fn new_collecting_term() -> (Term<CollectingListener>, vte::ansi::Processor, Arc<Mutex<Vec<String>>>) {
+    let writes = Arc::new(Mutex::new(Vec::new()));
+    let listener = CollectingListener { writes: writes.clone() };
+    let config = Config {
+        scrolling_history: TERM_ROWS,
+        kitty_keyboard: true,
+        ..Default::default()
+    };
+    let term = Term::new(config, &TermDims, listener);
+    let processor = vte::ansi::Processor::new();
+    (term, processor, writes)
+}
+
+pub(crate) fn new_bytes_since(prev: &str, cur: &str) -> String {
+    if cur.starts_with(prev) {
+        return cur[prev.len()..].to_string();
+    }
+    let max = prev.len().min(cur.len());
+    for k in (0..=max).rev() {
+        if k == 0 {
+            return cur.to_string();
+        }
+        if prev[prev.len() - k..] == cur[..k] {
+            return cur[k..].to_string();
+        }
+    }
+    cur.to_string()
 }
 
 pub(crate) struct TermFonts {
