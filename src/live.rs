@@ -29,7 +29,7 @@ pub(crate) const LIVE_TIMEOUT_SECS: u64 = 0; // 0 = no timeout, interactive apps
 pub(crate) const LIVE_POLL: std::time::Duration = std::time::Duration::from_millis(180);
 pub(crate) const LIVE_QUICK: std::time::Duration = std::time::Duration::from_millis(180);
 pub(crate) const LIVE_EDIT_MIN_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(2000);
+    std::time::Duration::from_millis(3000);
 pub(crate) const LIVE_EDIT_MAX_FAILS: u8 = 5;
 pub(crate) const LIVE_GUEST_MAX_FAILS: u8 = 15;
 const LIVE_FRAME_BYTES: &str = "200000";

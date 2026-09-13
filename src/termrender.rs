@@ -96,15 +96,19 @@ pub(crate) fn new_bytes_since(prev: &str, cur: &str) -> String {
         return cur[prev.len()..].to_string();
     }
     let max = prev.len().min(cur.len());
-    for k in (0..=max).rev() {
+    let mut k = max;
+    loop {
+        while k > 0 && (!prev.is_char_boundary(prev.len() - k) || !cur.is_char_boundary(k)) {
+            k -= 1;
+        }
         if k == 0 {
             return cur.to_string();
         }
         if prev[prev.len() - k..] == cur[..k] {
             return cur[k..].to_string();
         }
+        k -= 1;
     }
-    cur.to_string()
 }
 
 pub(crate) struct TermFonts {

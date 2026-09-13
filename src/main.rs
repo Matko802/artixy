@@ -508,6 +508,17 @@ mod tests {
     }
 
     #[test]
+    fn new_bytes_since_never_splits_utf8() {
+        assert_eq!(crate::termrender::new_bytes_since("a", "ťx"), "ťx");
+        assert_eq!(crate::termrender::new_bytes_since("abť", "bťcd"), "cd");
+        assert_eq!(crate::termrender::new_bytes_since("x░yz", "░yz12"), "12");
+        assert_eq!(crate::termrender::new_bytes_since("old", "old reused tail"), " reused tail");
+        assert_eq!(crate::termrender::new_bytes_since("", "fresh"), "fresh");
+        assert_eq!(crate::termrender::new_bytes_since("same", "same"), "");
+        assert_eq!(crate::termrender::new_bytes_since("abc", "xyz"), "xyz");
+    }
+
+    #[test]
     fn tabs_expand_to_spaces() {
         let out = sanitize_ansi("a\tb");
         assert_eq!(out, "a        b", "got {:?}", out);
@@ -697,8 +708,8 @@ mod tests {
     fn live_edits_are_throttled_and_tolerant() {
         assert_eq!(
             crate::live::LIVE_EDIT_MIN_INTERVAL.as_millis(),
-            2000,
-            "updates at most every 2s"
+            3000,
+            "updates at most every 3s"
         );
         assert!(
             crate::live::LIVE_EDIT_MAX_FAILS > 1,
