@@ -13,6 +13,12 @@ pub(crate) struct BotSettings {
     pub(crate) notify_channel: Option<u64>,
     #[serde(default = "war_default_off")]
     pub(crate) war_mode: bool,
+    #[serde(default = "sayas_default_off")]
+    pub(crate) sayas_enabled: bool,
+}
+
+fn sayas_default_off() -> bool {
+    false
 }
 
 impl Default for BotSettings {
@@ -20,6 +26,7 @@ impl Default for BotSettings {
         Self {
             notify_channel: None,
             war_mode: war_default_off(),
+            sayas_enabled: sayas_default_off(),
         }
     }
 }
@@ -60,6 +67,8 @@ pub(crate) struct FileConfig {
     pub(crate) vm_name: Option<String>,
     #[serde(default)]
     pub(crate) war_mode: bool,
+    #[serde(default = "sayas_default_off")]
+    pub(crate) sayas_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) notify_channel: Option<u64>,
     #[serde(default)]
@@ -101,6 +110,7 @@ pub(crate) async fn persist_runtime(data: &Data) -> Result<(), Error> {
         let s = data.settings.read().await;
         cfg.notify_channel = s.notify_channel;
         cfg.war_mode = s.war_mode;
+        cfg.sayas_enabled = s.sayas_enabled;
     }
     {
         let m = data.shells.read().await;
@@ -232,6 +242,7 @@ mod tests {
         assert!(c.blocked_ids.is_empty());
         assert!(c.webhook_urls.is_empty());
         assert!(!c.war_mode);
+        assert!(!c.sayas_enabled);
         assert!(c.managers.is_empty());
         assert!(c.linux.is_empty());
         assert!(c.shells.is_empty());
@@ -321,6 +332,7 @@ mod tests {
             discord_token: Some("tok".to_string()),
             vm_name: Some("artix".to_string()),
             war_mode: true,
+            sayas_enabled: true,
             notify_channel: Some(4),
             managers: vec![5],
             linux: [("5".to_string(), "sam".to_string())].into_iter().collect(),

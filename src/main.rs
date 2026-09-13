@@ -12,7 +12,7 @@ mod webhook;
 use poise::serenity_prelude as serenity;
 
 use crate::commands::{
-    botrestart, help, info, notify, ps, purge_replies, restart, run, say, send, shell, shot,
+    botrestart, help, info, notify, ps, purge_replies, restart, run, sayas, send, shell, shot,
     start, status, stop, user, useradd, userdel, userlist, users, warmode,
 };
 use crate::commands::BOOT_ART;
@@ -44,7 +44,7 @@ mod tests {
             shell(),
             botrestart(),
             run(),
-            say(),
+            sayas(),
             shot(),
             send(),
             notify(),
@@ -738,6 +738,7 @@ async fn main() {
         settings: tokio::sync::RwLock::new(BotSettings {
             notify_channel: file_config.notify_channel,
             war_mode: file_config.war_mode,
+            sayas_enabled: file_config.sayas_enabled,
         }),
         shells: tokio::sync::RwLock::new(file_config.shells.clone()),
     };
@@ -760,7 +761,7 @@ async fn main() {
                 shell(),
                 botrestart(),
                 run(),
-                say(),
+                sayas(),
                 shot(),
                 send(),
                 notify(),

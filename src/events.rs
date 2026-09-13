@@ -191,6 +191,46 @@ pub(crate) async fn event_handler(
         }
         return Ok(());
     }
+    if data.settings.read().await.sayas_enabled {
+        let content = new_message.content.trim().to_string();
+        if !content.is_empty()
+            && !content.starts_with('/')
+            && !content.starts_with(';')
+            && !content.ends_with(".ar")
+        {
+            let _ = new_message.delete(&ctx.http).await;
+            if content.chars().count() <= 2000 {
+                match &new_message.referenced_message {
+                    Some(target) => {
+                        let _ = target.reply(&ctx.http, &content).await;
+                    }
+                    None => {
+                        let _ = post_message(&ctx.http, new_message.channel_id, content, Vec::new()).await;
+                    }
+                }
+            } else {
+                let att = (
+                    attach_name(&content),
+                    cap_file_body(&strip_sgr(&content)).into_bytes(),
+                );
+                match &new_message.referenced_message {
+                    Some(target) => {
+                        let builder = serenity::CreateMessage::new()
+                            .add_file(serenity::CreateAttachment::bytes(att.1, att.0))
+                            .reference_message((new_message.channel_id, target.id));
+                        let _ = new_message
+                            .channel_id
+                            .send_message(&ctx.http, builder)
+                            .await;
+                    }
+                    None => {
+                        let _ = post_message(&ctx.http, new_message.channel_id, String::new(), vec![att]).await;
+                    }
+                }
+            }
+            return Ok(());
+        }
+    }
     let Some(text) = artixy_text(&new_message.content) else {
         return Ok(());
     };

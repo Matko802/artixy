@@ -6,7 +6,7 @@ use crate::{
     live::begin_run,
     util::{attach_name, cap_file_body, codeblock, deployed_via_nix, project_dir, random_suffix, strip_sgr, valid_runas},
     vm::{agent_ping, guest_exec, linked_user, virsh, wait_agent},
-    webhook::{is_own_message, mark_self_deleted, post_response, post_text},
+    webhook::{is_own_message, mark_self_deleted, post_message, post_response, post_text},
     Context, Error,
 };
 
@@ -57,7 +57,7 @@ pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
 \n**Who can use me**\n`/users` / `/userlist` — show owner + managers\n`/useradd @user` — owner only: links them and creates their Linux account in Artix (name from discord name).\n`/userdel @user` — owner only: revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
-\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply with `.` prefix to type into its live session (`.hello` sends text, `.;return` `.;space` `.;enter` `.;esc` `.;up` `.;down` `.;left` `.;right` `.;ctrl+w` send keys, add a number like `.;right 5` to repeat).\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/say <message> [reply_to]` — owner only: say something as me (reply_to takes a message ID or link)\n\
+\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply with `.` prefix to type into its live session (`.hello` sends text, `.;return` `.;space` `.;enter` `.;esc` `.;up` `.;down` `.;left` `.;right` `.;ctrl+w` send keys, add a number like `.;right 5` to repeat).\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to]` — owner only: `no args` toggles auto say-as-artix mode, `message` sends that as artix (reply_to = message ID/link). Output is ephemeral (only you see it).\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
 #[poise::command(
@@ -404,65 +404,160 @@ pub(crate) fn parse_message_ref(s: &str, current_channel: u64) -> Option<(u64, u
     install_context = "Guild|User",
     interaction_context = "Guild|BotDm|PrivateChannel"
 )]
-pub(crate) async fn say(
+pub(crate) async fn sayas(
     ctx: Context<'_>,
-    #[description = "Text to send as artixy"] message: String,
+    #[description = "Text to send as artix (leave empty to toggle auto mode)"] message: Option<String>,
     #[description = "Message ID or link to reply to"] reply_to: Option<String>,
 ) -> Result<(), Error> {
     if !is_owner(ctx).await {
-        post_text(ctx, "Owner only.").await?;
+        if matches!(ctx, poise::Context::Application(_)) {
+            let _ = ctx
+                .send(poise::CreateReply::default().content("Owner only.").ephemeral(true))
+                .await;
+        } else {
+            post_text(ctx, "Owner only.").await?;
+        }
         return Ok(());
     }
-    let text = message.trim_end().to_string();
+    let Some(raw) = message else {
+        let mut s = ctx.data().settings.write().await;
+        s.sayas_enabled = !s.sayas_enabled;
+        let enabled = s.sayas_enabled;
+        drop(s);
+        persist_runtime(ctx.data()).await?;
+        let msg = if enabled {
+            "Say-as-artix: **enabled** — your messages will now be sent as artix (toggle again to disable)."
+        } else {
+            "Say-as-artix: **disabled**."
+        };
+        if matches!(ctx, poise::Context::Application(_)) {
+            let _ = ctx
+                .send(poise::CreateReply::default().content(msg).ephemeral(true))
+                .await;
+        } else {
+            post_text(ctx, msg).await?;
+        }
+        return Ok(());
+    };
+    let text = raw.trim_end().to_string();
     if text.trim().is_empty() {
-        post_text(ctx, "Usage: `/say <message> [reply_to: message ID or link]`.").await?;
+        let mut s = ctx.data().settings.write().await;
+        s.sayas_enabled = !s.sayas_enabled;
+        let enabled = s.sayas_enabled;
+        drop(s);
+        persist_runtime(ctx.data()).await?;
+        let msg = if enabled {
+            "Say-as-artix: **enabled** — your messages will now be sent as artix (toggle again to disable)."
+        } else {
+            "Say-as-artix: **disabled**."
+        };
+        if matches!(ctx, poise::Context::Application(_)) {
+            let _ = ctx
+                .send(poise::CreateReply::default().content(msg).ephemeral(true))
+                .await;
+        } else {
+            post_text(ctx, msg).await?;
+        }
         return Ok(());
     }
-    maybe_defer(ctx).await;
+    let is_slash = matches!(ctx, poise::Context::Application(_));
+    if is_slash {
+        let _ = ctx.defer_ephemeral().await;
+    } else {
+        maybe_defer(ctx).await;
+    }
     let http = ctx.serenity_context().http.clone();
     let channel = ctx.channel_id();
     if let poise::Context::Prefix(pctx) = ctx {
         let _ = pctx.msg.delete(&http).await;
     }
-    if let Some(target) = reply_to {
-        let Some((ch_id, msg_id)) = parse_message_ref(&target, channel.get()) else {
-            post_text(ctx, "Couldn't read that reply target — give a message ID or a full message link.").await?;
-            return Ok(());
-        };
-        let ch = serenity::ChannelId::new(ch_id);
-        let target_msg = match ch.message(&http, serenity::MessageId::new(msg_id)).await {
-            Ok(m) => m,
-            Err(_) => {
-                post_text(ctx, "Couldn't fetch that message (wrong channel, or I can't see it).").await?;
+    let send_res: Result<(), Error> = async {
+        if let Some(target) = reply_to {
+            let Some((ch_id, msg_id)) = parse_message_ref(&target, channel.get()) else {
+                if is_slash {
+                    let _ = ctx
+                        .send(
+                            poise::CreateReply::default()
+                                .content("Couldn't read that reply target — give a message ID or a full message link.")
+                                .ephemeral(true),
+                        )
+                        .await;
+                } else {
+                    post_text(ctx, "Couldn't read that reply target — give a message ID or a full message link.").await?;
+                }
                 return Ok(());
+            };
+            let ch = serenity::ChannelId::new(ch_id);
+            let target_msg = match ch.message(&http, serenity::MessageId::new(msg_id)).await {
+                Ok(m) => m,
+                Err(_) => {
+                    if is_slash {
+                        let _ = ctx
+                            .send(
+                                poise::CreateReply::default()
+                                    .content("Couldn't fetch that message (wrong channel, or I can't see it).")
+                                    .ephemeral(true),
+                            )
+                            .await;
+                    } else {
+                        post_text(ctx, "Couldn't fetch that message (wrong channel, or I can't see it).").await?;
+                    }
+                    return Ok(());
+                }
+            };
+            if text.chars().count() <= 2000 {
+                if target_msg.reply(&http, &text).await.is_err() {
+                    if is_slash {
+                        let _ = ctx
+                            .send(
+                                poise::CreateReply::default()
+                                    .content("Reply failed (missing permission?).")
+                                    .ephemeral(true),
+                            )
+                            .await;
+                    } else {
+                        post_text(ctx, "Reply failed (missing permission?).").await?;
+                    }
+                }
+            } else {
+                let att = serenity::CreateAttachment::bytes(
+                    cap_file_body(&strip_sgr(&text)).into_bytes(),
+                    attach_name(&text),
+                );
+                let builder = serenity::CreateMessage::new()
+                    .add_file(att)
+                    .reference_message((ch, target_msg.id));
+                if ch.send_message(&http, builder).await.is_err() {
+                    if is_slash {
+                        let _ = ctx
+                            .send(
+                                poise::CreateReply::default()
+                                    .content("Reply failed (missing permission?).")
+                                    .ephemeral(true),
+                            )
+                            .await;
+                    } else {
+                        post_text(ctx, "Reply failed (missing permission?).").await?;
+                    }
+                }
             }
-        };
-        if text.chars().count() <= 2000 {
-            if target_msg.reply(&http, &text).await.is_err() {
-                post_text(ctx, "Reply failed (missing permission?).").await?;
-            }
+        } else if text.chars().count() <= 2000 {
+            let _ = post_message(&http, channel, text.clone(), Vec::new()).await;
         } else {
-            let att = serenity::CreateAttachment::bytes(
-                cap_file_body(&strip_sgr(&text)).into_bytes(),
-                attach_name(&text),
-            );
-            let builder = serenity::CreateMessage::new()
-                .add_file(att)
-                .reference_message((ch, target_msg.id));
-            if ch.send_message(&http, builder).await.is_err() {
-                post_text(ctx, "Reply failed (missing permission?).").await?;
-            }
+            let att = (attach_name(&text), cap_file_body(&strip_sgr(&text)).into_bytes());
+            let _ = post_message(&http, channel, String::new(), vec![att]).await;
         }
-    } else if text.chars().count() <= 2000 {
-        post_text(ctx, text).await?;
-        return Ok(());
-    } else {
-        let att = (attach_name(&text), cap_file_body(&strip_sgr(&text)).into_bytes());
-        post_response(ctx, String::new(), vec![att]).await?;
-        return Ok(());
+        Ok(())
     }
-    if let poise::Context::Application(actx) = ctx {
-        let _ = actx.interaction.delete_response(&http).await;
+    .await;
+    if is_slash {
+        let confirm = format!("Sent as artix in <#{}>.", channel.get());
+        let _ = ctx
+            .send(poise::CreateReply::default().content(confirm).ephemeral(true))
+            .await;
+        let _ = send_res;
+    } else {
+        send_res?;
     }
     Ok(())
 }
