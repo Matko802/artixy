@@ -154,9 +154,16 @@ pub(crate) async fn event_handler(
                     return Ok(());
                 }
                 let trimmed = new_message.content.trim_end();
-                let payload = match crate::live::terminal_key(trimmed) {
+                if !trimmed.starts_with('.') {
+                    return Ok(());
+                }
+                let stripped = trimmed[1..].trim_start();
+                if stripped.is_empty() {
+                    return Ok(());
+                }
+                let payload = match crate::live::terminal_key(stripped) {
                     Some(key) => key,
-                    None => format!("{}\n", trimmed),
+                    None => format!("{}\n", stripped),
                 };
                 let runas = linked_user(data, id).await;
                 let ok =
