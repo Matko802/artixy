@@ -475,13 +475,15 @@ mod tests {
 
     #[test]
     fn typed_input_mixes_keys_and_text() {
-        assert_eq!(crate::live::expand_typed_input(";enter hello"), "\rhello");
+        assert_eq!(crate::live::expand_typed_input(";enter hello"), "\r hello");
         assert_eq!(crate::live::expand_typed_input(";up 3"), "\x1b[A".repeat(3));
-        assert_eq!(crate::live::expand_typed_input(";up ;down hi"), "\x1b[A\x1b[Bhi");
-        assert_eq!(crate::live::expand_typed_input(";ctrl+c ls"), "\x03ls");
+        assert_eq!(crate::live::expand_typed_input(";up ;down hi"), "\x1b[A\x1b[B hi");
+        assert_eq!(crate::live::expand_typed_input(";ctrl+c ls"), "\x03 ls");
+        assert_eq!(crate::live::expand_typed_input("echo ;esc done"), "echo\x1b done");
+        assert_eq!(crate::live::expand_typed_input("press ;enter to submit"), "press\r to submit");
+        assert_eq!(crate::live::expand_typed_input("use ;enter 2 times"), "use\r\r times");
         assert_eq!(crate::live::expand_typed_input("echo a;up"), "echo a;up");
-        assert_eq!(crate::live::expand_typed_input("use ;enter 2 times"), "use ;enter 2 times");
-        assert_eq!(crate::live::expand_typed_input("ls\\n;enter pwd"), "ls\n\rpwd");
+        assert_eq!(crate::live::expand_typed_input("ls\\n;enter pwd"), "ls\n\r pwd");
         assert_eq!(crate::live::expand_typed_input("  spaced   out  "), "  spaced   out  ");
     }
 

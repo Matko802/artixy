@@ -228,33 +228,37 @@ pub(crate) fn unescape_typed_input(text: &str) -> String {
     text.replace("\\n", "\n")
 }
 fn expand_line(line: &str) -> String {
-    let mut words = line.split_whitespace().peekable();
-    match words.peek() {
-        Some(w) if key_base(w).is_some() => {}
-        _ => return line.to_string(),
-    }
+    let base = line.as_ptr() as usize;
     let mut out = String::new();
+    let mut words = line.split_whitespace().peekable();
+    let mut end = 0usize;
     while let Some(word) = words.next() {
+        let start = word.as_ptr() as usize - base;
+        let wend = start + word.len();
         match key_base(word) {
             None => {
-                let off = word.as_ptr() as usize - line.as_ptr() as usize;
-                out.push_str(&line[off..]);
-                break;
+                out.push_str(&line[end..start]);
+                out.push_str(word);
+                end = wend;
             }
-            Some(base) => {
+            Some(key) => {
                 let mut count = 1u32;
+                let mut stop = wend;
                 if let Some(&nxt) = words.peek() {
                     if let Ok(n) = nxt.parse::<u32>() {
                         if n >= 1 && n <= MAX_KEY_REPEAT {
                             count = n;
-                            words.next();
+                            let cw = words.next().unwrap();
+                            stop = cw.as_ptr() as usize - base + cw.len();
                         }
                     }
                 }
-                out.push_str(&base.repeat(count as usize));
+                end = stop;
+                out.push_str(&key.repeat(count as usize));
             }
         }
     }
+    out.push_str(&line[end..]);
     out
 }
 pub(crate) fn expand_typed_input(text: &str) -> String {
