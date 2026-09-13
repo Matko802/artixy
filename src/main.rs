@@ -643,6 +643,23 @@ mod tests {
     }
 
     #[test]
+    fn sudoers_script_grants_nopasswd_safely() {
+        let s = crate::commands::sudoers_script("matko802").expect("valid name");
+        assert!(s.contains("u='matko802'"), "pins user, got {:?}", s);
+        assert!(s.contains("ALL=(ALL) NOPASSWD: ALL"), "got {:?}", s);
+        assert!(s.contains("!requiretty"), "no-tty sudo, got {:?}", s);
+        assert!(s.contains("/etc/sudoers.d/"), "drop-in, got {:?}", s);
+        assert!(s.contains("chmod 0440"), "tight perms so sudo accepts it, got {:?}", s);
+        assert!(!s.contains("chmod 666") && !s.contains("chmod 777"), "never world-writable, got {:?}", s);
+        assert!(s.contains("visudo -c"), "validates, got {:?}", s);
+        assert!(s.contains("wheel"), "wheel/sudo group, got {:?}", s);
+        assert!(crate::commands::sudoers_script("root").is_none(), "never sudo root");
+        assert!(crate::commands::sudoers_script("a/b").is_none());
+        assert!(crate::commands::sudoers_script("a b").is_none());
+        assert!(crate::commands::sudoers_script("").is_none());
+    }
+
+    #[test]
     fn random_suffix_looks_unique_hex() {
         let a = random_suffix();
         let b = random_suffix();

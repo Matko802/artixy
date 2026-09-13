@@ -56,7 +56,7 @@ async fn require_vm(ctx: Context<'_>) -> Option<String> {
 pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
-\n**Who can use me**\n`/users` / `/userlist` — show owner + managers\n`/useradd @user` — owner only: links them and creates their Linux account in Artix (name from discord name).\n`/userdel @user` — owner only: revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
+\n**Who can use me**\n`/users` / `/userlist` — show owner + managers\n`/useradd @user` — owner only: links them, creates their Linux account in Artix (name from discord name) and grants passwordless sudo (re-run it to repair sudo for all linked users).\n`/userdel @user` — owner only: revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
 \n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to]` — owner only: `no args` toggles auto say-as-artix mode, `message` sends that as artix (reply_to = message ID/link). Output is ephemeral (only you see it).\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
@@ -1031,6 +1031,46 @@ pub(crate) fn sanitize_discord_name(s: &str) -> Option<String> {
     }
 }
 
+/// Bash snippet (run as root in the guest) that grants `user` passwordless
+/// sudo. Idempotent: safe to re-run for new and already-linked accounts.
+/// Returns `None` for invalid names (including `root`) so we never write a
+/// sudoers file with junk in it.
+pub(crate) fn sudoers_script(user: &str) -> Option<String> {
+    if !valid_runas(user) {
+        return None;
+    }
+    // valid_runas() only allows [a-z0-9_-] starting with [a-z_], so
+    // interpolating into single quotes below cannot break out.
+    Some(format!(
+        "set -eu; u='{u}'; f=\"/etc/sudoers.d/$u\"; \
+        printf '%s ALL=(ALL) NOPASSWD: ALL\\n' \"$u\" >\"$f.tmp\"; \
+        printf 'Defaults:%s !requiretty\\n' \"$u\" >>\"$f.tmp\"; \
+        chmod 0440 \"$f.tmp\"; mv -f \"$f.tmp\" \"$f\"; chmod 0440 \"$f\"; \
+        if command -v visudo >/dev/null 2>&1; then visudo -c -f \"$f\" >/dev/null; fi; \
+        if getent group wheel >/dev/null 2>&1; then usermod -aG wheel \"$u\" || true; \
+        elif getent group sudo >/dev/null 2>&1; then usermod -aG sudo \"$u\" || true; fi; true",
+        u = user,
+    ))
+}
+
+pub(crate) async fn ensure_passwordless_sudo(vm: &str, user: &str) -> Result<(), Error> {
+    let Some(script) = sudoers_script(user) else {
+        return Err(format!("refusing sudo for invalid linux name `{user}`").into());
+    };
+    let rc = guest_exec(vm, "/bin/bash", &["-c", &script], false, 15).await;
+    let (code, _, _) = match rc {
+        Err(e) if e.to_string().contains("No such file") => {
+            guest_exec(vm, "/bin/sh", &["-c", &script], false, 15).await?
+        }
+        other => other?,
+    };
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(format!("sudo setup for `{user}` failed (code {code})").into())
+    }
+}
+
 pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error> {
     if !is_owner(ctx).await {
         post_text(ctx, "Owner only.").await?;
@@ -1103,11 +1143,42 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
         a.linux.insert(uid.to_string(), name.clone());
     }
     persist_runtime(ctx.data()).await?;
-    post_text(ctx, format!(
-        "added user \"{}\" linked to `{}` — account created, no password set.",
-        name, uid
-    ))
-    .await?;
+    // Grant passwordless sudo to the new account plus every other linked
+    // account, so `sudo` stops complaining about missing permissions for
+    // anyone the bot manages (new users AND pre-existing ones).
+    let targets: Vec<String> = {
+        let a = ctx.data().allowed.read().await;
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for n in std::iter::once(&name).chain(a.linux.values()) {
+            if valid_runas(n) && seen.insert(n.clone()) {
+                out.push(n.clone());
+            }
+        }
+        out
+    };
+    let mut sudo_failed = Vec::new();
+    for t in &targets {
+        if let Err(e) = ensure_passwordless_sudo(&vm, t).await {
+            eprintln!("sudo setup for `{t}` failed: {e}");
+            sudo_failed.push(t.clone());
+        }
+    }
+    if sudo_failed.is_empty() {
+        post_text(ctx, format!(
+            "added user \"{}\" linked to `{}` — account created, passwordless sudo enabled.",
+            name, uid
+        ))
+        .await?;
+    } else {
+        post_text(ctx, format!(
+            "added user \"{}\" linked to `{}` — account created, but passwordless sudo failed for: `{}`. Re-run `/useradd` once the guest is healthy.",
+            name,
+            uid,
+            sudo_failed.join("`, `")
+        ))
+        .await?;
+    }
     Ok(())
 }
 
@@ -1127,6 +1198,10 @@ pub(crate) async fn do_userdel(ctx: Context<'_>, user: &serenity::User) -> Resul
         match linked {
             Some(n) if valid_runas(&n) => {
                 let Some(vm) = require_vm(ctx).await else { return Ok(()); };
+                // Drop their NOPASSWD drop-in first so a deleted user never
+                // keeps sudo (best-effort; userdel below is the real removal).
+                let dropin = format!("/etc/sudoers.d/{n}");
+                let _ = guest_exec(&vm, "/bin/rm", &["-f", &dropin], false, 10).await;
                 let mut rc = guest_exec(&vm, "/usr/sbin/userdel", &["-r", &n], false, 30).await;
                 if let Err(e) = &rc {
                     if e.to_string().contains("No such file") {

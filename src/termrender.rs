@@ -61,8 +61,16 @@ impl EventListener for CollectingListener {
                 self.writes.lock().unwrap().push(f(size));
             },
             Event::ColorRequest(idx, f) => {
-                let rgb = Rgb { r: 0, g: 0, b: 0 };
-                let _ = idx;
+                let rgb = match idx {
+                    256 => Rgb { r: FG[0], g: FG[1], b: FG[2] },
+                    257 => Rgb { r: BG[0], g: BG[1], b: BG[2] },
+                    258 => Rgb { r: FG[0], g: FG[1], b: FG[2] },
+                    0..=255 => {
+                        let c = indexed_color(idx as u8);
+                        Rgb { r: c[0], g: c[1], b: c[2] }
+                    },
+                    _ => Rgb { r: 0, g: 0, b: 0 },
+                };
                 self.writes.lock().unwrap().push(f(rgb));
             },
             _ => {},
