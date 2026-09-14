@@ -57,7 +57,7 @@ pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
 \n**Who can use me**\n`/user` — one command: `/user list` shows owner + managers, `/user add @user` (owner only) links them and creates their Linux account in Artix, `/user remove @user` (owner only) revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
-\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to]` — owner only: `no args` toggles auto say-as-artix mode, `message` sends that as artix (reply_to = message ID/link). Output is ephemeral (only you see it).\n\
+\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to] [file] [file2] [file3]` — owner only: `no args` toggles auto say-as-artix mode, `message` and/or attached files send as artix (reply_to = message ID/link). Files attached to the slash command (or to the `;sayas` prefix message) are re-uploaded as artix. Output is ephemeral (only you see it).\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
 #[poise::command(
@@ -398,6 +398,73 @@ pub(crate) fn parse_message_ref(s: &str, current_channel: u64) -> Option<(u64, u
     Some((current_channel, id))
 }
 
+/// Discord-side cap for a single re-uploaded attachment (~25MB).
+pub(crate) const SAYAS_MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
+
+pub(crate) fn safe_attach_name(raw: &str) -> String {
+    let base = std::path::Path::new(raw)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let clean: String = base
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+        .collect();
+    let clean = clean.trim_matches('.').to_string();
+    if clean.is_empty() {
+        "file.bin".to_string()
+    } else {
+        clean.chars().take(100).collect()
+    }
+}
+
+pub(crate) async fn download_sayas_files(
+    attachments: &[serenity::Attachment],
+) -> (Vec<(String, Vec<u8>)>, Vec<String>) {
+    let mut files = Vec::new();
+    let mut failed = Vec::new();
+    for a in attachments {
+        if a.size as u64 > SAYAS_MAX_FILE_BYTES {
+            failed.push(format!("`{}` is over ~25MB — skipped.", a.filename));
+            continue;
+        }
+        match a.download().await {
+            Ok(bytes) => {
+                if bytes.len() as u64 > SAYAS_MAX_FILE_BYTES {
+                    failed.push(format!("`{}` is over ~25MB — skipped.", a.filename));
+                    continue;
+                }
+                files.push((safe_attach_name(&a.filename), bytes));
+            }
+            Err(e) => {
+                failed.push(format!("`{}` download failed: {}", a.filename, e));
+            }
+        }
+    }
+    (files, failed)
+}
+
+async fn sayas_toggle(ctx: Context<'_>) -> Result<(), Error> {
+    let mut s = ctx.data().settings.write().await;
+    s.sayas_enabled = !s.sayas_enabled;
+    let enabled = s.sayas_enabled;
+    drop(s);
+    persist_runtime(ctx.data()).await?;
+    let msg = if enabled {
+        "Say-as-artix: **enabled** — your messages will now be sent as artix (toggle again to disable)."
+    } else {
+        "Say-as-artix: **disabled**."
+    };
+    if matches!(ctx, poise::Context::Application(_)) {
+        let _ = ctx
+            .send(poise::CreateReply::default().content(msg).ephemeral(true))
+            .await;
+    } else {
+        post_text(ctx, msg).await?;
+    }
+    Ok(())
+}
+
 #[poise::command(
     slash_command,
     prefix_command,
@@ -408,6 +475,9 @@ pub(crate) async fn sayas(
     ctx: Context<'_>,
     #[description = "Text to send as artix (leave empty to toggle auto mode)"] message: Option<String>,
     #[description = "Message ID or link to reply to"] reply_to: Option<String>,
+    #[description = "File to send as artix"] file: Option<serenity::Attachment>,
+    #[description = "Extra file to send as artix"] file2: Option<serenity::Attachment>,
+    #[description = "Extra file to send as artix"] file3: Option<serenity::Attachment>,
 ) -> Result<(), Error> {
     if !is_owner(ctx).await {
         if matches!(ctx, poise::Context::Application(_)) {
@@ -419,46 +489,22 @@ pub(crate) async fn sayas(
         }
         return Ok(());
     }
-    let Some(raw) = message else {
-        let mut s = ctx.data().settings.write().await;
-        s.sayas_enabled = !s.sayas_enabled;
-        let enabled = s.sayas_enabled;
-        drop(s);
-        persist_runtime(ctx.data()).await?;
-        let msg = if enabled {
-            "Say-as-artix: **enabled** — your messages will now be sent as artix (toggle again to disable)."
-        } else {
-            "Say-as-artix: **disabled**."
-        };
-        if matches!(ctx, poise::Context::Application(_)) {
-            let _ = ctx
-                .send(poise::CreateReply::default().content(msg).ephemeral(true))
-                .await;
-        } else {
-            post_text(ctx, msg).await?;
-        }
-        return Ok(());
-    };
-    let text = raw.trim_end().to_string();
-    if text.trim().is_empty() {
-        let mut s = ctx.data().settings.write().await;
-        s.sayas_enabled = !s.sayas_enabled;
-        let enabled = s.sayas_enabled;
-        drop(s);
-        persist_runtime(ctx.data()).await?;
-        let msg = if enabled {
-            "Say-as-artix: **enabled** — your messages will now be sent as artix (toggle again to disable)."
-        } else {
-            "Say-as-artix: **disabled**."
-        };
-        if matches!(ctx, poise::Context::Application(_)) {
-            let _ = ctx
-                .send(poise::CreateReply::default().content(msg).ephemeral(true))
-                .await;
-        } else {
-            post_text(ctx, msg).await?;
-        }
-        return Ok(());
+    // Attachments supplied either as slash options or stuck onto the `;sayas`
+    // prefix message itself. Presence (not download success) decides whether
+    // an otherwise-empty invocation toggles auto mode or sends files.
+    let mut pending: Vec<serenity::Attachment> = Vec::new();
+    for f in [file, file2, file3].into_iter().flatten() {
+        pending.push(f);
+    }
+    let mut prefix_files: Vec<serenity::Attachment> = Vec::new();
+    if let poise::Context::Prefix(pctx) = ctx {
+        prefix_files = pctx.msg.attachments.clone();
+    }
+    let has_files = !pending.is_empty() || !prefix_files.is_empty();
+    let raw_text = message.unwrap_or_default();
+    let text = raw_text.trim_end().to_string();
+    if text.trim().is_empty() && !has_files {
+        return sayas_toggle(ctx).await;
     }
     let is_slash = matches!(ctx, poise::Context::Application(_));
     if is_slash {
@@ -468,8 +514,44 @@ pub(crate) async fn sayas(
     }
     let http = ctx.serenity_context().http.clone();
     let channel = ctx.channel_id();
+    // Grab the bytes *before* deleting the prefix trigger so a `;sayas`
+    // message with uploads still forwards them.
+    let (mut files, mut problems) = download_sayas_files(&pending).await;
+    if !prefix_files.is_empty() {
+        let (mut pf, mut pp) = download_sayas_files(&prefix_files).await;
+        files.append(&mut pf);
+        problems.append(&mut pp);
+    }
+    // Long text can't ride in message content — ship it as a .txt sidecar
+    // alongside any user uploads.
+    let mut body = text.clone();
+    if body.chars().count() > 2000 {
+        files.insert(
+            0,
+            (
+                attach_name(&body),
+                cap_file_body(&strip_sgr(&body)).into_bytes(),
+            ),
+        );
+        body = String::new();
+    }
     if let poise::Context::Prefix(pctx) = ctx {
         let _ = pctx.msg.delete(&http).await;
+    }
+    if body.is_empty() && files.is_empty() {
+        let note = if problems.is_empty() {
+            "Nothing to send — attach a file or type a message.".to_string()
+        } else {
+            format!("Nothing to send — {} ", problems.join(" "))
+        };
+        if is_slash {
+            let _ = ctx
+                .send(poise::CreateReply::default().content(note).ephemeral(true))
+                .await;
+        } else {
+            post_text(ctx, note).await?;
+        }
+        return Ok(());
     }
     let send_res: Result<(), Error> = async {
         if let Some(target) = reply_to {
@@ -505,58 +587,55 @@ pub(crate) async fn sayas(
                     return Ok(());
                 }
             };
-            if text.chars().count() <= 2000 {
-                if target_msg.reply(&http, &text).await.is_err() {
-                    if is_slash {
-                        let _ = ctx
-                            .send(
-                                poise::CreateReply::default()
-                                    .content("Reply failed (missing permission?).")
-                                    .ephemeral(true),
-                            )
-                            .await;
-                    } else {
-                        post_text(ctx, "Reply failed (missing permission?).").await?;
-                    }
-                }
-            } else {
-                let att = serenity::CreateAttachment::bytes(
-                    cap_file_body(&strip_sgr(&text)).into_bytes(),
-                    attach_name(&text),
-                );
-                let builder = serenity::CreateMessage::new()
-                    .add_file(att)
-                    .reference_message((ch, target_msg.id));
-                if ch.send_message(&http, builder).await.is_err() {
-                    if is_slash {
-                        let _ = ctx
-                            .send(
-                                poise::CreateReply::default()
-                                    .content("Reply failed (missing permission?).")
-                                    .ephemeral(true),
-                            )
-                            .await;
-                    } else {
-                        post_text(ctx, "Reply failed (missing permission?).").await?;
-                    }
+            let mut builder =
+                serenity::CreateMessage::new().reference_message((ch, target_msg.id));
+            if !body.is_empty() {
+                builder = builder.content(&body);
+            }
+            for (name, bytes) in &files {
+                builder =
+                    builder.add_file(serenity::CreateAttachment::bytes(bytes.clone(), name.clone()));
+            }
+            if ch.send_message(&http, builder).await.is_err() {
+                if is_slash {
+                    let _ = ctx
+                        .send(
+                            poise::CreateReply::default()
+                                .content("Reply failed (missing permission?).")
+                                .ephemeral(true),
+                        )
+                        .await;
+                } else {
+                    post_text(ctx, "Reply failed (missing permission?).").await?;
                 }
             }
-        } else if text.chars().count() <= 2000 {
-            let _ = post_message(&http, channel, text.clone(), Vec::new()).await;
+        } else if body.chars().count() <= 2000 {
+            let _ = post_message(&http, channel, body.clone(), files.clone()).await;
         } else {
-            let att = (attach_name(&text), cap_file_body(&strip_sgr(&text)).into_bytes());
-            let _ = post_message(&http, channel, String::new(), vec![att]).await;
+            let att = (attach_name(&body), cap_file_body(&strip_sgr(&body)).into_bytes());
+            let mut all = vec![att];
+            all.extend(files.clone());
+            let _ = post_message(&http, channel, String::new(), all).await;
         }
         Ok(())
     }
     .await;
     if is_slash {
-        let confirm = format!("Sent as artix in <#{}>.", channel.get());
+        let mut confirm = format!("Sent as artix in <#{}>.", channel.get());
+        if !files.is_empty() {
+            confirm.push_str(&format!(" ({} file{})", files.len(), if files.len() == 1 { "" } else { "s" }));
+        }
+        if !problems.is_empty() {
+            confirm.push_str(&format!("\n{}", problems.join("\n")));
+        }
         let _ = ctx
             .send(poise::CreateReply::default().content(confirm).ephemeral(true))
             .await;
         let _ = send_res;
     } else {
+        if !problems.is_empty() {
+            let _ = post_text(ctx, problems.join("\n")).await;
+        }
         send_res?;
     }
     Ok(())
@@ -1175,20 +1254,12 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
     let Some(vm) = require_vm(ctx).await else { return Ok(()); };
     let state = virsh(&["domstate", &vm]).await.unwrap_or_default();
     if state.trim() != "running" {
-        match virsh(&["start", &vm]).await {
-            Ok(_) => {
-                post_text(ctx, format!("`{}` was off, starting it first…", vm)).await?;
-            }
-            Err(e) => {
-                post_text(ctx, format!(
-                    "Authorized `{}` in the bot, but the VM won't start:\n{}",
-                    uid,
-                    codeblock(&e.to_string())
-                ))
-                .await?;
-                return Ok(());
-            }
-        }
+        post_text(ctx, format!(
+            "Authorized `{}` in the bot, but `{}` is off — run `/start` first, then rerun `/user add @user` to create their Linux account.",
+            uid, vm
+        ))
+        .await?;
+        return Ok(());
     }
     if !wait_agent(&vm, 60).await {
             post_text(ctx, format!("Authorized `{}` in the bot, but the guest agent is silent — no Linux account created. Install `qemu-guest-agent` in Artix, then rerun `/user add @user`.", uid)).await?;

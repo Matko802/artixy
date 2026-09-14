@@ -1,6 +1,7 @@
 use poise::serenity_prelude as serenity;
 
 use crate::{
+    commands::download_sayas_files,
     config::{access_allowed, Data},
     util::{attach_name, cap_file_body, strip_sgr},
     vm::linked_user,
@@ -186,38 +187,56 @@ pub(crate) async fn event_handler(
     }
     if data.settings.read().await.sayas_enabled {
         let content = new_message.content.trim().to_string();
-        if !content.is_empty()
+        let has_files = !new_message.attachments.is_empty();
+        let plain_text = !content.is_empty()
             && !content.starts_with('/')
             && !content.starts_with(';')
-            && !content.ends_with(".ar")
-        {
+            && !content.ends_with(".ar");
+        if plain_text || (has_files && content.is_empty()) {
+            // Download first so files-only messages (empty text) still forward.
+            let (mut files, _) = download_sayas_files(&new_message.attachments).await;
+            let mut body = content.clone();
+            if body.chars().count() > 2000 {
+                files.insert(
+                    0,
+                    (
+                        attach_name(&body),
+                        cap_file_body(&strip_sgr(&body)).into_bytes(),
+                    ),
+                );
+                body = String::new();
+            }
+            if body.is_empty() && files.is_empty() {
+                return Ok(());
+            }
             let _ = new_message.delete(&ctx.http).await;
-            if content.chars().count() <= 2000 {
+            if body.chars().count() <= 2000 && !body.is_empty() && files.is_empty() {
                 match &new_message.referenced_message {
                     Some(target) => {
-                        let _ = target.reply(&ctx.http, &content).await;
+                        let _ = target.reply(&ctx.http, &body).await;
                     }
                     None => {
-                        let _ = post_message(&ctx.http, new_message.channel_id, content, Vec::new()).await;
+                        let _ = post_message(&ctx.http, new_message.channel_id, body, Vec::new()).await;
                     }
                 }
             } else {
-                let att = (
-                    attach_name(&content),
-                    cap_file_body(&strip_sgr(&content)).into_bytes(),
-                );
                 match &new_message.referenced_message {
                     Some(target) => {
-                        let builder = serenity::CreateMessage::new()
-                            .add_file(serenity::CreateAttachment::bytes(att.1, att.0))
+                        let mut builder = serenity::CreateMessage::new()
                             .reference_message((new_message.channel_id, target.id));
+                        if !body.is_empty() {
+                            builder = builder.content(&body);
+                        }
+                        for (name, bytes) in files {
+                            builder = builder.add_file(serenity::CreateAttachment::bytes(bytes, name));
+                        }
                         let _ = new_message
                             .channel_id
                             .send_message(&ctx.http, builder)
                             .await;
                     }
                     None => {
-                        let _ = post_message(&ctx.http, new_message.channel_id, String::new(), vec![att]).await;
+                        let _ = post_message(&ctx.http, new_message.channel_id, body, files).await;
                     }
                 }
             }
@@ -251,21 +270,50 @@ pub(crate) async fn event_handler(
             new_message.id.get()
         );
     }
-    if text.chars().count() <= 2000 {
+    // Files stuck onto the `.ar` message ride along as artix too.
+    let (mut ar_files, _) = download_sayas_files(&new_message.attachments).await;
+    let mut ar_body = text.clone();
+    if ar_body.chars().count() > 2000 {
+        ar_files.insert(
+            0,
+            (
+                attach_name(&ar_body),
+                cap_file_body(&strip_sgr(&ar_body)).into_bytes(),
+            ),
+        );
+        ar_body = String::new();
+    }
+    if ar_body.chars().count() <= 2000 && !ar_body.is_empty() && ar_files.is_empty() {
         match &new_message.referenced_message {
             Some(target) => {
-                let _ = target.reply(&ctx.http, &text).await;
+                let _ = target.reply(&ctx.http, &ar_body).await;
             }
             None => {
-                let _ = post_message(&ctx.http, new_message.channel_id, text, Vec::new()).await;
+                let _ = post_message(&ctx.http, new_message.channel_id, ar_body, Vec::new()).await;
             }
         }
+    } else if ar_body.is_empty() && ar_files.is_empty() {
+        // Nothing downloadable — nothing to repost.
     } else {
-        let att = (
-            attach_name(&text),
-            cap_file_body(&strip_sgr(&text)).into_bytes(),
-        );
-        let _ = post_message(&ctx.http, new_message.channel_id, String::new(), vec![att]).await;
+        match &new_message.referenced_message {
+            Some(target) => {
+                let mut builder = serenity::CreateMessage::new()
+                    .reference_message((new_message.channel_id, target.id));
+                if !ar_body.is_empty() {
+                    builder = builder.content(&ar_body);
+                }
+                for (name, bytes) in ar_files {
+                    builder = builder.add_file(serenity::CreateAttachment::bytes(bytes, name));
+                }
+                let _ = new_message
+                    .channel_id
+                    .send_message(&ctx.http, builder)
+                    .await;
+            }
+            None => {
+                let _ = post_message(&ctx.http, new_message.channel_id, ar_body, ar_files).await;
+            }
+        }
     }
     Ok(())
 }
