@@ -334,6 +334,14 @@ pub(crate) fn live_closed_text() -> String {
     codeblock(LIVE_CLOSED_TEXT)
 }
 
+/// A live session that was showing image frames and then ends cleanly leaves
+/// a frozen leftover frame behind. Such sessions should swap the image for
+/// the closed notice instead — except failed runs, whose final output is
+/// the error the user needs to see.
+pub(crate) fn live_end_closes(code: i64, posted_live_frame: bool, has_fonts: bool) -> bool {
+    code == 0 && posted_live_frame && has_fonts
+}
+
 /// Replace a dead live feed with the closed notice and drop its image,
 /// instead of leaving the last frame frozen in place.
 pub(crate) async fn close_live_message(
@@ -700,6 +708,8 @@ pub(crate) async fn live_run(
                     if !posted {
                         note_stalled_feed(&http, channel, &cmd, "Discord kept rejecting message edits").await;
                     }
+                } else if live_end_closes(code, posted_hash.is_some(), fonts.is_some()) {
+                    close_live_message(&http, channel, msg.id).await;
                 } else {
                     kitty_file_blobs(&vm, &full, &mut kfiles).await;
                     let (text, files) =

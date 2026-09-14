@@ -760,6 +760,16 @@ mod tests {
     }
 
     #[test]
+    fn live_end_closes_only_clean_image_sessions() {
+        use crate::live::live_end_closes;
+        assert!(live_end_closes(0, true, true));
+        assert!(!live_end_closes(1, true, true), "failures keep output");
+        assert!(!live_end_closes(-1, true, true), "failures keep output");
+        assert!(!live_end_closes(0, false, true), "quick text results kept");
+        assert!(!live_end_closes(0, true, false), "text mode has no image to clear");
+    }
+
+    #[test]
     fn frame_due_posts_changes_on_steady_cadence() {
         use crate::live::frame_due;
         assert!(!frame_due(None, 9, Some(100), 2000));
