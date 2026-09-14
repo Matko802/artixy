@@ -357,8 +357,7 @@ pub(crate) async fn run(
     maybe_defer(ctx).await;
     let Some(vm) = require_vm(ctx).await else { return Ok(()); };
     if !agent_ping(&vm).await {
-        post_text(ctx, "Guest agent is silent. Install `qemu-guest-agent` in Artix first.")
-            .await?;
+        post_text(ctx, "Artix is off.").await?;
         return Ok(());
     }
     let http = ctx.serenity_context().http.clone();
