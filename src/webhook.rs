@@ -333,8 +333,67 @@ pub(crate) async fn edit_posted(
     }
 }
 
+/// Edit a message's text AND drop all of its attachments (e.g. a stale
+/// live-feed image). A plain content edit leaves old attachments in place.
+pub(crate) async fn edit_cleared(
+    poster: &Poster,
+    http: &std::sync::Arc<serenity::Http>,
+    channel: serenity::ChannelId,
+    target: serenity::MessageId,
+    content: String,
+) -> bool {
+    match poster {
+        Poster::Direct => {
+            let builder = serenity::EditMessage::new()
+                .content(content)
+                .remove_all_attachments();
+            channel.edit_message(http, target, builder).await.is_ok()
+        }
+        Poster::Hook { id, token } => {
+            let url = hook_url(*id, token);
+            match serenity::model::webhook::Webhook::from_url(http, &url).await {
+                Ok(wh) => {
+                    let builder = serenity::EditWebhookMessage::new()
+                        .content(content)
+                        .clear_attachments();
+                    wh.edit_message(http, target, builder).await.is_ok()
+                }
+                Err(_) => {
+                    evict_channel(&channel);
+                    false
+                }
+            }
+        }
+    }
+}
+
 pub(crate) async fn post_text(ctx: Context<'_>, content: impl Into<String>) -> Result<serenity::Message, Error> {
     post_response(ctx, content.into(), Vec::new()).await
+}
+
+/// Denial reply that pings the caller and (for prefix commands) inline-replies
+/// to their message, so unauthorized users actually get notified.
+pub(crate) async fn post_denied(ctx: Context<'_>, content: &str) -> Result<serenity::Message, Error> {
+    let http = ctx.serenity_context().http.clone();
+    let text = format!("<@{}> {}", ctx.author().id.get(), content);
+    match ctx {
+        poise::Context::Prefix(pctx) => Ok(pctx.msg.reply_ping(&http, text).await?),
+        _ => {
+            let _ = ctx.defer().await;
+            let mentions = serenity::CreateAllowedMentions::new()
+                .all_users(true)
+                .all_roles(false)
+                .everyone(false);
+            let builder = serenity::CreateMessage::new()
+                .content(text)
+                .allowed_mentions(mentions);
+            let msg = ctx.channel_id().send_message(&http, builder).await?;
+            if let poise::Context::Application(actx) = ctx {
+                let _ = actx.interaction.delete_response(&http).await;
+            }
+            Ok(msg)
+        }
+    }
 }
 
 pub(crate) async fn post_response(

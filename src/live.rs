@@ -3,9 +3,9 @@ use poise::serenity_prelude as serenity;
 use crate::{
     scrub::scrub_public_ip,
     termrender::TermFonts,
-    util::{plain_tail, random_suffix, valid_runas},
+    util::{codeblock, plain_tail, random_suffix, valid_runas},
     vm::{guest_exec, guest_launch_raw, guest_status},
-    webhook::{edit_posted, post_message, resolve_poster, Poster},
+    webhook::{edit_cleared, edit_posted, post_message, resolve_poster, Poster},
 };
 
 pub(crate) struct LiveEntry {
@@ -328,6 +328,27 @@ async fn edit_final(
     edit_posted(poster, http, channel, target, content, files).await
 }
 
+pub(crate) const LIVE_CLOSED_TEXT: &str = "This live session has been closed.";
+
+pub(crate) fn live_closed_text() -> String {
+    codeblock(LIVE_CLOSED_TEXT)
+}
+
+/// Replace a dead live feed with the closed notice and drop its image,
+/// instead of leaving the last frame frozen in place.
+pub(crate) async fn close_live_message(
+    http: &std::sync::Arc<serenity::Http>,
+    channel: serenity::ChannelId,
+    target: serenity::MessageId,
+) {
+    let poster = resolve_poster(http, channel).await;
+    let text = live_closed_text();
+    if !edit_cleared(&poster, http, channel, target, text.clone()).await {
+        tokio::time::sleep(LIVE_EDIT_MIN_INTERVAL).await;
+        edit_cleared(&poster, http, channel, target, text).await;
+    }
+}
+
 pub(crate) fn slow_cycle_note(fetch_ms: u128, render_ms: u128, edit_ms: u128) -> Option<String> {
     let total = fetch_ms + render_ms + edit_ms;
     if total < 3000 {
@@ -436,11 +457,13 @@ pub(crate) async fn begin_run(
     };
     if let Some(old) = abort_live_for_user(&live_map, channel, author_user).await {
         let vm_clone = vm.clone();
+        let http_clone = http.clone();
         tokio::spawn(async move {
             if let Some(pid) = old.pid {
                 crate::vm::guest_kill_tree(&vm_clone, pid).await;
             }
             cleanup_live_files(&vm_clone, &old.out_f, &old.code_f, old.in_f.as_deref()).await;
+            close_live_message(&http_clone, old.channel, old.msg_id).await;
         });
     }
     let live_map2 = live_map.clone();
@@ -593,24 +616,20 @@ pub(crate) async fn live_run(
             if huge {
                 crate::vm::guest_kill_tree(&vm, pid).await;
             }
-            edit_posted(
-                &poster,
-                &http,
-                channel,
-                msg.id,
-                plain_tail(&format!(
-                    "$ {}\n…stopped after {}s timeout; output truncated{}",
-                    cmd,
-                    LIVE_TIMEOUT_SECS,
-                    if huge {
-                        "; runaway process stopped"
-                    } else {
-                        "; process may still run in guest"
-                    }
-                )),
-                Vec::new(),
-            )
-            .await;
+            let timeout_text = plain_tail(&format!(
+                "$ {}\n…stopped after {}s timeout; output truncated{}",
+                cmd,
+                LIVE_TIMEOUT_SECS,
+                if huge {
+                    "; runaway process stopped"
+                } else {
+                    "; process may still run in guest"
+                }
+            ));
+            if !edit_cleared(&poster, &http, channel, msg.id, timeout_text.clone()).await {
+                tokio::time::sleep(LIVE_EDIT_MIN_INTERVAL).await;
+                edit_cleared(&poster, &http, channel, msg.id, timeout_text).await;
+            }
             cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
             break;
         }
@@ -621,6 +640,7 @@ pub(crate) async fn live_run(
                 eprintln!("live: guest fetch failed ({}/{}) for {}: {}", guest_fails, LIVE_GUEST_MAX_FAILS, out_f, e);
                 if guest_fails >= LIVE_GUEST_MAX_FAILS {
                     note_stalled_feed(&http, channel, &cmd, "guest agent stopped answering").await;
+                    close_live_message(&http, channel, msg.id).await;
                     cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
                     break;
                 }
@@ -640,6 +660,7 @@ pub(crate) async fn live_run(
                 eprintln!("live: guest status failed ({}/{}) for {}: {}", guest_fails, LIVE_GUEST_MAX_FAILS, out_f, e);
                 if guest_fails >= LIVE_GUEST_MAX_FAILS {
                     note_stalled_feed(&http, channel, &cmd, "guest agent stopped answering").await;
+                    close_live_message(&http, channel, msg.id).await;
                     cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
                     break;
                 }
@@ -764,6 +785,7 @@ pub(crate) async fn live_run(
                     );
                     if edit_fails >= LIVE_EDIT_MAX_FAILS {
                         note_stalled_feed(&http, channel, &cmd, "Discord kept rejecting message edits").await;
+                        close_live_message(&http, channel, msg.id).await;
                         cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
                         break;
                     }

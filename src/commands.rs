@@ -6,7 +6,7 @@ use crate::{
     live::begin_run,
     util::{attach_name, cap_file_body, codeblock, deployed_via_nix, project_dir, random_suffix, strip_sgr, valid_runas},
     vm::{agent_ping, guest_exec, linked_user, virsh, wait_agent},
-    webhook::{is_own_message, mark_self_deleted, post_message, post_response, post_text},
+    webhook::{is_own_message, mark_self_deleted, post_denied, post_message, post_response, post_text},
     Context, Error,
 };
 
@@ -26,7 +26,7 @@ pub(crate) async fn need_auth(ctx: Context<'_>) -> Result<bool, Error> {
     }
     let u = ctx.author();
     eprintln!("denied: {} (id {})", u.name, u.id.get());
-    post_text(ctx, "Not authorized. Ask the owner to run `/user add @you`.")
+    post_denied(ctx, "Not authorized. Ask the owner to run `/user add @you`.")
         .await?;
     Ok(false)
 }
@@ -415,7 +415,7 @@ pub(crate) async fn sayas(
                 .send(poise::CreateReply::default().content("Owner only.").ephemeral(true))
                 .await;
         } else {
-            post_text(ctx, "Owner only.").await?;
+            post_denied(ctx, "Owner only.").await?;
         }
         return Ok(());
     }
@@ -848,7 +848,7 @@ pub(crate) async fn notify(
     #[description = "channel ID for boot messages, or off"] what: Option<String>,
 ) -> Result<(), Error> {
     if !is_owner(ctx).await {
-        post_text(ctx, "Owner only.").await?;
+        post_denied(ctx, "Owner only.").await?;
         return Ok(());
     }
     match what.as_deref().map(str::trim) {
@@ -893,7 +893,7 @@ pub(crate) async fn warmode(
     #[description = "true to arm protections, false to stand down"] enabled: bool,
 ) -> Result<(), Error> {
     if !is_owner(ctx).await {
-        post_text(ctx, "Owner only.").await?;
+        post_denied(ctx, "Owner only.").await?;
         return Ok(());
     }
     ctx.data().settings.write().await.war_mode = enabled;
@@ -936,7 +936,7 @@ pub(crate) async fn purge_replies(
     #[description = "How many recent messages to scan (default 50, max 100)"] limit: Option<u8>,
 ) -> Result<(), Error> {
     if !is_owner(ctx).await {
-        post_text(ctx, "Owner only.").await?;
+        post_denied(ctx, "Owner only.").await?;
         return Ok(());
     }
     let Some(target_id) = parse_target_id(&target) else {
@@ -1158,7 +1158,7 @@ pub(crate) async fn ensure_passwordless_sudo(vm: &str, user: &str) -> Result<(),
 
 pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error> {
     if !is_owner(ctx).await {
-        post_text(ctx, "Owner only.").await?;
+        post_denied(ctx, "Owner only.").await?;
         return Ok(());
     }
     maybe_defer(ctx).await;
@@ -1269,7 +1269,7 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
 
 pub(crate) async fn do_userdel(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error> {
     if !is_owner(ctx).await {
-        post_text(ctx, "Owner only.").await?;
+        post_denied(ctx, "Owner only.").await?;
         return Ok(());
     }
     maybe_defer(ctx).await;

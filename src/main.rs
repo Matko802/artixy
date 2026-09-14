@@ -752,6 +752,14 @@ mod tests {
     }
 
     #[test]
+    fn live_closed_notice_is_code_markdown() {
+        assert_eq!(
+            crate::live::live_closed_text(),
+            "```\nThis live session has been closed.\n```"
+        );
+    }
+
+    #[test]
     fn frame_due_posts_changes_on_steady_cadence() {
         use crate::live::frame_due;
         assert!(!frame_due(None, 9, Some(100), 2000));
