@@ -98,18 +98,24 @@ struct TagEntry {
     name: String,
 }
 
-const SYSTEM_PROMPT: &str = "You are artixy, a playful Discord bot living in an Artix Linux VM community. \
+const SYSTEM_PROMPT: &str = "You are artixy, a cute furry Discord bot living in an Artix Linux VM community. \
+You are warm, affectionate and playful, with a soft furry vibe: occasional `:3`, \
+*does cute actions in asterisks*, gentle teasing, paws and tail energy — but keep it natural, never forced. \
+Use emojis very sparingly: at most one per message, and often none at all. \
 Reply helpfully and concisely. Keep replies under 1500 characters unless asked for more. \
-You can use Discord markdown (code fences for code/commands). Never claim to be human.";
+You can use Discord markdown (code fences for code/commands). Never claim to be human. \
+Each user message starts with the speaker's Discord name in brackets, e.g. `[Bob]: hello`. \
+Remember who said what, address people by name when it fits, and never confuse one speaker for another.";
 
-pub(crate) async fn ollama_chat(host: &str, model: &str, prompt: &str) -> Result<String, Error> {
+pub(crate) async fn ollama_chat(host: &str, model: &str, speaker: &str, prompt: &str) -> Result<String, Error> {
     let host = host.trim_end_matches('/');
     let url = format!("{host}/api/chat");
+    let tagged = format!("[{}]: {}", speaker_tag(speaker), prompt);
     let req = ChatRequest {
         model,
         messages: vec![
             ChatMessage { role: "system", content: SYSTEM_PROMPT },
-            ChatMessage { role: "user", content: prompt },
+            ChatMessage { role: "user", content: &tagged },
         ],
         stream: false,
     };
@@ -150,6 +156,29 @@ pub(crate) async fn model_present(host: &str, model: &str) -> Option<bool> {
         let n = m.name.to_lowercase();
         n == want || n.split(':').next().unwrap_or(&n) == base
     }))
+}
+
+/// Clean a Discord display/username for the `[name]:` speaker tag:
+/// single line, no brackets (they're the tag delimiters), capped length.
+pub(crate) fn speaker_tag(raw: &str) -> String {
+    let flat: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clean: String = flat
+        .chars()
+        .map(|c| match c {
+            '[' | ']' => ' ',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let clean: String = clean.chars().take(64).collect();
+    if clean.trim().is_empty() {
+        "someone".to_string()
+    } else {
+        clean
+    }
 }
 
 /// Strip `<@id>` / `<@!id>` mentions of the bot from a message, leaving the prompt.
@@ -241,11 +270,22 @@ mod tests {
     }
 
     #[test]
-    fn mention_stripped_to_prompt() {
-        assert_eq!(strip_mention("<@123> hello", 123), "hello");
+    fn mention_stripped_to_prompt() {        assert_eq!(strip_mention("<@123> hello", 123), "hello");
         assert_eq!(strip_mention("hey <@!123> hi", 123), "hey  hi");
         assert_eq!(strip_mention("<@123>", 123), "");
         assert_eq!(strip_mention("no mention", 999), "no mention");
+    }
+
+    #[test]
+    fn speaker_tag_is_single_line_bracket_free_and_capped() {
+        assert_eq!(speaker_tag("Bob"), "Bob");
+        assert_eq!(speaker_tag("  spaced   name  "), "spaced name");
+        assert_eq!(speaker_tag("a[b]c"), "a b c");
+        assert_eq!(speaker_tag("line1\nline2"), "line1 line2");
+        assert_eq!(speaker_tag("   "), "someone");
+        assert_eq!(speaker_tag(""), "someone");
+        let long = "x".repeat(200);
+        assert_eq!(speaker_tag(&long).chars().count(), 64);
     }
 
     #[test]

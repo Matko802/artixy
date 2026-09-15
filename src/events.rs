@@ -135,9 +135,33 @@ pub(crate) async fn event_handler(
                 return Ok(());
             }
             let mut prompt = prompt0.clone();
+            // Who's talking: guild nick > global display name > username,
+            // plus the @handle so the model can tell same-named people apart.
+            let display = new_message
+                .member
+                .as_ref()
+                .and_then(|m| m.nick.clone())
+                .or_else(|| new_message.author.global_name.clone())
+                .unwrap_or_else(|| new_message.author.name.clone());
+            let speaker = if display == new_message.author.name {
+                display
+            } else {
+                format!("{display} (@{})", new_message.author.name)
+            };
             if prompt.trim().is_empty() {
                 if let Some(r) = new_message.referenced_message.as_ref() {
-                    prompt = r.content.trim().to_string();
+                    let qdisplay = r
+                        .author
+                        .global_name
+                        .clone()
+                        .unwrap_or_else(|| r.author.name.clone());
+                    let qtext = r.content.trim().to_string();
+                    if !qtext.is_empty() {
+                        prompt = format!(
+                            "(quoting {}): {qtext}",
+                            crate::ai::speaker_tag(&qdisplay)
+                        );
+                    }
                 }
             }
             if prompt.trim().is_empty() {
@@ -150,7 +174,7 @@ pub(crate) async fn event_handler(
                 prompt = prompt.chars().take(4000).collect();
             }
             let _ = new_message.channel_id.broadcast_typing(&ctx.http).await;
-            match crate::ai::ollama_chat(&ai_host, &ai_model, &prompt).await {
+            match crate::ai::ollama_chat(&ai_host, &ai_model, &speaker, &prompt).await {
                 Ok(text) => {
                     let chunks = crate::ai::chunk_reply(&text);
                     let mut first = true;
