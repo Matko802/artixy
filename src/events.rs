@@ -5,7 +5,7 @@ use crate::{
     config::{access_allowed, Data},
     util::{attach_name, cap_file_body, strip_sgr},
     vm::linked_user,
-    webhook::{handle_delete, is_posted_message, post_message},
+    webhook::{handle_delete, is_own_message, is_posted_message, post_message},
     Error,
 };
 
@@ -108,10 +108,10 @@ pub(crate) async fn event_handler(
         }
         return Ok(());
     }
-    if new_message.author.bot {
+    let me_id: u64 = ctx.cache.current_user().id.get();
+    if is_own_message(new_message.author.id, new_message.id, serenity::UserId::new(me_id)) {
         return Ok(());
     }
-    let me_id: u64 = ctx.cache.current_user().id.get();
     let mentioned = new_message.mentions.iter().any(|u| u.id.get() == me_id)
         || new_message.content.contains(&format!("<@{me_id}>"))
         || new_message.content.contains(&format!("<@!{me_id}>"))
