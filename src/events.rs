@@ -69,7 +69,8 @@ pub(crate) async fn event_handler(
             .channel(event.channel_id)
             .map(|c| c.name.clone())
             .unwrap_or_default();
-        let _ = crate::feed::log_typing(&name, event.channel_id.get(), &channel_name).await;
+        let guild_id = event.guild_id.map(|g| g.get()).unwrap_or(0);
+        let _ = crate::feed::log_typing(&name, event.channel_id.get(), guild_id, &channel_name).await;
         return Ok(());
     }
     let serenity::FullEvent::Message { new_message } = event else {
@@ -80,15 +81,50 @@ pub(crate) async fn event_handler(
         .channel(new_message.channel_id)
         .map(|c| c.name.clone())
         .unwrap_or_default();
+    let guild_id = new_message.guild_id.map(|g| g.get()).unwrap_or(0);
+    // Never log an empty body: attachment/embed/sticker-only messages (e.g.
+    // artixy's own image posts) would otherwise vanish from the TUI.
+    let mut feed_text = new_message.content.clone();
+    if feed_text.trim().is_empty() {
+        let mut parts: Vec<String> = Vec::new();
+        for a in &new_message.attachments {
+            let n = a.filename.trim();
+            if n.is_empty() {
+                parts.push("[attachment]".to_string());
+            } else {
+                parts.push(format!("[attachment: {}]", n.chars().take(64).collect::<String>()));
+            }
+        }
+        if !new_message.embeds.is_empty() {
+            parts.push(format!("[{} embed(s)]", new_message.embeds.len()));
+        }
+        if !new_message.sticker_items.is_empty() {
+            parts.push("[sticker]".to_string());
+        }
+        if parts.is_empty() {
+            parts.push("[empty message]".to_string());
+        }
+        feed_text = parts.join(" ");
+    }
     let _ = crate::feed::log_message(
         &new_message.author.name,
         new_message.author.bot,
         new_message.channel_id.get(),
+        guild_id,
         &channel_name,
-        &new_message.content,
+        &feed_text,
+        new_message.id.get(),
     )
     .await;
-    let id = new_message.author.id.get();
+    let pk = if new_message.webhook_id.is_some() {
+        crate::pk::resolve(new_message.id.get()).await
+    } else {
+        None
+    };
+    let id = pk
+        .as_ref()
+        .map(|p| p.id)
+        .unwrap_or_else(|| new_message.author.id.get());
     let (owner, blocked, war) = {
         let a = data.allowed.read().await;
         let s = data.settings.read().await;
@@ -175,12 +211,15 @@ pub(crate) async fn event_handler(
                 return Ok(());
             }
             let mut prompt = prompt0.clone();
-            let display = new_message
-                .member
-                .as_ref()
-                .and_then(|m| m.nick.clone())
-                .or_else(|| new_message.author.global_name.clone())
-                .unwrap_or_else(|| new_message.author.name.clone());
+            let display = match &pk {
+                Some(p) => p.name.clone(),
+                None => new_message
+                    .member
+                    .as_ref()
+                    .and_then(|m| m.nick.clone())
+                    .or_else(|| new_message.author.global_name.clone())
+                    .unwrap_or_else(|| new_message.author.name.clone()),
+            };
             let speaker = if display == new_message.author.name {
                 display
             } else {

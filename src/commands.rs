@@ -25,18 +25,29 @@ pub(crate) fn is_tui_relay(ctx: Context<'_>) -> bool {
 /// to the normal per-command auth below.
 pub(crate) async fn tui_relay_check(ctx: Context<'_>) -> Result<bool, Error> {
     if let poise::Context::Prefix(pctx) = ctx {
-        if pctx.msg.author.bot {
+        if pctx.msg.author.bot && pctx.msg.webhook_id.is_none() {
             return Ok(crate::tuirelay::is_claimed(pctx.msg.id.get()));
         }
     }
     Ok(true)
 }
 
+pub(crate) async fn real_id(ctx: Context<'_>) -> u64 {
+    if let poise::Context::Prefix(pctx) = ctx {
+        if pctx.msg.webhook_id.is_some() {
+            if let Some(p) = crate::pk::resolve(pctx.msg.id.get()).await {
+                return p.id;
+            }
+        }
+    }
+    ctx.author().id.get()
+}
+
 pub(crate) async fn is_authed(ctx: Context<'_>) -> bool {
     if is_tui_relay(ctx) {
         return true;
     }
-    let id = ctx.author().id.get();
+    let id = real_id(ctx).await;
     let a = ctx.data().allowed.read().await;
     crate::config::access_allowed(a.owner, &a.users, &a.blocked, id)
 }
@@ -45,14 +56,14 @@ pub(crate) async fn is_owner(ctx: Context<'_>) -> bool {
     if is_tui_relay(ctx) {
         return true;
     }
-    ctx.author().id.get() == ctx.data().allowed.read().await.owner
+    real_id(ctx).await == ctx.data().allowed.read().await.owner
 }
 
 pub(crate) async fn is_elevated(ctx: Context<'_>) -> bool {
     if is_tui_relay(ctx) {
         return true;
     }
-    let id = ctx.author().id.get();
+    let id = real_id(ctx).await;
     let a = ctx.data().allowed.read().await;
     crate::config::elevated_allowed(a.owner, &a.admins, id)
 }
@@ -72,7 +83,7 @@ pub(crate) async fn need_auth(ctx: Context<'_>) -> Result<bool, Error> {
 }
 
 pub(crate) async fn is_blocked(ctx: Context<'_>) -> bool {
-    let id = ctx.author().id.get();
+    let id = real_id(ctx).await;
     ctx.data().allowed.read().await.blocked.contains(&id)
 }
 

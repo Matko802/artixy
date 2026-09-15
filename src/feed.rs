@@ -5,9 +5,11 @@ pub(crate) struct FeedLine {
     pub(crate) author: String,
     pub(crate) bot: bool,
     pub(crate) channel: u64,
+    pub(crate) guild: u64,
     pub(crate) channel_name: String,
     pub(crate) text: String,
     pub(crate) time: String,
+    pub(crate) mid: u64,
 }
 
 fn feed_path() -> std::path::PathBuf {
@@ -42,8 +44,10 @@ pub(crate) async fn log_message(
     author: &str,
     bot: bool,
     channel: u64,
+    guild: u64,
     channel_name: &str,
     content: &str,
+    mid: u64,
 ) -> Result<(), Error> {
     append(
         serde_json::json!({
@@ -51,21 +55,24 @@ pub(crate) async fn log_message(
             "author": flat(author, 64),
             "bot": bot,
             "channel": channel,
+            "guild": guild,
             "channel_name": flat(channel_name, 64),
             "text": flat(content, 300),
+            "mid": mid,
         })
         .to_string(),
     )
     .await
 }
 
-pub(crate) async fn log_typing(author: &str, channel: u64, channel_name: &str) -> Result<(), Error> {
+pub(crate) async fn log_typing(author: &str, channel: u64, guild: u64, channel_name: &str) -> Result<(), Error> {
     append(
         serde_json::json!({
             "kind": "typing",
             "author": flat(author, 64),
             "bot": false,
             "channel": channel,
+            "guild": guild,
             "channel_name": flat(channel_name, 64),
             "text": "",
         })
@@ -85,6 +92,7 @@ fn parse_line(line: &str) -> Option<FeedLine> {
         author: v.get("author")?.as_str()?.to_string(),
         bot: v.get("bot")?.as_bool().unwrap_or(false),
         channel: v.get("channel")?.as_u64()?,
+        guild: v.get("guild").and_then(|g| g.as_u64()).unwrap_or(0),
         channel_name: v
             .get("channel_name")
             .and_then(|c| c.as_str())
@@ -92,6 +100,7 @@ fn parse_line(line: &str) -> Option<FeedLine> {
             .to_string(),
         text: v.get("text")?.as_str().unwrap_or("").to_string(),
         time: String::new(),
+        mid: v.get("mid").and_then(|m| m.as_u64()).unwrap_or(0),
     })
 }
 

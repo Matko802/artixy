@@ -1,5 +1,5 @@
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -52,6 +52,9 @@ struct Channel {
     id: u64,
     kind: ChannelKind,
     guild: u64,
+    pos: u32,
+    parent: u64,
+    voice: bool,
     messages: Vec<Msg>,
     scroll: usize,
     follow: bool,
@@ -75,21 +78,40 @@ enum Focus {
 
 #[derive(Clone, Copy)]
 enum SideRow {
-    Head(u64),
+    Cat(usize),
     Chan(usize),
+}
+
+#[derive(Clone)]
+struct CatInfo {
+    guild: u64,
+    id: u64,
+    name: String,
+    pos: u32,
+}
+
+#[derive(Clone)]
+struct FetchedChan {
+    id: u64,
+    name: String,
+    pos: u32,
+    parent: u64,
+    voice: bool,
 }
 
 #[derive(Clone)]
 struct GuildChans {
     id: u64,
     name: String,
-    channels: Vec<(u64, String)>,
+    cats: Vec<CatInfo>,
+    channels: Vec<FetchedChan>,
 }
 
 enum Reply {
     Text(Vec<String>),
     ChannelList(Vec<GuildChans>),
-    ChannelHistory(Vec<HistMsg>),
+    ChannelHistory(Vec<HistMsg>, Vec<(u64, String)>),
+    Echo { target: u64, mid: u64, text: String },
 }
 
 struct Job {
@@ -139,6 +161,11 @@ struct App {
     hist_syncing: bool,
     guild_names: HashMap<u64, String>,
     chan_guild: HashMap<u64, u64>,
+    chan_meta: HashMap<u64, (u32, u64, bool)>,
+    cats: Vec<CatInfo>,
+    cur_guild: u64,
+    seen_mids: HashSet<u64>,
+    hist_failed: HashMap<u64, String>,
     focus: Focus,
     side_area: Rect,
     chat_area: Rect,
@@ -151,6 +178,9 @@ fn mk_channel(name: &str, id: u64, kind: ChannelKind, guild: u64) -> Channel {
         id,
         kind,
         guild,
+        pos: 0,
+        parent: 0,
+        voice: false,
         messages: Vec::new(),
         scroll: 0,
         follow: true,
@@ -360,6 +390,11 @@ impl App {
             hist_syncing: false,
             guild_names: HashMap::new(),
             chan_guild: HashMap::new(),
+            chan_meta: HashMap::new(),
+            cats: Vec::new(),
+            cur_guild: 0,
+            seen_mids: HashSet::new(),
+            hist_failed: HashMap::new(),
             focus: Focus::Input,
             side_area: Rect::default(),
             chat_area: Rect::default(),
@@ -476,6 +511,11 @@ impl App {
             if let Some(g) = self.chan_guild.get(&id).copied() {
                 ch.guild = g;
             }
+            if let Some((pos, parent, voice)) = self.chan_meta.get(&id).copied() {
+                ch.pos = pos;
+                ch.parent = parent;
+                ch.voice = voice;
+            }
             ch.last_active = Some(Instant::now());
             return;
         }
@@ -507,7 +547,11 @@ impl App {
             _ => id.to_string(),
         };
         let guild = self.chan_guild.get(&id).copied().unwrap_or(0);
+        let (pos, parent, voice) = self.chan_meta.get(&id).copied().unwrap_or((0, 0, false));
         let mut ch = mk_channel(&name, id, ChannelKind::Live, guild);
+        ch.pos = pos;
+        ch.parent = parent;
+        ch.voice = voice;
         ch.last_active = Some(Instant::now());
         self.channels.push(ch);
     }
@@ -517,26 +561,45 @@ impl App {
             return;
         }
         let active_id = self.channels.get(self.active).map(|c| c.id).unwrap_or(0);
+        let mut cats: Vec<CatInfo> = Vec::new();
         for g in list {
             let gname = g.name.trim().to_string();
             if gname.is_empty() || g.id == 0 {
                 continue;
             }
             self.guild_names.insert(g.id, gname);
-            for (id, raw) in g.channels {
-                let name = raw.trim().to_string();
-                if name.is_empty() || id == 0 || id == u64::MAX || id == 1 {
+            cats.extend(g.cats.iter().cloned());
+            for fc in g.channels {
+                let name = fc.name.trim().to_string();
+                if name.is_empty() || fc.id == 0 || fc.id == u64::MAX || fc.id == 1 {
                     continue;
                 }
                 self.chan_names
                     .entry(name.to_lowercase())
-                    .or_insert(id);
-                self.id_to_name.insert(id, name);
-                self.chan_guild.insert(id, g.id);
-                self.ensure_live_channel(id);
+                    .or_insert(fc.id);
+                self.id_to_name.insert(fc.id, name);
+                self.chan_guild.insert(fc.id, g.id);
+                self.chan_meta.insert(fc.id, (fc.pos, fc.parent, fc.voice));
+                self.ensure_live_channel(fc.id);
             }
         }
+        cats.sort_by(|a, b| {
+            a.pos
+                .cmp(&b.pos)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        self.cats = cats;
         self.sort_live_channels();
+        if self.cur_guild == 0 || !self.guild_order().contains(&self.cur_guild) {
+            self.cur_guild = self
+                .channels
+                .get(self.active)
+                .filter(|c| c.kind == ChannelKind::Live && c.guild != 0)
+                .map(|c| c.guild)
+                .or_else(|| self.guild_order().first().copied())
+                .unwrap_or(0);
+        }
         if let Some(idx) = self.channels.iter().position(|c| c.id == active_id) {
             self.goto(idx);
         }
@@ -554,13 +617,27 @@ impl App {
             return;
         }
         let active_id = self.channels.get(self.active).map(|c| c.id).unwrap_or(0);
-        let keys: HashMap<u64, String> =
-            self.channels.iter().map(|c| (c.guild, self.guild_sort_key(c.guild))).collect();
+        let order: HashMap<u64, usize> = self
+            .guild_order()
+            .into_iter()
+            .enumerate()
+            .map(|(i, g)| (g, i))
+            .collect();
+        let catpos: HashMap<(u64, u64), u32> =
+            self.cats.iter().map(|c| ((c.guild, c.id), c.pos)).collect();
         self.channels[2..].sort_by(|a, b| {
-            keys.get(&a.guild)
-                .cmp(&keys.get(&b.guild))
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-                .then_with(|| a.id.cmp(&b.id))
+            let ao = order.get(&a.guild).copied().unwrap_or(usize::MAX);
+            let bo = order.get(&b.guild).copied().unwrap_or(usize::MAX);
+            let ak = match catpos.get(&(a.guild, a.parent)) {
+                Some(p) => (1u8, *p),
+                None => (0u8, 0u32),
+            };
+            let bk = match catpos.get(&(b.guild, b.parent)) {
+                Some(p) => (1u8, *p),
+                None => (0u8, 0u32),
+            };
+            (ao, ak.0, ak.1, a.pos, a.name.to_lowercase(), a.id)
+                .cmp(&(bo, bk.0, bk.1, b.pos, b.name.to_lowercase(), b.id))
         });
         if let Some(idx) = self.channels.iter().position(|c| c.id == active_id) {
             self.active = idx;
@@ -585,6 +662,23 @@ impl App {
         self.channels.iter().position(|c| c.guild == guild && c.kind == ChannelKind::Live)
     }
 
+    fn step_channel(&mut self, dir: i32) {
+        let spots: Vec<usize> = self
+            .side_rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                SideRow::Chan(i) => Some(i),
+                _ => None,
+            })
+            .collect();
+        if spots.is_empty() {
+            return;
+        }
+        let pos = spots.iter().position(|i| *i == self.active).unwrap_or(0);
+        let n = spots.len() as i32;
+        self.goto(spots[((pos as i32 + dir).rem_euclid(n)) as usize]);
+    }
+
     fn next_server(&mut self, dir: i32) {
         let guilds = self.guild_order();
         if guilds.is_empty() {
@@ -605,30 +699,78 @@ impl App {
             }
         };
         if let Some(idx) = self.first_of_guild(next) {
+            self.cur_guild = next;
             self.goto(idx);
         }
     }
 
+    fn effective_guild(&self) -> u64 {
+        if self.cur_guild != 0 {
+            return self.cur_guild;
+        }
+        self.guild_order().first().copied().unwrap_or(0)
+    }
+
     fn side_rows(&self) -> Vec<SideRow> {
         let mut rows = vec![SideRow::Chan(0), SideRow::Chan(1)];
-        for g in self.guild_order() {
-            rows.push(SideRow::Head(g));
-            for (i, c) in self.channels.iter().enumerate() {
-                if c.kind == ChannelKind::Live && c.guild == g {
-                    rows.push(SideRow::Chan(i));
+        // Sidebar only ever shows the current server, ordered like Discord:
+        // uncategorized channels on top, then each category (by position)
+        // with its channels (by position, then name).
+        let guild = self.effective_guild();
+        if guild == 0 {
+            return rows;
+        }
+        let is_categorized = |parent: u64| {
+            parent != 0 && self.cats.iter().any(|k| k.guild == guild && k.id == parent)
+        };
+        let mut uncat: Vec<usize> = Vec::new();
+        for (i, c) in self.channels.iter().enumerate().skip(2) {
+            if c.kind != ChannelKind::Live {
+                continue;
+            }
+            // Unknown-guild channels (seen via feed/history before the next
+            // channel sync) still show in the current server instead of
+            // vanishing; the sync corrects their guild shortly after.
+            if c.guild != guild && c.guild != 0 {
+                continue;
+            }
+            if is_categorized(c.parent) {
+                continue;
+            }
+            uncat.push(i);
+        }
+        uncat.sort_by(|a, b| {
+            let ca = &self.channels[*a];
+            let cb = &self.channels[*b];
+            (ca.pos, ca.name.to_lowercase(), ca.id).cmp(&(cb.pos, cb.name.to_lowercase(), cb.id))
+        });
+        rows.extend(uncat.into_iter().map(SideRow::Chan));
+        let mut cats: Vec<usize> = (0..self.cats.len())
+            .filter(|k| self.cats[*k].guild == guild)
+            .collect();
+        cats.sort_by(|a, b| {
+            let ca = &self.cats[*a];
+            let cb = &self.cats[*b];
+            (ca.pos, ca.name.to_lowercase(), ca.id).cmp(&(cb.pos, cb.name.to_lowercase(), cb.id))
+        });
+        for k in cats {
+            let mut members: Vec<usize> = Vec::new();
+            for (i, c) in self.channels.iter().enumerate().skip(2) {
+                if c.kind == ChannelKind::Live && c.guild == guild && c.parent == self.cats[k].id {
+                    members.push(i);
                 }
             }
-        }
-        let others: Vec<usize> = self
-            .channels
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.kind == ChannelKind::Live && c.guild == 0)
-            .map(|(i, _)| i)
-            .collect();
-        if !others.is_empty() {
-            rows.push(SideRow::Head(0));
-            rows.extend(others.into_iter().map(SideRow::Chan));
+            if members.is_empty() {
+                continue;
+            }
+            members.sort_by(|a, b| {
+                let ca = &self.channels[*a];
+                let cb = &self.channels[*b];
+                (ca.pos, ca.name.to_lowercase(), ca.id)
+                    .cmp(&(cb.pos, cb.name.to_lowercase(), cb.id))
+            });
+            rows.push(SideRow::Cat(k));
+            rows.extend(members.into_iter().map(SideRow::Chan));
         }
         rows
     }
@@ -678,17 +820,31 @@ impl App {
         let tx = self.tx.clone();
         let reply_to = self.chan();
         *self.pending.entry(reply_to).or_insert(0) += 1;
+        // Include feed/echo-only channels (unknown guild, threads, brand-new
+        // IDs) so they get history too instead of staying empty.
+        let extra: Vec<(u64, String)> = self
+            .channels
+            .iter()
+            .filter(|c| c.kind == ChannelKind::Live && c.id != 0 && c.id != u64::MAX)
+            .map(|c| (c.id, c.name.clone()))
+            .collect();
         tokio::spawn(async move {
             let groups = fetch_all_guild_channels(&token).await;
             let _ = tx.send(Job {
                 channel: reply_to,
                 reply: Reply::ChannelList(groups.clone()),
             });
-            let flat = flatten_guilds(&groups);
-            let items = fetch_recent_history(&token, &flat, per).await;
+            let mut flat = flatten_guilds(&groups);
+            for (id, name) in extra {
+                if flat.iter().any(|(eid, _)| *eid == id) {
+                    continue;
+                }
+                flat.push((id, name));
+            }
+            let (items, failed) = fetch_recent_history(&token, &flat, per).await;
             let _ = tx.send(Job {
                 channel: reply_to,
-                reply: Reply::ChannelHistory(items),
+                reply: Reply::ChannelHistory(items, failed),
             });
         });
         self.notify("loading recent discord messages…");
@@ -720,14 +876,39 @@ impl App {
 
     fn apply_history(&mut self, items: Vec<HistMsg>) {
         if items.is_empty() {
-            self.say_active(
-                "system",
-                DIM,
-                "",
-                "no readable history — the bot needs View Channel + Read Message History there.",
-            );
+            if self.hist_failed.is_empty() {
+                self.say_active(
+                    "system",
+                    DIM,
+                    "",
+                    "no readable history — the bot needs View Channel + Read Message History there.",
+                );
+            } else {
+                let mut reasons: Vec<String> = Vec::new();
+                for (id, reason) in &self.hist_failed {
+                    reasons.push(format!("<#{id}>: {reason}"));
+                    if reasons.len() >= 5 {
+                        break;
+                    }
+                }
+                self.say_active(
+                    "system",
+                    DIM,
+                    "",
+                    &format!("no readable history ({}).", reasons.join(", ")),
+                );
+            }
             return;
         }
+        // History may reference channels the list sync hasn't created yet
+        // (threads, brand-new channels like the reported one) — create them
+        // so their messages have somewhere to land instead of vanishing.
+        for h in &items {
+            if self.channels.iter().position(|c| c.id == h.channel).is_none() {
+                self.ensure_live_channel(h.channel);
+            }
+        }
+        self.sort_live_channels();
         let spy_idx = self.spy_idx();
         let mut empty: std::collections::HashSet<u64> = std::collections::HashSet::new();
         for h in &items {
@@ -752,18 +933,31 @@ impl App {
             let Some(pi) = self.channels.iter().position(|c| c.id == h.channel) else {
                 continue;
             };
-            let color = if h.bot { BOT_MSG } else { USER_MSG };
-            self.push_hist(pi, &h.author, color, "", &h.text);
+            // Own artixy messages render like local echoes so they stand out
+            // from other bots.
+            let color = if h.mine {
+                ACCENT
+            } else if h.bot {
+                BOT_MSG
+            } else {
+                USER_MSG
+            };
+            let author = if h.mine && h.author.trim().is_empty() {
+                "artixy".to_string()
+            } else {
+                h.author.clone()
+            };
+            self.push_hist(pi, &author, color, "", &h.text);
             if h.mine {
                 crate::ai::record_artixy(h.channel, &h.text);
             } else {
-                crate::ai::record_user(h.channel, &h.author, &h.text);
+                crate::ai::record_user(h.channel, &author, &h.text);
             }
             loaded += 1;
             if let Some(si) = spy_idx {
                 if si != pi {
                     let tag = self.channel_tag(h.channel);
-                    self.push_hist(si, &h.author, color, &tag, &h.text);
+                    self.push_hist(si, &author, color, &tag, &h.text);
                 }
             }
         }
@@ -801,12 +995,19 @@ impl App {
         };
         let now = Instant::now();
         for e in lines {
+            if e.mid != 0 && self.seen_mids.contains(&e.mid) {
+                self.seen_mids.remove(&e.mid);
+                continue;
+            }
             self.last_feed = Some(now);
             self.feed_total += 1;
             let cname = e.channel_name.trim().to_string();
             if !cname.is_empty() {
                 self.chan_names.insert(cname.to_lowercase(), e.channel);
                 self.id_to_name.insert(e.channel, cname);
+            }
+            if e.guild != 0 && self.chan_guild.get(&e.channel).copied().unwrap_or(0) == 0 {
+                self.chan_guild.insert(e.channel, e.guild);
             }
             self.ensure_live_channel(e.channel);
             if e.kind == "typing" {
@@ -815,10 +1016,12 @@ impl App {
                 }
                 continue;
             }
-            if e.text.trim().is_empty() {
-                continue;
-            }
-            let to_artixy = mentions_name(&e.text);
+            let body = if e.text.trim().is_empty() {
+                "[attachment]".to_string()
+            } else {
+                e.text.clone()
+            };
+            let to_artixy = mentions_name(&body);
             let tag = self.channel_tag(e.channel);
             let (author, color) = if to_artixy {
                 (format!("{} →artixy", e.author), ACCENT)
@@ -829,14 +1032,14 @@ impl App {
             };
             if let Some(pi) = self.channels.iter().position(|c| c.id == e.channel) {
                 if pi != spy_idx {
-                    self.say(pi, &author, color, "", &e.text);
+                    self.say(pi, &author, color, "", &body);
                     self.bump(pi);
                 }
             }
             if self.filter_mentions && !to_artixy {
                 continue;
             }
-            self.say(spy_idx, &author, color, &tag, &e.text);
+            self.say(spy_idx, &author, color, &tag, &body);
             self.bump(spy_idx);
         }
     }
@@ -891,14 +1094,25 @@ impl App {
         let tag = self.channel_tag(id);
         tokio::spawn(async move {
             let http = serenity::Http::new(&token);
-            let msg = match serenity::ChannelId::new(id).say(&http, &text).await {
-                Ok(m) => format!("sent to {} (msg {})", tag, m.id.get()),
-                Err(e) => format!("send to {} failed: {e}", tag),
-            };
-            let _ = tx.send(Job {
-                channel: reply_to,
-                reply: Reply::Text(vec![msg]),
-            });
+            match serenity::ChannelId::new(id).say(&http, &text).await {
+                Ok(m) => {
+                    let mid = m.id.get();
+                    let _ = tx.send(Job {
+                        channel: reply_to,
+                        reply: Reply::Echo { target: id, mid, text },
+                    });
+                    let _ = tx.send(Job {
+                        channel: reply_to,
+                        reply: Reply::Text(vec![format!("sent to {} (msg {})", tag, mid)]),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(Job {
+                        channel: reply_to,
+                        reply: Reply::Text(vec![format!("send to {} failed: {e}", tag)]),
+                    });
+                }
+            }
         });
         self.notify("sending as artixy…");
     }
@@ -1045,9 +1259,42 @@ impl App {
                     self.chan_sync_at = Some(Instant::now());
                     self.apply_channel_list(list);
                 }
-                Reply::ChannelHistory(items) => {
+                Reply::ChannelHistory(items, failed) => {
                     self.hist_syncing = false;
+                    for (id, reason) in failed {
+                        self.hist_failed.insert(id, reason);
+                    }
                     self.apply_history(items);
+                }
+                Reply::Echo { target, mid, text } => {
+                    if mid != 0 {
+                        if self.seen_mids.len() > 2000 {
+                            self.seen_mids.clear();
+                        }
+                        self.seen_mids.insert(mid);
+                    }
+                    if self.channels.iter().position(|c| c.id == target).is_none() {
+                        self.ensure_live_channel(target);
+                        // Numeric-ID sends to a not-yet-synced channel would
+                        // otherwise stay hidden (guild 0); pin to the current
+                        // server view until the next sync corrects it.
+                        let g = self.effective_guild();
+                        if let Some(ch) = self.channels.iter_mut().find(|c| c.id == target) {
+                            if ch.guild == 0 {
+                                ch.guild = g;
+                            }
+                        }
+                        self.sort_live_channels();
+                    }
+                    if let Some(idx) = self.channels.iter().position(|c| c.id == target) {
+                        self.push_hist(idx, "artixy", ACCENT, "", &text);
+                        if idx == self.active {
+                            self.channels[idx].follow = true;
+                        } else {
+                            self.channels[idx].unread =
+                                self.channels[idx].unread.saturating_add(1);
+                        }
+                    }
                 }
                 Reply::Text(chunks) => {
                     if let Some(idx) = self.channels.iter().position(|c| c.id == job.channel) {
@@ -1070,20 +1317,27 @@ impl App {
         if idx < self.channels.len() {
             self.active = idx;
             self.list_state.select(Some(self.row_of(idx)));
+            if self.channels[idx].kind == ChannelKind::Live && self.channels[idx].guild != 0 {
+                self.cur_guild = self.channels[idx].guild;
+            }
             self.channels[idx].unread = 0;
             self.channels[idx].follow = true;
             self.hist_pos = None;
+            let cid = self.channels[idx].id;
+            if let Some(reason) = self.hist_failed.remove(&cid) {
+                if self.channels[idx].messages.is_empty() {
+                    self.say(idx, "system", DIM, "", &format!("no history here ({reason}) — /history retries, Tab switches server"));
+                }
+            }
         }
     }
 
     fn next_channel(&mut self) {
-        let n = self.channels.len().max(1);
-        self.goto((self.active + 1) % n);
+        self.step_channel(1);
     }
 
     fn prev_channel(&mut self) {
-        let n = self.channels.len().max(1);
-        self.goto((self.active + n - 1) % n);
+        self.step_channel(-1);
     }
 
 
@@ -1282,17 +1536,28 @@ impl App {
         let shown: String = text.chars().take(80).collect();
         tokio::spawn(async move {
             let http = serenity::Http::new(&token);
-            let msg = match serenity::ChannelId::new(id).say(&http, &text).await {
+            match serenity::ChannelId::new(id).say(&http, &text).await {
                 Ok(m) => {
-                    crate::tuirelay::claim_message(m.id.get());
-                    format!("ran {shown} as artixy in {tag} — reply lands here.")
+                    let mid = m.id.get();
+                    crate::tuirelay::claim_message(mid);
+                    let _ = tx.send(Job {
+                        channel: reply_to,
+                        reply: Reply::Echo { target: id, mid, text },
+                    });
+                    let _ = tx.send(Job {
+                        channel: reply_to,
+                        reply: Reply::Text(vec![format!(
+                            "ran {shown} as artixy in {tag} — reply lands here."
+                        )]),
+                    });
                 }
-                Err(e) => format!("command post to {tag} failed: {e}"),
-            };
-            let _ = tx.send(Job {
-                channel: reply_to,
-                reply: Reply::Text(vec![msg]),
-            });
+                Err(e) => {
+                    let _ = tx.send(Job {
+                        channel: reply_to,
+                        reply: Reply::Text(vec![format!("command post to {tag} failed: {e}")]),
+                    });
+                }
+            }
         });
         self.notify("running on discord…");
     }
@@ -1320,40 +1585,42 @@ impl App {
         }
     }
 
+    fn chan_line(&self, c: &Channel) -> String {
+        let typing = self.typing_in(c.id);
+        let t = if typing.is_empty() {
+            String::new()
+        } else {
+            format!(" — typing: {}", typing.join(", "))
+        };
+        format!("  - #{} (<#{}>){t}", c.name, c.id)
+    }
+
     fn list_channels(&mut self) {
         self.spawn_channel_sync();
         if self.id_to_name.is_empty() {
             self.say_active("system", DIM, "", "no discord channels yet — run the bot with a token and chat in discord.");
             return;
         }
+        let g = self.effective_guild();
+        let gname = self.guild_names.get(&g).cloned().unwrap_or_else(|| g.to_string());
         let mut lines: Vec<String> = Vec::new();
-        lines.push(format!(
-            "{} channels in {} servers (use with /say):",
-            self.id_to_name.len(),
-            self.guild_order().len().max(1)
-        ));
-        for g in self.guild_order() {
-            let gname = self.guild_names.get(&g).cloned().unwrap_or_else(|| g.to_string());
-            lines.push(format!("▾ {gname}"));
-            let mut chans: Vec<&Channel> = self
-                .channels
+        {
+            let rows = self.side_rows();
+            let n = rows
                 .iter()
-                .filter(|c| c.kind == ChannelKind::Live && c.guild == g)
-                .collect();
-            chans.sort_by(|a, b| {
-                a.name
-                    .to_lowercase()
-                    .cmp(&b.name.to_lowercase())
-                    .then_with(|| a.id.cmp(&b.id))
-            });
-            for c in chans {
-                let typing = self.typing_in(c.id);
-                let t = if typing.is_empty() {
-                    String::new()
-                } else {
-                    format!(" — typing: {}", typing.join(", "))
-                };
-                lines.push(format!("  - #{} (<#{}>){t}", c.name, c.id));
+                .filter(|r| matches!(r, SideRow::Chan(i) if self.channels[*i].kind == ChannelKind::Live))
+                .count();
+            lines.push(format!("{n} channels in {gname} (use with /say, Tab switches server):"));
+            for row in rows {
+                match row {
+                    SideRow::Cat(k) => lines.push(format!("▾ {}", self.cats[k].name)),
+                    SideRow::Chan(i) => {
+                        let c = &self.channels[i];
+                        if c.kind == ChannelKind::Live {
+                            lines.push(self.chan_line(c));
+                        }
+                    }
+                }
             }
         }
         let mut chunk: Vec<String> = Vec::new();
@@ -1600,8 +1867,24 @@ impl App {
             if let Some(r) = self.side_rows().get(row).copied() {
                 match r {
                     SideRow::Chan(i) => self.goto(i),
-                    SideRow::Head(g) => {
-                        if let Some(i) = self.first_of_guild(g) {
+                    SideRow::Cat(k) => {
+                        // Jump to the first channel in this category.
+                        let guild = self.effective_guild();
+                        let cat_id = self.cats.get(k).map(|c| c.id).unwrap_or(0);
+                        if let Some((i, _)) = self
+                            .channels
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| {
+                                c.kind == ChannelKind::Live
+                                    && c.guild == guild
+                                    && c.parent == cat_id
+                            })
+                            .min_by(|(_, a), (_, b)| {
+                                (a.pos, a.name.to_lowercase(), a.id)
+                                    .cmp(&(b.pos, b.name.to_lowercase(), b.id))
+                            })
+                        {
                             self.goto(i);
                         }
                     }
@@ -1798,25 +2081,70 @@ async fn fetch_all_guild_channels(token: &str) -> Vec<GuildChans> {
         if gname.is_empty() {
             continue;
         }
-        let mut chans: Vec<(u64, String)> = Vec::new();
-        for c in http.get_channels(g.id).await.unwrap_or_default() {
+        let mut cats: Vec<CatInfo> = Vec::new();
+        let mut chans: Vec<FetchedChan> = Vec::new();
+        let guild_channels = http.get_channels(g.id).await.unwrap_or_default();
+        for c in &guild_channels {
+            if c.kind == serenity::ChannelType::Category {
+                let name = c.name.trim().to_string();
+                if !name.is_empty() {
+                    cats.push(CatInfo {
+                        guild: g.id.get(),
+                        id: c.id.get(),
+                        name,
+                        pos: c.position as u32,
+                    });
+                }
+                continue;
+            }
             if c.is_text_based() || c.kind == serenity::ChannelType::Forum {
                 let name = c.name.trim().to_string();
                 if !name.is_empty() {
-                    chans.push((c.id.get(), name));
+                    chans.push(FetchedChan {
+                        id: c.id.get(),
+                        name,
+                        pos: c.position as u32,
+                        parent: c.parent_id.map(|p| p.get()).unwrap_or(0),
+                        voice: false,
+                    });
                 }
             }
         }
+        // Threads aren't in get_channels — include active ones so they show
+        // up like on the server instead of vanishing (e.g. new channels).
+        if let Ok(active) = g.id.get_active_threads(&http).await {
+            for t in &active.threads {
+                if t.parent_id.is_none() {
+                    continue;
+                }
+                let name = t.name.trim().to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                let tid = t.id.get();
+                if chans.iter().any(|c| c.id == tid) {
+                    continue;
+                }
+                chans.push(FetchedChan {
+                    id: tid,
+                    name,
+                    // Threads have no meaningful position; append after
+                    // regular channels in the same view.
+                    pos: u32::MAX,
+                    parent: t.parent_id.map(|p| p.get()).unwrap_or(0),
+                    voice: false,
+                });
+            }
+        }
         chans.sort_by(|a, b| {
-            a.1.to_lowercase()
-                .cmp(&b.1.to_lowercase())
-                .then_with(|| a.0.cmp(&b.0))
+            (a.pos, a.name.to_lowercase(), a.id).cmp(&(b.pos, b.name.to_lowercase(), b.id))
         });
-        chans.dedup_by_key(|(id, _)| *id);
+        chans.dedup_by_key(|c| c.id);
         if !chans.is_empty() {
             out.push(GuildChans {
                 id: g.id.get(),
                 name: gname,
+                cats,
                 channels: chans,
             });
         }
@@ -1833,7 +2161,7 @@ async fn fetch_all_guild_channels(token: &str) -> Vec<GuildChans> {
 fn flatten_guilds(groups: &[GuildChans]) -> Vec<(u64, String)> {
     let mut flat: Vec<(u64, String)> = Vec::new();
     for g in groups {
-        flat.extend(g.channels.iter().cloned());
+        flat.extend(g.channels.iter().map(|c| (c.id, c.name.clone())));
     }
     flat.sort_by(|a, b| {
         a.1.to_lowercase()
@@ -1844,40 +2172,85 @@ fn flatten_guilds(groups: &[GuildChans]) -> Vec<(u64, String)> {
     flat
 }
 
+fn hist_reason(s: &str) -> String {
+    if s.contains("403") {
+        "bot cannot read it".to_string()
+    } else if s.contains("404") {
+        "channel is gone".to_string()
+    } else if s.contains("401") {
+        "bad token".to_string()
+    } else {
+        "unavailable".to_string()
+    }
+}
+
 async fn fetch_recent_history(
     token: &str,
     channels: &[(u64, String)],
     per: u8,
-) -> Vec<HistMsg> {
+) -> (Vec<HistMsg>, Vec<(u64, String)>) {
     use serenity::builder::GetMessages;
     let http = serenity::Http::new(token);
     let own = http.get_current_user().await.map(|u| u.id).ok();
     let mut out: Vec<HistMsg> = Vec::new();
+    let mut failed: Vec<(u64, String)> = Vec::new();
     for (id, _) in channels {
-        let msgs = serenity::ChannelId::new(*id)
+        let msgs = match serenity::ChannelId::new(*id)
             .messages(&http, GetMessages::new().limit(per))
             .await
-            .unwrap_or_default();
-        for m in msgs.iter().rev() {
-            let text = m.content.trim().to_string();
-            if text.is_empty() {
+        {
+            Ok(m) => m,
+            Err(e) => {
+                failed.push((*id, hist_reason(&e.to_string())));
                 continue;
+            }
+        };
+        for m in msgs.iter().rev() {
+            let mut text = m.content.trim().to_string();
+            if text.is_empty() {
+                let mut parts: Vec<String> = Vec::new();
+                for a in &m.attachments {
+                    let n = a.filename.trim();
+                    if n.is_empty() {
+                        parts.push("[attachment]".to_string());
+                    } else {
+                        parts.push(format!(
+                            "[attachment: {}]",
+                            n.chars().take(64).collect::<String>()
+                        ));
+                    }
+                }
+                if !m.embeds.is_empty() {
+                    parts.push(format!("[{} embed(s)]", m.embeds.len()));
+                }
+                if !m.sticker_items.is_empty() {
+                    parts.push("[sticker]".to_string());
+                }
+                if parts.is_empty() {
+                    continue;
+                }
+                text = parts.join(" ");
             }
             let author = m
                 .author
                 .global_name
                 .clone()
                 .unwrap_or_else(|| m.author.name.clone());
+            // Artixy's own webhook posts don't share the bot user id, so
+            // also treat bot messages named artixy as mine for display + AI
+            // memory. Other bots stay bot-colored, non-mine.
+            let mine = own.map(|o| o == m.author.id).unwrap_or(false)
+                || (m.author.bot && m.author.name.eq_ignore_ascii_case("artixy"));
             out.push(HistMsg {
                 channel: *id,
                 author,
                 bot: m.author.bot,
-                mine: own.map(|o| o == m.author.id).unwrap_or(false),
+                mine,
                 text,
             });
         }
     }
-    out
+    (out, failed)
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -1954,15 +2327,11 @@ fn render(frame: &mut Frame, app: &mut App) {
     let mut items: Vec<ListItem> = Vec::new();
     for row in app.side_rows() {
         match row {
-            SideRow::Head(g) => {
-                let label = if g == 0 {
-                    " other ".to_string()
-                } else {
-                    format!(
-                        " ▾ {} ",
-                        app.guild_names.get(&g).cloned().unwrap_or_else(|| g.to_string())
-                    )
-                };
+            SideRow::Cat(k) => {
+                let label = format!(
+                    " ▾ {} ",
+                    app.cats.get(k).map(|c| c.name.as_str()).unwrap_or("?")
+                );
                 items.push(ListItem::new(Line::from(Span::styled(
                     label,
                     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -1999,13 +2368,20 @@ fn render(frame: &mut Frame, app: &mut App) {
     app.list_state.select(Some(app.row_of(app.active)));
     app.side_area = side;
     app.chat_area = chat;
+    let side_title = {
+        let g = app.effective_guild();
+        match app.guild_names.get(&g) {
+            Some(n) if g != 0 => format!(" {} ", n),
+            _ => " channels ".to_string(),
+        }
+    };
     let side_list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(DIM))
-                .title(" channels "),
+                .title(side_title),
         )
         .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
         .highlight_symbol("▸ ");
