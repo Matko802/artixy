@@ -59,6 +59,10 @@ pub(crate) fn default_model() -> String {
     "llama3.1".to_string()
 }
 
+pub(crate) fn default_gemini_model() -> String {
+    "gemini-3.6-flash".to_string()
+}
+
 pub(crate) fn default_host() -> String {
     "http://127.0.0.1:11434".to_string()
 }
@@ -672,7 +676,7 @@ pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
     }
     let contents = vec![serde_json::json!({"role": "user", "parts": [{"text": query}]})];
     let out = match gemini_generate(
-        "gemini-2.5-flash",
+        &default_gemini_model(),
         key,
         "You are a fast web research helper. Answer briefly from Google search results.",
         &contents,
@@ -705,7 +709,7 @@ pub(crate) async fn web_status(key: &str) -> String {
     let t0 = std::time::Instant::now();
     let contents = vec![serde_json::json!({"role": "user", "parts": [{"text": "latest gpu"}]})];
     match gemini_generate(
-        "gemini-2.5-flash",
+        &default_gemini_model(),
         key,
         "Answer in one short sentence from Google search results.",
         &contents,
@@ -1196,6 +1200,7 @@ mod tests {
     #[test]
     fn gemini_model_routing() {
         assert!(is_gemini_model("gemini-2.5-flash"));
+        assert_eq!(default_gemini_model(), "gemini-3.6-flash");
         assert!(is_gemini_model("GEMINI-2.0-flash"));
         assert!(!is_gemini_model("llama3.1"));
         assert!(!is_gemini_model("qwen3:4b"));
