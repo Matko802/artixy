@@ -1,8 +1,49 @@
-use std::sync::OnceLock;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
+
+struct HistoryItem {
+    role: String,
+    content: String,
+}
+
+fn history_map() -> &'static Mutex<HashMap<u64, VecDeque<HistoryItem>>> {
+    static HISTORY: OnceLock<Mutex<HashMap<u64, VecDeque<HistoryItem>>>> = OnceLock::new();
+    HISTORY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn snapshot(channel: u64) -> Vec<HistoryItem> {
+    history_map()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&channel)
+        .map(|q| q.iter().map(|e| HistoryItem { role: e.role.clone(), content: e.content.clone() }).collect())
+        .unwrap_or_default()
+}
+
+fn push(channel: u64, role: String, content: String) {
+    let mut map = history_map().lock().unwrap_or_else(|e| e.into_inner());
+    if !map.contains_key(&channel) && map.len() >= 200 {
+        if let Some(k) = map.keys().next().cloned() {
+            map.remove(&k);
+        }
+    }
+    let q = map.entry(channel).or_insert_with(VecDeque::new);
+    q.push_back(HistoryItem { role, content });
+    while q.len() > 20 {
+        q.pop_front();
+    }
+    loop {
+        let total: usize = q.iter().map(|e| e.content.len()).sum();
+        if total <= 6000 || q.is_empty() {
+            break;
+        }
+        q.pop_front();
+    }
+}
 
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -97,16 +138,21 @@ const SYSTEM_PROMPT: &str = "You are artixy, a friendly furry artix linux. Talk 
 Be helpful and concise, keep replies under 2000 characters. You can use Discord markdown. \
 remember who is who.and type instead of @name just name";
 
-pub(crate) async fn ollama_chat(host: &str, model: &str, speaker: &str, prompt: &str) -> Result<String, Error> {
+pub(crate) async fn ollama_chat(host: &str, model: &str, channel: u64, speaker: &str, prompt: &str) -> Result<String, Error> {
     let host = host.trim_end_matches('/');
     let url = format!("{host}/api/chat");
     let tagged = format!("[{}]: {}", speaker_tag(speaker), prompt);
+    let past = snapshot(channel);
+    let mut messages = Vec::with_capacity(past.len() + 2);
+    messages.push(ChatMessage { role: "system", content: SYSTEM_PROMPT });
+    for e in &past {
+        let role = if e.role == "assistant" { "assistant" } else { "user" };
+        messages.push(ChatMessage { role, content: e.content.as_str() });
+    }
+    messages.push(ChatMessage { role: "user", content: tagged.as_str() });
     let req = ChatRequest {
         model,
-        messages: vec![
-            ChatMessage { role: "system", content: SYSTEM_PROMPT },
-            ChatMessage { role: "user", content: &tagged },
-        ],
+        messages,
         stream: false,
     };
     let resp = client().post(&url).json(&req).send().await?;
@@ -127,7 +173,15 @@ pub(crate) async fn ollama_chat(host: &str, model: &str, speaker: &str, prompt: 
     if text.is_empty() {
         return Err("ollama returned an empty reply".into());
     }
+    push(channel, "user".to_string(), tagged);
+    push(channel, "assistant".to_string(), text.clone());
     Ok(text)
+}
+
+pub(crate) fn clear_history(channel: u64) {
+    if let Ok(mut map) = history_map().lock() {
+        map.remove(&channel);
+    }
 }
 
 pub(crate) async fn model_present(host: &str, model: &str) -> Option<bool> {

@@ -170,7 +170,7 @@ pub(crate) async fn event_handler(
                 prompt = prompt.chars().take(4000).collect();
             }
             let _ = new_message.channel_id.broadcast_typing(&ctx.http).await;
-            match crate::ai::ollama_chat(&ai_host, &ai_model, &speaker, &prompt).await {
+            match crate::ai::ollama_chat(&ai_host, &ai_model, new_message.channel_id.get(), &speaker, &prompt).await {
                 Ok(text) => {
                     let chunks = crate::ai::chunk_reply(&text);
                     let mut first = true;
