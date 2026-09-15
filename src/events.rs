@@ -107,14 +107,12 @@ pub(crate) async fn event_handler(
     if new_message.author.bot {
         return Ok(());
     }
-    // --- Ollama AI chat when the bot is pinged (@artixy <question>) ---
     let me_id: u64 = ctx.cache.current_user().id.get();
     let mentioned = new_message.mentions.iter().any(|u| u.id.get() == me_id)
         || new_message.content.contains(&format!("<@{me_id}>"))
         || new_message.content.contains(&format!("<@!{me_id}>"));
     if mentioned {
         let prompt0 = crate::ai::strip_mention(&new_message.content, me_id);
-        // Let real commands through: `@artixy /run x` / `@artixy ;shell` etc.
         let is_command = prompt0.starts_with('/') || prompt0.starts_with(';');
         if !is_command {
             let authed = {
@@ -135,8 +133,6 @@ pub(crate) async fn event_handler(
                 return Ok(());
             }
             let mut prompt = prompt0.clone();
-            // Who's talking: guild nick > global display name > username,
-            // plus the @handle so the model can tell same-named people apart.
             let display = new_message
                 .member
                 .as_ref()
@@ -283,7 +279,6 @@ pub(crate) async fn event_handler(
             && !content.starts_with(';')
             && !content.ends_with(".ar");
         if plain_text || (has_files && content.is_empty()) {
-            // Download first so files-only messages (empty text) still forward.
             let (mut files, _) = download_sayas_files(&new_message.attachments).await;
             let mut body = content.clone();
             if body.chars().count() > 2000 {
@@ -360,7 +355,6 @@ pub(crate) async fn event_handler(
             new_message.id.get()
         );
     }
-    // Files stuck onto the `.ar` message ride along as artix too.
     let (mut ar_files, _) = download_sayas_files(&new_message.attachments).await;
     let mut ar_body = text.clone();
     if ar_body.chars().count() > 2000 {
@@ -383,7 +377,6 @@ pub(crate) async fn event_handler(
             }
         }
     } else if ar_body.is_empty() && ar_files.is_empty() {
-        // Nothing downloadable — nothing to repost.
     } else {
         match &new_message.referenced_message {
             Some(target) => {

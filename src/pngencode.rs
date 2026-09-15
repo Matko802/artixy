@@ -1,9 +1,3 @@
-//! Minimal PNG encoder: 8-bit RGB, non-interlaced, filter 0.
-//!
-//! Replaces the `png` crate (and with it `fdeflate`) for our single use case.
-//! Compression still comes from miniz_oxide (already in the tree via flate2),
-//! checksums from the `adler2` crate; only framing + CRC32 live here.
-
 const CRC_TABLE: [u32; 256] = make_crc_table();
 
 const fn make_crc_table() -> [u32; 256] {
@@ -42,7 +36,6 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
 
 #[cfg(test)]
 fn zlib_stream(raw: &[u8]) -> Vec<u8> {
-    // Filter-0 scanlines, then one zlib stream (stored blocks) + adler32.
     let mut out = Vec::with_capacity(raw.len() + raw.len() / 1000 + 16);
     out.extend_from_slice(&[0x78, 0x01]);
     let mut rest = raw;
@@ -64,8 +57,6 @@ fn zlib_stream(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Encode raw RGB pixels (row-major, no padding) to a PNG file.
-/// Returns None on bad dimensions instead of panicking.
 pub(crate) fn encode_rgb(width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>> {
     const LEVEL: u8 = 6;
     if width == 0 || height == 0 {
@@ -96,9 +87,6 @@ pub(crate) fn encode_rgb(width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>>
     Some(out)
 }
 
-/// Same framing but with an uncompressed zlib stream (stored blocks +
-/// adler32, no miniz_oxide involved). Used to cross-check the real encoder
-/// in tests: any spec-compliant decoder must accept both.
 #[cfg(test)]
 pub(crate) fn encode_rgb_stored(width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>> {
     if width == 0 || height == 0 {

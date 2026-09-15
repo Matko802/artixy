@@ -25,7 +25,7 @@ pub(crate) type LiveMap = std::sync::Arc<
     >,
 >;
 
-pub(crate) const LIVE_TIMEOUT_SECS: u64 = 0; // 0 = no timeout, interactive apps stay alive
+pub(crate) const LIVE_TIMEOUT_SECS: u64 = 0;
 pub(crate) const LIVE_POLL: std::time::Duration = std::time::Duration::from_millis(180);
 pub(crate) const LIVE_QUICK: std::time::Duration = std::time::Duration::from_millis(180);
 pub(crate) const LIVE_EDIT_MIN_INTERVAL: std::time::Duration =
@@ -60,13 +60,6 @@ pub(crate) fn build_runner(
     runas: Option<&str>,
 ) -> String {
     use crate::termrender::{TERM_COLS, TERM_ROWS};
-    // Guest-exec inherits qemu-ga's cwd (often / or a root-owned service dir
-    // like /etc/dinit.d), and plain `su user` keeps root's $HOME. Both break
-    // builds: `git clone` can't mkdir and `makepkg` refuses with
-    // "You do not have write permission for $BUILDDIR".
-    // So the inner shell always cds somewhere writable first. With a login
-    // `su -` (see live_run) ~ and $HOME already point at the user's home;
-    // the `cd ~user` prefix covers non-login fallbacks too.
     let home_cd = match runas.filter(|u| valid_runas(u)) {
         Some(u) => format!("cd ~{u} 2>/dev/null || cd \"$HOME\" 2>/dev/null || cd /tmp; "),
         None => "cd \"$HOME\" 2>/dev/null || cd /tmp; ".to_string(),
@@ -102,13 +95,11 @@ pub(crate) async fn abort_live_for_user(
     old
 }
 
-// legacy name kept for any external callers — now per-user
 #[allow(dead_code)]
 pub(crate) async fn abort_live_for_channel(
     live_map: &LiveMap,
     channel: serenity::ChannelId,
 ) -> Option<LiveEntry> {
-    // fallback: remove any one entry for that channel (used only for non-live cleanups)
     let mut m = live_map.lock().await;
     let key = m.keys().find(|(c, _)| *c == channel).cloned();
     if let Some(k) = key {
@@ -334,16 +325,10 @@ pub(crate) fn live_closed_text() -> String {
     codeblock(LIVE_CLOSED_TEXT)
 }
 
-/// A live session that was showing image frames and then ends cleanly leaves
-/// a frozen leftover frame behind. Such sessions should swap the image for
-/// the closed notice instead — except failed runs, whose final output is
-/// the error the user needs to see.
 pub(crate) fn live_end_closes(code: i64, posted_live_frame: bool, has_fonts: bool) -> bool {
     code == 0 && posted_live_frame && has_fonts
 }
 
-/// Replace a dead live feed with the closed notice and drop its image,
-/// instead of leaving the last frame frozen in place.
 pub(crate) async fn close_live_message(
     http: &std::sync::Arc<serenity::Http>,
     channel: serenity::ChannelId,
@@ -544,9 +529,6 @@ pub(crate) async fn live_run(
     let input = in_f.as_deref().unwrap_or("/dev/null");
     let script = build_runner("bash", &b64, &out_f, &code_f, input, runas.as_deref());
     let script_sh = build_runner("sh", &b64, &out_f, &code_f, input, runas.as_deref());
-    // `su -` (login) sets HOME/USER and cds into the user's home. Plain
-    // `su user` keeps qemu-ga's cwd (e.g. /etc/dinit.d) and HOME=/root,
-    // which breaks git/makepkg with "Permission denied" / bad $BUILDDIR.
     let (lpath, largs): (&str, Vec<&str>) = match &runas {
         Some(u) => ("su", vec!["-", u.as_str(), "-s", "/bin/bash", "-c", &script]),
         None => ("/bin/bash", vec!["-c", &script]),

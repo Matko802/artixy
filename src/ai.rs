@@ -14,13 +14,10 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
-/// Default model used when nothing is configured yet.
 pub(crate) fn default_model() -> String {
     "llama3.1".to_string()
 }
 
-/// Default Ollama base URL. Overridable via `OLLAMA_HOST` / `OLLAMA_URL` env
-/// or the `ollama_host` config key (env wins when set).
 pub(crate) fn default_host() -> String {
     "http://127.0.0.1:11434".to_string()
 }
@@ -42,8 +39,6 @@ pub(crate) fn resolve_host(configured: &str) -> String {
     }
 }
 
-/// Ollama model names look like `llama3.1`, `qwen2.5-coder:7b`,
-/// `hf.co/org/model:tag`. Keep it tight so it can't become a shell/URL trick.
 pub(crate) fn valid_model_name(s: &str) -> bool {
     let s = s.trim();
     if s.is_empty() || s.len() > 128 {
@@ -98,14 +93,9 @@ struct TagEntry {
     name: String,
 }
 
-const SYSTEM_PROMPT: &str = "You are artixy, a cute furry Discord bot living in an Artix Linux VM community. \
-You are warm, affectionate and playful, with a soft furry vibe: occasional `:3`, \
-*does cute actions in asterisks*, gentle teasing, paws and tail energy — but keep it natural, never forced. \
-Use emojis very sparingly: at most one per message, and often none at all. \
-Reply helpfully and concisely. Keep replies under 1500 characters unless asked for more. \
-You can use Discord markdown (code fences for code/commands). Never claim to be human. \
-Each user message starts with the speaker's Discord name in brackets, e.g. `[Bob]: hello`. \
-Remember who said what, address people by name when it fits, and never confuse one speaker for another.";
+const SYSTEM_PROMPT: &str = "You are artixy, a friendly furry artix linux. Talk like a normal human, casual and a bit silly. \
+Be helpful and concise, keep replies under 2000 characters. You can use Discord markdown. \
+remember who is who.and type instead of @name just name";
 
 pub(crate) async fn ollama_chat(host: &str, model: &str, speaker: &str, prompt: &str) -> Result<String, Error> {
     let host = host.trim_end_matches('/');
@@ -140,9 +130,6 @@ pub(crate) async fn ollama_chat(host: &str, model: &str, speaker: &str, prompt: 
     Ok(text)
 }
 
-/// Best-effort check whether `model` is already pulled locally.
-/// Returns `None` when the server can't be reached / list can't parse
-/// (caller should not block saving the model name in that case).
 pub(crate) async fn model_present(host: &str, model: &str) -> Option<bool> {
     let url = format!("{}/api/tags", host.trim_end_matches('/'));
     let resp = client().get(&url).send().await.ok()?;
@@ -158,8 +145,6 @@ pub(crate) async fn model_present(host: &str, model: &str) -> Option<bool> {
     }))
 }
 
-/// Clean a Discord display/username for the `[name]:` speaker tag:
-/// single line, no brackets (they're the tag delimiters), capped length.
 pub(crate) fn speaker_tag(raw: &str) -> String {
     let flat: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     let clean: String = flat
@@ -181,7 +166,6 @@ pub(crate) fn speaker_tag(raw: &str) -> String {
     }
 }
 
-/// Strip `<@id>` / `<@!id>` mentions of the bot from a message, leaving the prompt.
 pub(crate) fn strip_mention(content: &str, bot_id: u64) -> String {
     content
         .replace(&format!("<@{bot_id}>"), "")
@@ -190,7 +174,6 @@ pub(crate) fn strip_mention(content: &str, bot_id: u64) -> String {
         .to_string()
 }
 
-/// Split a long AI reply into Discord-sized chunks (<= 1900 chars each).
 pub(crate) fn chunk_reply(s: &str) -> Vec<String> {
     const MAX: usize = 1900;
     const MAX_CHUNKS: usize = 4;
@@ -204,7 +187,6 @@ pub(crate) fn chunk_reply(s: &str) -> Vec<String> {
     for line in s.lines() {
         let line_len = line.chars().count() + 1;
         if line_len > MAX {
-            // Single huge line: hard-split it.
             if !cur.trim().is_empty() {
                 chunks.push(cur.trim_end().to_string());
                 cur = String::new();

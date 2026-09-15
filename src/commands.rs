@@ -397,7 +397,6 @@ pub(crate) fn parse_message_ref(s: &str, current_channel: u64) -> Option<(u64, u
     Some((current_channel, id))
 }
 
-/// Discord-side cap for a single re-uploaded attachment (~25MB).
 pub(crate) const SAYAS_MAX_FILE_BYTES: u64 = 25 * 1024 * 1024;
 
 pub(crate) fn safe_attach_name(raw: &str) -> String {
@@ -488,9 +487,6 @@ pub(crate) async fn sayas(
         }
         return Ok(());
     }
-    // Attachments supplied either as slash options or stuck onto the `;sayas`
-    // prefix message itself. Presence (not download success) decides whether
-    // an otherwise-empty invocation toggles auto mode or sends files.
     let mut pending: Vec<serenity::Attachment> = Vec::new();
     for f in [file, file2, file3].into_iter().flatten() {
         pending.push(f);
@@ -513,16 +509,12 @@ pub(crate) async fn sayas(
     }
     let http = ctx.serenity_context().http.clone();
     let channel = ctx.channel_id();
-    // Grab the bytes *before* deleting the prefix trigger so a `;sayas`
-    // message with uploads still forwards them.
     let (mut files, mut problems) = download_sayas_files(&pending).await;
     if !prefix_files.is_empty() {
         let (mut pf, mut pp) = download_sayas_files(&prefix_files).await;
         files.append(&mut pf);
         problems.append(&mut pp);
     }
-    // Long text can't ride in message content — ship it as a .txt sidecar
-    // alongside any user uploads.
     let mut body = text.clone();
     if body.chars().count() > 2000 {
         files.insert(
@@ -1015,7 +1007,6 @@ pub(crate) async fn ai(
         );
     }
     persist_runtime(ctx.data()).await?;
-    // Best-effort: warn when the model isn't pulled locally yet.
     if enabled == Some(true) || model_touched {
         let (host, m) = {
             let s = ctx.data().settings.read().await;
@@ -1263,16 +1254,10 @@ pub(crate) fn sanitize_discord_name(s: &str) -> Option<String> {
     }
 }
 
-/// Bash snippet (run as root in the guest) that grants `user` passwordless
-/// sudo. Idempotent: safe to re-run for new and already-linked accounts.
-/// Returns `None` for invalid names (including `root`) so we never write a
-/// sudoers file with junk in it.
 pub(crate) fn sudoers_script(user: &str) -> Option<String> {
     if !valid_runas(user) {
         return None;
     }
-    // valid_runas() only allows [a-z0-9_-] starting with [a-z_], so
-    // interpolating into single quotes below cannot break out.
     Some(format!(
         "set -eu; u='{u}'; f=\"/etc/sudoers.d/$u\"; \
         printf '%s ALL=(ALL) NOPASSWD: ALL\\n' \"$u\" >\"$f.tmp\"; \
@@ -1370,9 +1355,6 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
         a.linux.insert(uid.to_string(), name.clone());
     }
     persist_runtime(ctx.data()).await?;
-    // Grant passwordless sudo to the new account plus every other linked
-    // account, so `sudo` stops complaining about missing permissions for
-    // anyone the bot manages (new users AND pre-existing ones).
     let targets: Vec<String> = {
         let a = ctx.data().allowed.read().await;
         let mut seen = std::collections::HashSet::new();
@@ -1425,8 +1407,6 @@ pub(crate) async fn do_userdel(ctx: Context<'_>, user: &serenity::User) -> Resul
         match linked {
             Some(n) if valid_runas(&n) => {
                 let Some(vm) = require_vm(ctx).await else { return Ok(()); };
-                // Drop their NOPASSWD drop-in first so a deleted user never
-                // keeps sudo (best-effort; userdel below is the real removal).
                 let dropin = format!("/etc/sudoers.d/{n}");
                 let _ = guest_exec(&vm, "/bin/rm", &["-f", &dropin], false, 10).await;
                 let mut rc = guest_exec(&vm, "/usr/sbin/userdel", &["-r", &n], false, 30).await;

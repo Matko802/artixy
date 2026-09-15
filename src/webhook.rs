@@ -333,8 +333,6 @@ pub(crate) async fn edit_posted(
     }
 }
 
-/// Edit a message's text AND drop all of its attachments (e.g. a stale
-/// live-feed image). A plain content edit leaves old attachments in place.
 pub(crate) async fn edit_cleared(
     poster: &Poster,
     http: &std::sync::Arc<serenity::Http>,
@@ -371,8 +369,6 @@ pub(crate) async fn post_text(ctx: Context<'_>, content: impl Into<String>) -> R
     post_response(ctx, content.into(), Vec::new()).await
 }
 
-/// Denial reply that pings the caller and (for prefix commands) inline-replies
-/// to their message, so unauthorized users actually get notified.
 pub(crate) async fn post_denied(ctx: Context<'_>, content: &str) -> Result<serenity::Message, Error> {
     let http = ctx.serenity_context().http.clone();
     let text = format!("<@{}> {}", ctx.author().id.get(), content);

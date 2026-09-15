@@ -184,8 +184,6 @@ fn named_color(n: NamedColor) -> [u8; 3] {
     }
 }
 
-/// Real terminals draw bold text in the bright color variants (only the 8
-/// normal colors change; bright/indexed/rgb/fg/bg stay as they are).
 pub(crate) fn brighten(color: Color) -> Color {
     match color {
         Color::Named(n) => Color::Named(match n {
