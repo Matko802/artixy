@@ -56,7 +56,7 @@ async fn require_vm(ctx: Context<'_>) -> Option<String> {
 pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
-\n**Who can use me**\n`/user` — one command: `/user list` shows owner + managers, `/user add @user` (owner only) links them and creates their Linux account in Artix, `/user remove @user` (owner only) revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner only (`/ai true model:llama3.1`), view is for all users: Ollama chat. When enabled, ping me (`@artixy <question>` or `artixy <question>`) and I answer with the configured model.\n`/websearch <query>` — search the web, simple list of answers.\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
+\n**Who can use me**\n`/user` — one command: `/user list` shows owner + managers, `/user add @user` (owner only) links them and creates their Linux account in Artix, `/user remove @user` (owner only) revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner only (`/ai true model:llama3.1` for local Ollama, `/ai true model:gemini-2.5-flash` for Gemini with built-in Google search, needs `gemini_api_key` in config or GEMINI_API_KEY env), view is for all users. When enabled, ping me (`@artixy <question>` or `artixy <question>`) and I answer with the configured model.\n`/websearch <query>` — web-grounded answer via Gemini (needs `gemini_api_key` in config).\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
 \n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to] [file] [file2] [file3]` — owner only: `no args` toggles auto say-as-artix mode, `message` and/or attached files send as artix (reply_to = message ID/link). Files attached to the slash command (or to the `;sayas` prefix message) are re-uploaded as artix. Output is ephemeral (only you see it).\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
@@ -961,7 +961,7 @@ pub(crate) async fn notify(
 pub(crate) async fn ai(
     ctx: Context<'_>,
     #[description = "true to enable AI chat, false to disable (empty shows status)"] enabled: Option<bool>,
-    #[description = "Ollama model, e.g. llama3.1 or qwen2.5-coder:7b"] model: Option<String>,
+    #[description = "Ollama model e.g. llama3.1, or gemini-2.5-flash for Gemini"] model: Option<String>,
     #[description = "true to forget conversation memory in this channel"] forget: Option<bool>,
 ) -> Result<(), Error> {
     if forget == Some(true) {
@@ -981,17 +981,24 @@ pub(crate) async fn ai(
         return Ok(());
     }
     if !changing {
-        let (state, ai_model, ai_host) = {
+        let (state, ai_model, ai_host, ai_key) = {
             let s = ctx.data().settings.read().await;
             (
                 if s.ai_enabled { "enabled" } else { "disabled" }.to_string(),
                 s.ai_model.clone(),
                 crate::ai::resolve_host(&s.ollama_host),
+                crate::ai::resolve_gemini_key(&s.gemini_api_key),
             )
         };
-        let web = crate::ai::web_status().await;
+        let backend = if crate::ai::is_gemini_model(&ai_model) {
+            "gemini (built-in Google search)"
+        } else {
+            "ollama"
+        };
+        let key_state = if ai_key.is_empty() { "missing" } else { "set" };
+        let web = crate::ai::web_status(&ai_key).await;
         post_text(ctx, format!(
-            "AI chat is **{state}** — model `{ai_model}` on `{ai_host}`.\n{web}\nOwner: `/ai true model:llama3.1` to enable (or `/ai false` to disable). Then just ping me `@artixy <question>` or `artixy <question>`.",
+            "AI chat is **{state}** — model `{ai_model}` via {backend} (`{ai_host}`).\nGemini key: {key_state} (`gemini_api_key` in config or GEMINI_API_KEY env).\n{web}\nOwner: `/ai true model:llama3.1` for local, `/ai true model:gemini-2.5-flash` for Gemini. Then just ping me `@artixy <question>` or `artixy <question>`.",
         ))
         .await?;
         return Ok(());
@@ -1057,24 +1064,16 @@ pub(crate) async fn websearch(
     }
     maybe_defer(ctx).await;
     let short: String = query.chars().take(200).collect();
-    let results = crate::ai::ddg_html_search(&short).await;
-    if results.is_empty() {
-        post_text(ctx, format!("No web results for `{short}`.")).await?;
+    let ai_key = {
+        let s = ctx.data().settings.read().await;
+        crate::ai::resolve_gemini_key(&s.gemini_api_key)
+    };
+    if ai_key.is_empty() {
+        post_text(ctx, "Web search is not configured: set `gemini_api_key` in config or GEMINI_API_KEY env.").await?;
         return Ok(());
     }
-    let mut out = format!("Search: `{short}`\n");
-    for (i, (title, link, snip)) in results.iter().take(5).enumerate() {
-        let t: String = title.chars().take(120).collect();
-        let s: String = snip.chars().take(200).collect();
-        if s.trim().is_empty() {
-            out.push_str(&format!("\n{}. {t}\n   <{link}>", i + 1));
-        } else {
-            out.push_str(&format!("\n{}. {t}\n   {s}\n   <{link}>", i + 1));
-        }
-        if out.chars().count() > 1800 {
-            break;
-        }
-    }
+    let answer = crate::ai::run_websearch(&ai_key, &short).await;
+    let out = format!("Search: `{short}`\n{answer}");
     let out: String = out.chars().take(1900).collect();
     post_text(ctx, out).await?;
     Ok(())

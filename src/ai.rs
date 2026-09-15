@@ -370,48 +370,6 @@ struct TagEntry {
     name: String,
 }
 
-#[derive(Deserialize, Default)]
-#[allow(non_snake_case)]
-struct DdgResponse {
-    #[serde(default)]
-    Answer: String,
-    #[serde(default)]
-    AbstractText: String,
-    #[serde(default)]
-    AbstractURL: String,
-    #[serde(default)]
-    RelatedTopics: Vec<DdgTopic>,
-}
-
-#[derive(Deserialize, Default)]
-#[allow(non_snake_case)]
-struct DdgTopic {
-    #[serde(default)]
-    Text: String,
-    #[serde(default)]
-    FirstURL: String,
-}
-
-#[derive(Deserialize, Default)]
-struct WikiResponse {
-    #[serde(default)]
-    query: WikiQuery,
-}
-
-#[derive(Deserialize, Default)]
-struct WikiQuery {
-    #[serde(default)]
-    search: Vec<WikiItem>,
-}
-
-#[derive(Deserialize, Default)]
-struct WikiItem {
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    snippet: String,
-}
-
 pub(crate) fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -526,6 +484,7 @@ pub(crate) async fn fetch_url_text(url: &str) -> Option<String> {
     Some(text)
 }
 
+#[allow(dead_code)]
 pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -550,287 +509,6 @@ pub(crate) fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn extract_ddg_results(html: &str) -> Vec<(String, String, String)> {
-    let mut out = Vec::new();
-    let mut pos = 0;
-    while out.len() < 5 {
-        let a_start = match html[pos..].find("result__a") {
-            Some(k) => pos + k,
-            None => break,
-        };
-        let href_key = match html[a_start..].find("href=\"") {
-            Some(k) => a_start + k + 6,
-            None => {
-                pos = a_start + 10;
-                continue;
-            }
-        };
-        let href_end = match html[href_key..].find('"') {
-            Some(k) => href_key + k,
-            None => break,
-        };
-        let mut link = html[href_key..href_end].to_string();
-        if let Some(u) = link.find("uddg=") {
-            let enc = &link[u + 5..];
-            let enc = enc.split('&').next().unwrap_or(enc);
-            link = percent_decode(enc);
-        } else if let Some(rest) = link.strip_prefix("//") {
-            link = format!("https://{rest}");
-        }
-        let tag_end = match html[href_end..].find('>') {
-            Some(k) => href_end + k + 1,
-            None => break,
-        };
-        let title_end = match html[tag_end..].find("</a>") {
-            Some(k) => tag_end + k,
-            None => break,
-        };
-        let title = strip_html(&html[tag_end..title_end]);
-        let snip = match html[title_end..].find("result__snippet") {
-            Some(k) => {
-                let s = title_end + k;
-                let body = match html[s..].find('>') {
-                    Some(b) => s + b + 1,
-                    None => s,
-                };
-                match html[body..].find("</") {
-                    Some(e) => strip_html(&html[body..body + e]),
-                    None => String::new(),
-                }
-            }
-            None => String::new(),
-        };
-        pos = title_end + 4;
-        if !title.trim().is_empty() && (link.starts_with("http://") || link.starts_with("https://")) {
-            out.push((title.trim().to_string(), link.trim().to_string(), snip.trim().to_string()));
-        }
-        if pos >= html.len() {
-            break;
-        }
-    }
-    out
-}
-
-fn normalize_link(raw: &str) -> Option<String> {
-    let mut link = raw.to_string();
-    if let Some(u) = link.find("uddg=") {
-        let enc = &link[u + 5..];
-        let enc = enc.split('&').next().unwrap_or(enc);
-        link = percent_decode(enc);
-    } else if let Some(rest) = link.strip_prefix("//") {
-        link = format!("https://{rest}");
-    }
-    if link.starts_with("http://") || link.starts_with("https://") {
-        Some(link)
-    } else {
-        None
-    }
-}
-
-fn extract_lite_results(html: &str) -> Vec<(String, String, String)> {
-    let mut out = Vec::new();
-    let mut pos = 0;
-    while out.len() < 5 {
-        let tag_start = match html[pos..].find("<a") {
-            Some(k) => pos + k,
-            None => break,
-        };
-        let tag_end_opt = html[tag_start..].find('>').map(|k| tag_start + k);
-        let tag_end = match tag_end_opt {
-            Some(e) => e,
-            None => break,
-        };
-        let tag = &html[tag_start..tag_end];
-        if !tag.contains("result-link") {
-            pos = tag_end + 1;
-            continue;
-        }
-        let href_key = match tag.find("href=") {
-            Some(k) => tag_start + k + 5,
-            None => {
-                pos = tag_end + 1;
-                continue;
-            }
-        };
-        let (quote, val_start) = match html[href_key..].chars().next() {
-            Some(q) if q == '"' || q == '\'' => (q, href_key + 1),
-            _ => {
-                pos = href_key + 1;
-                continue;
-            }
-        };
-        let href_end = match html[val_start..].find(quote) {
-            Some(k) => val_start + k,
-            None => break,
-        };
-        let raw = html[val_start..href_end].to_string();
-        let tag_end = match html[href_end..].find('>') {
-            Some(k) => href_end + k + 1,
-            None => break,
-        };
-        let title_end = match html[tag_end..].find("</a>") {
-            Some(k) => tag_end + k,
-            None => break,
-        };
-        let title = strip_html(&html[tag_end..title_end]);
-        let snip = match html[title_end..].find("result-snippet") {
-            Some(k) => {
-                let s = title_end + k;
-                let body = match html[s..].find('>') {
-                    Some(b) => s + b + 1,
-                    None => s,
-                };
-                match html[body..].find("</td>") {
-                    Some(e) => strip_html(&html[body..body + e]),
-                    None => String::new(),
-                }
-            }
-            None => String::new(),
-        };
-        pos = title_end + 4;
-        if !title.trim().is_empty() {
-            if let Some(link) = normalize_link(raw.trim()) {
-                out.push((title.trim().to_string(), link, snip.trim().to_string()));
-            }
-        }
-        if pos >= html.len() {
-            break;
-        }
-    }
-    out
-}
-
-async fn fetch_search_page(url: &str) -> Option<String> {
-    let resp = tokio::time::timeout(
-        std::time::Duration::from_secs(12),
-        client()
-            .get(url)
-            .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
-            .header("Accept", "text/html")
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .send(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    let status = resp.status();
-    if !status.is_success() {
-        eprintln!("search_page: status={status} url_len={}", url.len());
-        return None;
-    }
-    let body = tokio::time::timeout(std::time::Duration::from_secs(12), resp.text())
-        .await
-        .ok()?
-        .ok()?;
-    eprintln!("search_page: status={status} bytes={}", body.len());
-    if body.len() < 2000 {
-        return None;
-    }
-    Some(body)
-}
-
-pub(crate) async fn ddg_html_search(query: &str) -> Vec<(String, String, String)> {
-    let url = format!(
-        "https://html.duckduckgo.com/html/?q={}",
-        percent_encode(query)
-    );
-    let body = fetch_search_page(&url).await;
-    match body {
-        Some(h) => {
-            let r = extract_ddg_results(&h);
-            eprintln!("ddg_html: results={}", r.len());
-            r
-        }
-        None => Vec::new(),
-    }
-}
-
-pub(crate) async fn ddg_lite_search(query: &str) -> Vec<(String, String, String)> {
-    let url = format!(
-        "https://lite.duckduckgo.com/lite/?q={}",
-        percent_encode(query)
-    );
-    let body = fetch_search_page(&url).await;
-    match body {
-        Some(h) => {
-            let r = extract_lite_results(&h);
-            eprintln!("ddg_lite: results={}", r.len());
-            r
-        }
-        None => Vec::new(),
-    }
-}
-
-async fn ddg_search(query: &str) -> Option<String> {
-    let url = format!(
-        "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
-        percent_encode(query)
-    );
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(12), client().get(&url).send())
-        .await
-        .ok()?
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let data: DdgResponse = tokio::time::timeout(std::time::Duration::from_secs(12), resp.json())
-        .await
-        .ok()?
-        .ok()?;
-    let mut parts = Vec::new();
-    if !data.Answer.trim().is_empty() {
-        parts.push(data.Answer.trim().to_string());
-    }
-    if !data.AbstractText.trim().is_empty() {
-        let mut a = data.AbstractText.trim().to_string();
-        if !data.AbstractURL.trim().is_empty() {
-            a.push_str(&format!(" ({})", data.AbstractURL.trim()));
-        }
-        parts.push(a);
-    }
-    for t in data.RelatedTopics.iter().take(3) {
-        if !t.Text.trim().is_empty() {
-            parts.push(t.Text.trim().to_string());
-        }
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    let joined = parts.join("\n- ");
-    Some(joined.chars().take(3000).collect())
-}
-
-async fn wiki_search(query: &str) -> Option<String> {
-    let url = format!(
-        "https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={}&format=json&srlimit=3",
-        percent_encode(query)
-    );
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(12), client().get(&url).send())
-        .await
-        .ok()?
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let data: WikiResponse = tokio::time::timeout(std::time::Duration::from_secs(12), resp.json())
-        .await
-        .ok()?
-        .ok()?;
-    if data.query.search.is_empty() {
-        return None;
-    }
-    let mut parts = Vec::new();
-    for item in data.query.search.iter().take(3) {
-        let snippet = strip_html(&item.snippet);
-        parts.push(format!("{}: {}", item.title.trim(), snippet.trim()));
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    let joined = parts.join("\n- ");
-    Some(joined.chars().take(3000).collect())
-}
-
 async fn linked_pages(prompt: &str) -> String {
     let mut blocks = Vec::new();
     for url in find_urls(prompt) {
@@ -845,72 +523,203 @@ async fn linked_pages(prompt: &str) -> String {
     joined.chars().take(4000).collect()
 }
 
-pub(crate) async fn run_websearch(query: &str) -> String {
+pub(crate) fn resolve_gemini_key(configured: &str) -> String {
+    if let Ok(v) = std::env::var("GEMINI_API_KEY") {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    configured.trim().to_string()
+}
+
+pub(crate) fn is_gemini_model(model: &str) -> bool {
+    model.trim().to_lowercase().starts_with("gemini")
+}
+
+#[derive(Deserialize, Default)]
+struct GeminiResponse {
+    #[serde(default)]
+    candidates: Vec<GeminiCandidate>,
+}
+
+#[derive(Deserialize, Default)]
+#[allow(non_snake_case)]
+struct GeminiCandidate {
+    #[serde(default)]
+    content: GeminiContent,
+    #[serde(default)]
+    groundingMetadata: GeminiGrounding,
+}
+
+#[derive(Deserialize, Default)]
+struct GeminiContent {
+    #[serde(default)]
+    parts: Vec<GeminiPart>,
+}
+
+#[derive(Deserialize, Default)]
+struct GeminiPart {
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Deserialize, Default)]
+#[allow(non_snake_case)]
+struct GeminiGrounding {
+    #[serde(default)]
+    groundingChunks: Vec<GeminiChunk>,
+}
+
+#[derive(Deserialize, Default)]
+struct GeminiChunk {
+    #[serde(default)]
+    web: GeminiWeb,
+}
+
+#[derive(Deserialize, Default)]
+struct GeminiWeb {
+    #[serde(default)]
+    uri: String,
+    #[serde(default)]
+    title: String,
+}
+
+fn gemini_answer(data: &GeminiResponse) -> (String, Vec<(String, String)>) {
+    let mut text = String::new();
+    let mut sources = Vec::new();
+    if let Some(c) = data.candidates.first() {
+        for p in &c.content.parts {
+            text.push_str(&p.text);
+        }
+        for chunk in c.groundingMetadata.groundingChunks.iter().take(3) {
+            if !chunk.web.uri.trim().is_empty() {
+                sources.push((chunk.web.title.trim().to_string(), chunk.web.uri.trim().to_string()));
+            }
+        }
+    }
+    (text.trim().to_string(), sources)
+}
+
+pub(crate) async fn gemini_generate(
+    model: &str,
+    key: &str,
+    system: &str,
+    contents: &[serde_json::Value],
+    max_tokens: u32,
+) -> Result<(String, Vec<(String, String)>), Error> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("Gemini API key missing: set gemini_api_key in config or GEMINI_API_KEY env".into());
+    }
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+        percent_encode(model.trim())
+    );
+    let req = serde_json::json!({
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": contents,
+        "tools": [{"google_search": {}}],
+        "generationConfig": {"maxOutputTokens": max_tokens},
+    });
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        client().post(&url).header("x-goog-api-key", key).json(&req).send(),
+    )
+    .await
+    .map_err(|_| "gemini request timed out".to_string())?
+    .map_err(Error::from)?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let body: String = body.chars().take(300).collect();
+        return Err(format!("gemini {status}: {body}").into());
+    }
+    let parsed: GeminiResponse = resp.json().await?;
+    let (text, sources) = gemini_answer(&parsed);
+    if text.is_empty() {
+        return Err("gemini returned an empty reply".into());
+    }
+    Ok((text, sources))
+}
+
+pub(crate) fn with_sources(text: String, sources: &[(String, String)]) -> String {
+    if sources.is_empty() {
+        return text;
+    }
+    let mut out = text;
+    out.push_str("\nSources: ");
+    let links: Vec<String> = sources
+        .iter()
+        .take(2)
+        .map(|(t, u)| {
+            if t.trim().is_empty() {
+                format!("<{u}>")
+            } else {
+                format!("{t} (<{u}>)")
+            }
+        })
+        .collect();
+    out.push_str(&links.join(", "));
+    out
+}
+
+pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
     let t0 = std::time::Instant::now();
     let query: String = query.chars().take(200).collect();
-    let mut blocks = Vec::new();
-    let mut fresh = ddg_html_search(&query).await;
-    if fresh.is_empty() {
-        fresh = ddg_lite_search(&query).await;
+    if key.trim().is_empty() {
+        return "Web search is not configured: set gemini_api_key in config or GEMINI_API_KEY env.".to_string();
     }
-    if !fresh.is_empty() {
-        let mut lines = Vec::new();
-        for (title, link, snip) in fresh.iter().take(5) {
-            if snip.is_empty() {
-                lines.push(format!("{title} ({link})"));
-            } else {
-                lines.push(format!("{title} ({link}): {snip}"));
-            }
+    let contents = vec![serde_json::json!({"role": "user", "parts": [{"text": query}]})];
+    let out = match gemini_generate(
+        "gemini-2.5-flash",
+        key,
+        "You are a fast web research helper. Answer briefly from Google search results.",
+        &contents,
+        800,
+    )
+    .await
+    {
+        Ok((text, sources)) => {
+            let full = with_sources(text, &sources);
+            full.chars().take(4000).collect()
         }
-        blocks.push(format!("Fresh web results for {query}:\n- {}", lines.join("\n- ")));
-        for (_, link, _) in fresh.iter().take(2) {
-            if let Some(text) = fetch_url_text(link).await {
-                blocks.push(format!("Page {link}:\n{text}"));
-            }
-            if blocks.join("\n").len() > 3500 {
-                break;
-            }
+        Err(e) => {
+            eprintln!("run_websearch: gemini failed: {e}");
+            "Web search failed.".to_string()
         }
-    } else if let Some(r) = ddg_search(&query).await {
-        blocks.push(format!("Web search for {query}:\n- {r}"));
-    } else if let Some(r) = wiki_search(&query).await {
-        blocks.push(format!("Wikipedia search for {query}:\n- {r}"));
-    }
-    let joined = blocks.join("\n\n");
-    let out: String = joined.chars().take(4000).collect();
+    };
     eprintln!(
-        "run_websearch: query_chars={} blocks={} out_chars={} ms={}",
+        "run_websearch: query_chars={} out_chars={} ms={}",
         query.chars().count(),
-        blocks.len(),
         out.chars().count(),
         t0.elapsed().as_millis()
     );
     out
 }
 
-pub(crate) async fn web_status() -> String {
+pub(crate) async fn web_status(key: &str) -> String {
+    if key.trim().is_empty() {
+        return "web: FAIL no gemini_api_key in config or GEMINI_API_KEY env".to_string();
+    }
     let t0 = std::time::Instant::now();
-    let fresh = ddg_html_search("latest gpu").await;
-    let src = if fresh.is_empty() { "lite" } else { "html" };
-    let fresh = if fresh.is_empty() {
-        ddg_lite_search("latest gpu").await
-    } else {
-        fresh
-    };
-    let n = fresh.len();
-    let mut fetch_ok = false;
-    let mut sample = String::new();
-    if let Some((_, link, _)) = fresh.first() {
-        sample = link.clone();
-        if fetch_url_text(link).await.is_some() {
-            fetch_ok = true;
+    let contents = vec![serde_json::json!({"role": "user", "parts": [{"text": "latest gpu"}]})];
+    match gemini_generate(
+        "gemini-2.5-flash",
+        key,
+        "Answer in one short sentence from Google search results.",
+        &contents,
+        200,
+    )
+    .await
+    {
+        Ok((text, _)) => {
+            let ms = t0.elapsed().as_millis();
+            let sample: String = text.chars().take(80).collect();
+            format!("web: ok src=gemini ms={ms} sample={sample}")
         }
+        Err(e) => format!("web: FAIL gemini: {e}"),
     }
-    let ms = t0.elapsed().as_millis();
-    if n == 0 {
-        return format!("web: FAIL no results src={src} ms={ms}");
-    }
-    format!("web: ok src={src} results={n} fetch_ok={fetch_ok} ms={ms} top={sample}")
 }
 
 const SYSTEM_PROMPT: &str = "You are artixy, a friendly furry artix linux. Talk like a normal neko human, casual and a bit silly and simple messages. \
@@ -957,7 +766,42 @@ async fn chat_once(
     Err("ollama returned an empty reply".into())
 }
 
-pub(crate) async fn ollama_chat(host: &str, model: &str, channel: u64, speaker: &str, prompt: &str) -> Result<String, Error> {
+pub(crate) async fn gemini_chat(model: &str, key: &str, channel: u64, speaker: &str, prompt: &str) -> Result<String, Error> {
+    let tagged = format!("[{}]: {}", speaker_tag(speaker), prompt);
+    let pages = linked_pages(prompt).await;
+    let user_text = if pages.trim().is_empty() {
+        tagged.clone()
+    } else {
+        format!("{tagged}\n\n[linked pages below, prefer over training data]\n{pages}")
+    };
+    let past = snapshot(channel);
+    let mut contents: Vec<serde_json::Value> = Vec::with_capacity(past.len() + 1);
+    for e in &past {
+        if e.role == "assistant" {
+            let cleaned = clean_reply(&e.content);
+            if cleaned.trim().is_empty() {
+                continue;
+            }
+            contents.push(serde_json::json!({"role": "model", "parts": [{"text": cleaned}]}));
+        } else {
+            contents.push(serde_json::json!({"role": "user", "parts": [{"text": e.content}]}));
+        }
+    }
+    contents.push(serde_json::json!({"role": "user", "parts": [{"text": user_text}]}));
+    let (text, sources) = gemini_generate(model, key, SYSTEM_PROMPT, &contents, 1000).await?;
+    let text = with_sources(clean_reply(&text), &sources);
+    if text.trim().is_empty() {
+        return Err("gemini returned an empty reply".into());
+    }
+    push(channel, "user".to_string(), tagged);
+    push(channel, "assistant".to_string(), text.clone());
+    Ok(text)
+}
+
+pub(crate) async fn ollama_chat(host: &str, model: &str, gemini_key: &str, channel: u64, speaker: &str, prompt: &str) -> Result<String, Error> {
+    if is_gemini_model(model) {
+        return gemini_chat(model, gemini_key, channel, speaker, prompt).await;
+    }
     let host = host.trim_end_matches('/');
     let url = format!("{host}/api/chat");
     let tagged = format!("[{}]: {}", speaker_tag(speaker), prompt);
@@ -1042,7 +886,7 @@ pub(crate) async fn ollama_chat(host: &str, model: &str, channel: u64, speaker: 
         if query.trim().is_empty() {
             return Err("ollama returned an empty reply".into());
         }
-        let tool_result = run_websearch(&query).await;
+        let tool_result = run_websearch(gemini_key, &query).await;
         let tool_result = if tool_result.trim().is_empty() {
             "Web search returned no results.".to_string()
         } else {
@@ -1106,6 +950,9 @@ pub(crate) fn clear_history(channel: u64) {
 }
 
 pub(crate) async fn model_present(host: &str, model: &str) -> Option<bool> {
+    if is_gemini_model(model) {
+        return None;
+    }
     let url = format!("{}/api/tags", host.trim_end_matches('/'));
     let resp = client().get(&url).send().await.ok()?;
     if !resp.status().is_success() {
@@ -1325,20 +1172,33 @@ mod tests {
     }
 
     #[test]
-    fn lite_parser_reads_result_link_rows() {
-        let html = "<a rel=\"nofollow\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FGeForce_RTX_50_series&amp;rut=abc\" class='result-link'>GeForce RTX 50 series - Wikipedia</a></td></tr><tr><td>&nbsp;</td><td class='result-snippet'>successor of GeForce 40 series, RTX 5090 in January 2025</td>";
-        let r = extract_lite_results(html);
-        assert_eq!(r.len(), 1);
-        assert_eq!(r[0].1, "https://en.wikipedia.org/wiki/GeForce_RTX_50_series");
-        assert!(r[0].2.contains("RTX 5090"), "got {:?}", r[0].2);
+    fn gemini_response_parses_text_and_sources() {
+        let body = r#"{"candidates": [{"content": {"parts": [{"text": "The latest is the RTX 5090."}]}, "groundingMetadata": {"groundingChunks": [{"web": {"uri": "https://en.wikipedia.org/wiki/GeForce_RTX_50_series", "title": "GeForce RTX 50 series"}}]}}]}"#;
+        let data: GeminiResponse = serde_json::from_str(body).expect("parses");
+        let (text, sources) = gemini_answer(&data);
+        assert!(text.contains("5090"), "got {text:?}");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].1, "https://en.wikipedia.org/wiki/GeForce_RTX_50_series");
+        let with = with_sources(text, &sources);
+        assert!(with.contains("Sources:"), "got {with:?}");
     }
 
     #[test]
-    fn ddg_parser_keeps_bare_protocol_links() {
-        let html = "<a rel=\"nofollow\" class=\"result__a\" href=\"//example.com/page\">Example</a>";
-        let r = extract_ddg_results(html);
-        assert_eq!(r.len(), 1);
-        assert_eq!(r[0].1, "https://example.com/page");
+    fn gemini_key_prefers_env_then_config() {
+        std::env::remove_var("GEMINI_API_KEY");
+        assert_eq!(resolve_gemini_key(""), "");
+        assert_eq!(resolve_gemini_key("  cfgkey  "), "cfgkey");
+        std::env::set_var("GEMINI_API_KEY", "  envkey  ");
+        assert_eq!(resolve_gemini_key("cfgkey"), "envkey");
+        std::env::remove_var("GEMINI_API_KEY");
+    }
+
+    #[test]
+    fn gemini_model_routing() {
+        assert!(is_gemini_model("gemini-2.5-flash"));
+        assert!(is_gemini_model("GEMINI-2.0-flash"));
+        assert!(!is_gemini_model("llama3.1"));
+        assert!(!is_gemini_model("qwen3:4b"));
     }
 
     #[test]
