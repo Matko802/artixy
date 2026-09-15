@@ -175,13 +175,13 @@ fn tool_defs() -> serde_json::Value {
             "type": "function",
             "function": {
                 "name": "websearch",
-                "description": "Search the live web for fresh info like latest releases, news, prices, GPUs. Returns titles, links and snippets plus fetched page text.",
+                "description": "Search the live web for fresh info. Returns titles, links and snippets plus fetched page text.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Search query, e.g. latest nvidia gpu"
+                            "description": "Search query, e.g. current events"
                         }
                     },
                     "required": ["query"]
@@ -694,7 +694,7 @@ struct HostedFetchResponse {
 }
 
 pub(crate) async fn hosted_search(key: &str, query: &str) -> Vec<(String, String, String)> {
-    let req = serde_json::json!({"query": query, "max_results": 5});
+    let req = serde_json::json!({"query": query});
     let resp = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         client()
@@ -802,7 +802,7 @@ pub(crate) async fn web_status(key: &str) -> String {
         return "web: FAIL no ollama_api_key in config or OLLAMA_API_KEY env".to_string();
     }
     let t0 = std::time::Instant::now();
-    let n = hosted_search(key, "latest gpu").await.len();
+    let n = hosted_search(key, "test").await.len();
     let ms = t0.elapsed().as_millis();
     if n == 0 {
         return format!("web: FAIL ollama hosted search returned nothing ms={ms}");
