@@ -11,7 +11,8 @@
 // Chat UX conventions:
 // - Up/Down = input history, PgUp/PgDn = scroll chat, Tab = next channel.
 // - F1 or /help opens a help popup (chat stays clean).
-// - #spy and #<live> views are read-only mirrors; /say sends as the bot.
+// - #spy is a watch-only mirror; #<live> channels send as artixy when you
+//   type, and /commands there run on discord (/say works from anywhere).
 // - When hosted web search is out of credits it is silently off and the
 //   bot answers from knowledge without mentioning it.
 
@@ -257,10 +258,35 @@ impl Command {
         Self::Local(text.to_string())
     }
 
+    /// Commands handled locally by the TUI (take precedence over forwarding).
+    fn is_native(name: &str) -> bool {
+        matches!(
+            name,
+            "help"
+                | "quit"
+                | "exit"
+                | "clear"
+                | "channels"
+                | "status"
+                | "forget"
+                | "ai"
+                | "war"
+                | "sayas"
+                | "notify"
+                | "filter"
+                | "say"
+                | "typing"
+                | "websearch"
+        )
+    }
+
     fn help_table() -> Vec<(String, String)> {
         vec![
             ("artixy <q>".into(), "chat with local AI".into()),
-            ("/say #ch <text>".into(), "send as bot to discord".into()),
+            ("typing in #live".into(), "sends as artixy there".into()),
+            ("/run, /ps… in #live".into(), "run on discord as artixy".into()),
+            ("//cmd in #live".into(), "force discord version".into()),
+            ("/say #ch <text>".into(), "send as bot from anywhere".into()),
             ("/typing #ch".into(), "bot typing indicator".into()),
             ("/channels".into(), "list live discord channels".into()),
             ("/status".into(), "bot + AI + typing status".into()),
@@ -318,7 +344,7 @@ impl App {
             "artixy",
             ACCENT,
             "",
-            "welcome! type artixy <question> to chat, F1 for help.\n#spy mirrors live discord once the bot runs with a token.",
+            "welcome! type artixy <question> to chat, F1 for help.\n#spy mirrors live discord once the bot runs. Tab into a #live channel and just type — it sends as artixy, and /commands run there like on discord.",
         );
         app
     }
@@ -911,19 +937,85 @@ impl App {
             Command::Websearch(q) => self.spawn_search(q),
             Command::Local(msg) => self.chat(msg),
             Command::Unknown(hint) => {
+                // In a remembered channel, bot commands run on discord as
+                // artixy — no /say <id> needed.
+                if self.try_forward_to_discord(&text) {
+                    return;
+                }
                 self.say_active("system", DIM, "", &hint);
                 self.notify(&hint);
             }
         }
     }
 
+    /// In a remembered (live) channel, `/cmd` runs on discord when it names
+    /// a real bot command (`//cmd` forces it). Returns true when handled.
+    fn try_forward_to_discord(&mut self, text: &str) -> bool {
+        if self.channels[self.active].kind != ChannelKind::Live {
+            return false;
+        }
+        let t = text.trim();
+        let forced = t.starts_with("//");
+        let body = t.trim_start_matches('/').trim();
+        let first = body.split_whitespace().next().unwrap_or("").to_lowercase();
+        if first.is_empty() {
+            return false;
+        }
+        let known = crate::tuirelay::bot_command_names().contains(&first.as_str());
+        if !forced && (Command::is_native(&first) || !known) {
+            return false;
+        }
+        let forward = format!("/{body}");
+        self.forward_command(forward);
+        true
+    }
+
+    /// Post `/cmd …` as artixy so the bot executes it like on discord.
+    /// The message id is claimed so ONLY this exact message may run.
+    fn forward_command(&mut self, text: String) {
+        if !self.bot_live() {
+            self.say_active("system", DIM, "", "bot looks OFFLINE — start it first or the command posts as text and never runs.");
+            self.notify("bot offline — command not run");
+            return;
+        }
+        let Some(token) = self.settings.token.clone() else {
+            self.say_active("system", DIM, "", "no discord token — set discord_token, then restart tui.");
+            return;
+        };
+        let id = self.chan();
+        let tag = self.channel_tag(id);
+        let tx = self.tx.clone();
+        let reply_to = id;
+        *self.pending.entry(reply_to).or_insert(0) += 1;
+        let shown: String = text.chars().take(80).collect();
+        tokio::spawn(async move {
+            let http = serenity::Http::new(&token);
+            // DIRECT bot post (author = the bot itself): the only kind the
+            // relay check may execute. Webhook posts never execute.
+            let msg = match serenity::ChannelId::new(id).say(&http, &text).await {
+                Ok(m) => {
+                    crate::tuirelay::claim_message(m.id.get());
+                    format!("ran {shown} as artixy in {tag} — reply lands here.")
+                }
+                Err(e) => format!("command post to {tag} failed: {e}"),
+            };
+            let _ = tx.send(Job {
+                channel: reply_to,
+                reply: Reply::Text(vec![msg]),
+            });
+        });
+        self.notify("running on discord…");
+    }
+
     fn chat(&mut self, msg: String) {
         if self.is_spy() {
-            self.say_active("system", DIM, "", "spy is read-only — Tab to #general, or /say to send as the bot.");
+            self.say_active("system", DIM, "", "spy watches everything — Tab into a #channel to talk, or /say #ch <text>.");
             return;
         }
         if self.channels[self.active].kind == ChannelKind::Live {
-            self.say_active("system", DIM, "", "live mirror is read-only — /say sends as the bot, #general chats locally.");
+            // Remembered channel: just type — it goes out as artixy.
+            let tag = self.channel_tag(self.chan());
+            self.send_as_bot(tag, msg);
             return;
         }
         if mentions_name(&msg) {
@@ -1434,8 +1526,10 @@ fn render(frame: &mut Frame, app: &mut App) {
     let scroll = app.channels[app.active].scroll;
     let ch = app.active_channel();
     let mut title = format!(" #{} ", ch.name);
-    if ch.kind != ChannelKind::Local {
-        title.push_str("· read-only ");
+    if ch.kind == ChannelKind::Spy {
+        title.push_str("· watch-only ");
+    } else if ch.kind == ChannelKind::Live {
+        title.push_str("· as artixy ");
     }
     if !ch.follow && max_off > 0 {
         title.push_str("· ↑ history ");
@@ -1465,8 +1559,10 @@ fn render(frame: &mut Frame, app: &mut App) {
         format!("{} typing…", cur_typing.join(", "))
     } else if pending > 0 {
         "artixy is typing…".to_string()
+    } else if app.is_spy() {
+        format!("#{} · watch-only · Tab to a channel", app.active_channel().name)
     } else if app.is_readonly() {
-        format!("#{} · read-only · /say to send", app.active_channel().name)
+        format!("#{} · message as artixy", app.active_channel().name)
     } else {
         format!("#{} · message", app.active_channel().name)
     };

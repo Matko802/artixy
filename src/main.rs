@@ -9,6 +9,7 @@ mod pngencode;
 mod scrub;
 mod termrender;
 mod tui;
+mod tuirelay;
 mod util;
 mod vm;
 mod webhook;
@@ -170,6 +171,21 @@ async fn main() {
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
+            // Text prefix so commands also work as plain `/cmd` messages —
+            // this is what lets the TUI run real bot commands by posting
+            // them as artixy (gated by command_check + claim file, so only
+            // TUI-relayed self messages execute; everything else bot-authored
+            // is denied silently).
+            prefix_options: poise::PrefixFrameworkOptions {
+                prefix: Some("/".to_string()),
+                execute_self_messages: true,
+                ignore_bots: false,
+                ..Default::default()
+            },
+            // TUI-relayed self messages may run; other bots may not.
+            command_check: Some(|ctx| {
+                Box::pin(async move { crate::commands::tui_relay_check(ctx).await })
+            }),
             commands: vec![
                 help(),
                 ps(),

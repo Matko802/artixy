@@ -10,23 +10,57 @@ use crate::{
     Context, Error,
 };
 
+/// True when this is a TUI-relayed self message: bot-authored, exact
+/// message id claimed by the TUI (see tuirelay). The TUI operator holds the
+/// machine + token, so relayed calls run with owner rights.
+pub(crate) fn is_tui_relay(ctx: Context<'_>) -> bool {
+    if let poise::Context::Prefix(pctx) = ctx {
+        return pctx.msg.author.bot && crate::tuirelay::is_claimed(pctx.msg.id.get());
+    }
+    false
+}
+
+/// Global framework check: bot-authored messages only run when the TUI
+/// claimed that exact message id. Humans and slash commands pass through
+/// to the normal per-command auth below.
+pub(crate) async fn tui_relay_check(ctx: Context<'_>) -> Result<bool, Error> {
+    if let poise::Context::Prefix(pctx) = ctx {
+        if pctx.msg.author.bot {
+            return Ok(crate::tuirelay::is_claimed(pctx.msg.id.get()));
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) async fn is_authed(ctx: Context<'_>) -> bool {
+    if is_tui_relay(ctx) {
+        return true;
+    }
     let id = ctx.author().id.get();
     let a = ctx.data().allowed.read().await;
     crate::config::access_allowed(a.owner, &a.users, &a.blocked, id)
 }
 
 pub(crate) async fn is_owner(ctx: Context<'_>) -> bool {
+    if is_tui_relay(ctx) {
+        return true;
+    }
     ctx.author().id.get() == ctx.data().allowed.read().await.owner
 }
 
 pub(crate) async fn is_elevated(ctx: Context<'_>) -> bool {
+    if is_tui_relay(ctx) {
+        return true;
+    }
     let id = ctx.author().id.get();
     let a = ctx.data().allowed.read().await;
     crate::config::elevated_allowed(a.owner, &a.admins, id)
 }
 
 pub(crate) async fn need_auth(ctx: Context<'_>) -> Result<bool, Error> {
+    if is_tui_relay(ctx) {
+        return Ok(true);
+    }
     if is_authed(ctx).await {
         return Ok(true);
     }
@@ -43,6 +77,9 @@ pub(crate) async fn is_blocked(ctx: Context<'_>) -> bool {
 }
 
 pub(crate) async fn need_public(ctx: Context<'_>) -> Result<bool, Error> {
+    if is_tui_relay(ctx) {
+        return Ok(true);
+    }
     if !is_blocked(ctx).await {
         return Ok(true);
     }
@@ -75,7 +112,7 @@ async fn require_vm(ctx: Context<'_>) -> Option<String> {
 }
 
 pub(crate) const HELP: &str = "\
-**Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. VM commands need owner + added users, but AI chat (`@artixy`), `/ai` view/forget and `/websearch` work for everyone except blocked users. Slash commands only.\n\
+**Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. VM commands need owner + added users, but AI chat (`@artixy`), `/ai` view/forget and `/websearch` work for everyone except blocked users. Slash commands, or the same `/command` as plain text (prefix style).\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
 \n**Who can use me**\nOwner does everything. Admins (`admin_ids` in config or `/admin add`) do everything except `/admin add/remove`, which stay owner-only. Managers run VM commands + AI. Everyone except blocked users gets AI chat and `/websearch`.\n`/user` — one command for linux accounts (owner/admin): `/user list` shows owner + admins + managers, `/user add @user` creates their Linux account in Artix and links it, `/user remove @user` deletes their Linux account in the VM (and revokes bot access if they had it)\n`/admin` — one command for bot admins: `/admin list` shows admins (owner/admin), `/admin add @user` (owner only) grants everything except `/admin` mgmt itself, `/admin remove @user` (owner only) revokes them\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner/admin: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner/admin: delete their replies to my messages here\n`/warmode <true|false>` — owner/admin: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner/admin (`/ai true model:llama3.1` or `/ai true model:qwen3:4b` for local Ollama models), view is for all users. When enabled, ping me (`@artixy <question>` or `artixy <question>`) and I answer with the configured model.\n`/websearch <query>` — Ollama hosted web search, simple list of answers (needs `ollama_api_key`).\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
 \n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to] [file] [file2] [file3]` — owner/admin: `no args` toggles auto say-as-artix mode, `message` and/or attached files send as artix (reply_to = message ID/link). Files attached to the slash command (or to the `;sayas` prefix message) are re-uploaded as artix. Output is ephemeral (only you see it).\n\
