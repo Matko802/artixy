@@ -110,9 +110,10 @@ pub(crate) async fn event_handler(
     let me_id: u64 = ctx.cache.current_user().id.get();
     let mentioned = new_message.mentions.iter().any(|u| u.id.get() == me_id)
         || new_message.content.contains(&format!("<@{me_id}>"))
-        || new_message.content.contains(&format!("<@!{me_id}>"));
+        || new_message.content.contains(&format!("<@!{me_id}>"))
+        || crate::ai::mentions_name(&new_message.content);
     if mentioned {
-        let prompt0 = crate::ai::strip_mention(&new_message.content, me_id);
+        let prompt0 = crate::ai::strip_name(&crate::ai::strip_mention(&new_message.content, me_id));
         let is_command = prompt0.starts_with('/') || prompt0.starts_with(';');
         if !is_command {
             let authed = {
@@ -162,7 +163,7 @@ pub(crate) async fn event_handler(
             }
             if prompt.trim().is_empty() {
                 let _ = new_message
-                    .reply(&ctx.http, format!("Ping me with a question — `@artixy <question>` (model `{ai_model}`)."))
+                    .reply(&ctx.http, format!("Ping me with a question — `@artixy <question>` or `artixy <question>` (model `{ai_model}`)."))
                     .await;
                 return Ok(());
             }

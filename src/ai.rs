@@ -258,7 +258,7 @@ pub(crate) fn strip_html(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-async fn fetch_url_text(url: &str) -> Option<String> {
+pub(crate) async fn fetch_url_text(url: &str) -> Option<String> {
     let resp = tokio::time::timeout(
         std::time::Duration::from_secs(12),
         client().get(url).send(),
@@ -367,7 +367,7 @@ fn extract_ddg_results(html: &str) -> Vec<(String, String, String)> {
     out
 }
 
-async fn ddg_html_search(query: &str) -> Vec<(String, String, String)> {
+pub(crate) async fn ddg_html_search(query: &str) -> Vec<(String, String, String)> {
     let url = format!(
         "https://html.duckduckgo.com/html/?q={}",
         percent_encode(query)
@@ -649,6 +649,40 @@ pub(crate) fn strip_mention(content: &str, bot_id: u64) -> String {
         .to_string()
 }
 
+pub(crate) fn mentions_name(content: &str) -> bool {
+    content
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.eq_ignore_ascii_case("artixy"))
+}
+
+pub(crate) fn strip_name(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut word = String::new();
+    for c in content.chars() {
+        if c.is_alphanumeric() {
+            word.push(c);
+        } else {
+            if !word.eq_ignore_ascii_case("artixy") {
+                out.push_str(&word);
+            }
+            word.clear();
+            out.push(c);
+        }
+    }
+    if !word.eq_ignore_ascii_case("artixy") {
+        out.push_str(&word);
+    }
+    let cleaned = out
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .trim_start_matches(|c| matches!(c, ',' | ':' | '-' | '!'))
+        .trim()
+        .to_string();
+    cleaned
+}
+
 pub(crate) fn chunk_reply(s: &str) -> Vec<String> {
     const MAX: usize = 1900;
     const MAX_CHUNKS: usize = 4;
@@ -743,6 +777,19 @@ mod tests {
         assert_eq!(speaker_tag(""), "someone");
         let long = "x".repeat(200);
         assert_eq!(speaker_tag(&long).chars().count(), 64);
+    }
+
+    #[test]
+    fn name_trigger_matches_whole_word_only() {
+        assert!(mentions_name("artixy hello"));
+        assert!(mentions_name("hey ARTIXY what is latest gpu"));
+        assert!(mentions_name("artixy, help"));
+        assert!(!mentions_name("hello there"));
+        assert!(!mentions_name("artixyz"));
+        assert!(!mentions_name("myartixybot"));
+        assert_eq!(strip_name("artixy what is latest gpu"), "what is latest gpu");
+        assert_eq!(strip_name("hey artixy, help me"), "hey , help me");
+        assert_eq!(strip_name("ARTIXY"), "");
     }
 
     #[test]
