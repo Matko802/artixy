@@ -20,7 +20,14 @@ fn snapshot(channel: u64) -> Vec<HistoryItem> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(&channel)
-        .map(|q| q.iter().map(|e| HistoryItem { role: e.role.clone(), content: e.content.clone() }).collect())
+        .map(|q| {
+            q.iter()
+                .map(|e| HistoryItem {
+                    role: e.role.clone(),
+                    content: e.content.clone(),
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -272,10 +279,17 @@ fn parse_tool_json(obj: &str) -> Option<(String, String)> {
         let name = v
             .get("name")
             .and_then(|n| n.as_str())
-            .or_else(|| v.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
+            .or_else(|| {
+                v.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+            })
             .unwrap_or("");
         if name.eq_ignore_ascii_case("websearch") {
-            let args = v.get("parameters").or_else(|| v.get("arguments")).or_else(|| v.get("query"));
+            let args = v
+                .get("parameters")
+                .or_else(|| v.get("arguments"))
+                .or_else(|| v.get("query"));
             let q = match args {
                 Some(a) if a.is_string() => a.as_str().unwrap_or("").to_string(),
                 Some(a) if a.is_object() => tool_query(a),
@@ -287,7 +301,11 @@ fn parse_tool_json(obj: &str) -> Option<(String, String)> {
                 _ => String::new(),
             };
             if !q.trim().is_empty() {
-                let content = v.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                let content = v
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 return Some((content, q.chars().take(200).collect()));
             }
         }
@@ -384,10 +402,7 @@ pub(crate) fn strip_leading_speaker(text: &str, names: &[String]) -> String {
             if n.is_empty() {
                 continue;
             }
-            if t.len() > n.len()
-                && t[..n.len()] == *n
-                && t[n.len()..].starts_with(':')
-            {
+            if t.len() > n.len() && t[..n.len()] == *n && t[n.len()..].starts_with(':') {
                 out = t[n.len() + 1..].trim_start().to_string();
                 hit = true;
                 break;
@@ -424,7 +439,11 @@ fn meta_preamble_len(text: &str) -> usize {
         }
         let rest = &t[s.len()..];
         if s.ends_with(',') || rest.starts_with([':', ',']) {
-            let cut = if rest.starts_with([':', ',']) { s.len() + 1 } else { s.len() };
+            let cut = if rest.starts_with([':', ',']) {
+                s.len() + 1
+            } else {
+                s.len()
+            };
             if t[cut..].trim().is_empty() {
                 return 0;
             }
@@ -458,7 +477,12 @@ pub(crate) fn sanitize_reply(raw: &str, names: &[String]) -> String {
     strip_meta_preamble(&strip_leading_speaker(&clean_reply(raw), names))
 }
 
-pub(crate) fn finalize_reply(channel: u64, tagged: String, names: &[String], raw: &str) -> Result<String, Error> {
+pub(crate) fn finalize_reply(
+    channel: u64,
+    tagged: String,
+    names: &[String],
+    raw: &str,
+) -> Result<String, Error> {
     let text = sanitize_reply(raw, names);
     if text.trim().is_empty() {
         return Err("ollama returned an empty reply".into());
@@ -495,8 +519,12 @@ struct TagEntry {
 pub(crate) fn find_urls(s: &str) -> Vec<String> {
     s.split_whitespace()
         .filter_map(|w| {
-            let t = w.trim_matches(|c| matches!(c, '<' | '>' | '"' | '\'' | '(' | ')')).to_string();
-            let t = t.trim_end_matches(|c| matches!(c, '.' | ',' | ';' | '!' | '?' | ':')).to_string();
+            let t = w
+                .trim_matches(|c| matches!(c, '<' | '>' | '"' | '\'' | '(' | ')'))
+                .to_string();
+            let t = t
+                .trim_end_matches(|c| matches!(c, '.' | ',' | ';' | '!' | '?' | ':'))
+                .to_string();
             if t.starts_with("http://") || t.starts_with("https://") {
                 if t.len() <= 500 {
                     return Some(t);
@@ -506,17 +534,6 @@ pub(crate) fn find_urls(s: &str) -> Vec<String> {
         })
         .take(2)
         .collect()
-}
-
-#[allow(dead_code)]
-pub(crate) fn needs_search(s: &str) -> bool {
-    let l = s.to_lowercase();
-    if l.starts_with("search ") || l.starts_with("google ") || l.starts_with("look up ") || l.starts_with("lookup ") {
-        return true;
-    }
-    ["latest", "newest", "today", "yesterday", "current", "news", "price", "weather", "score", "who won", "what happened", "release", "on the internet", "on the web", "search the web", "look it up"]
-        .iter()
-        .any(|k| l.contains(k))
 }
 
 pub(crate) fn strip_html(s: &str) -> String {
@@ -614,7 +631,10 @@ fn store_cookies(url: &str, resp: &reqwest::Response) {
 fn web_get(url: &str) -> reqwest::RequestBuilder {
     let mut req = client()
         .get(url)
-        .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+        )
         .header("Accept", "text/html,application/xhtml+xml")
         .header("Accept-Language", "en-US,en;q=0.9");
     if let Some(c) = cookie_header(url) {
@@ -632,13 +652,10 @@ pub(crate) async fn fetch_url_text(url: &str) -> Option<String> {
     if !resp.status().is_success() {
         return None;
     }
-    let body = tokio::time::timeout(
-        std::time::Duration::from_secs(12),
-        resp.text(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let body = tokio::time::timeout(std::time::Duration::from_secs(12), resp.text())
+        .await
+        .ok()?
+        .ok()?;
     let text = strip_html(&body);
     let text: String = text.chars().take(3000).collect();
     if text.trim().is_empty() {
@@ -714,17 +731,24 @@ pub(crate) async fn hosted_search(key: &str, query: &str) -> Vec<(String, String
         eprintln!("hosted_search: status={}", resp.status());
         return Vec::new();
     }
-    let data: HostedSearchResponse = tokio::time::timeout(std::time::Duration::from_secs(15), resp.json())
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
+    let data: HostedSearchResponse =
+        tokio::time::timeout(std::time::Duration::from_secs(15), resp.json())
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
     let out: Vec<(String, String, String)> = data
         .results
         .into_iter()
         .filter(|i| !i.title.trim().is_empty() && !i.url.trim().is_empty())
         .take(5)
-        .map(|i| (i.title.trim().to_string(), i.url.trim().to_string(), i.content.trim().to_string()))
+        .map(|i| {
+            (
+                i.title.trim().to_string(),
+                i.url.trim().to_string(),
+                i.content.trim().to_string(),
+            )
+        })
         .collect();
     eprintln!("hosted_search: results={}", out.len());
     out
@@ -746,10 +770,11 @@ pub(crate) async fn hosted_fetch(key: &str, url: &str) -> Option<String> {
     if !resp.status().is_success() {
         return None;
     }
-    let data: HostedFetchResponse = tokio::time::timeout(std::time::Duration::from_secs(15), resp.json())
-        .await
-        .ok()?
-        .ok()?;
+    let data: HostedFetchResponse =
+        tokio::time::timeout(std::time::Duration::from_secs(15), resp.json())
+            .await
+            .ok()?
+            .ok()?;
     let text = data.content.trim().to_string();
     if text.is_empty() {
         return None;
@@ -876,7 +901,14 @@ pub(crate) async fn glitch_text(host: &str, model: &str) -> String {
     }
 }
 
-pub(crate) async fn ollama_chat(host: &str, model: &str, okey: &str, channel: u64, speaker: &str, prompt: &str) -> Result<String, Error> {
+pub(crate) async fn ollama_chat(
+    host: &str,
+    model: &str,
+    okey: &str,
+    channel: u64,
+    speaker: &str,
+    prompt: &str,
+) -> Result<String, Error> {
     let host = host.trim_end_matches('/');
     let url = format!("{host}/api/chat");
     let want_web = explicit_search_asked(prompt);
@@ -908,7 +940,11 @@ pub(crate) async fn ollama_chat(host: &str, model: &str, okey: &str, channel: u6
     let mut messages: Vec<serde_json::Value> = Vec::with_capacity(past.len() + 2);
     messages.push(serde_json::json!({"role": "system", "content": SYSTEM_PROMPT}));
     for e in &past {
-        let role = if e.role == "assistant" { "assistant" } else { "user" };
+        let role = if e.role == "assistant" {
+            "assistant"
+        } else {
+            "user"
+        };
         if role == "assistant" {
             let cleaned = sanitize_reply(&e.content, &names);
             if cleaned.trim().is_empty() || stale_history_line(&cleaned) {
@@ -945,7 +981,9 @@ pub(crate) async fn ollama_chat(host: &str, model: &str, okey: &str, channel: u6
         if calls.is_empty() {
             if let Some((_, q)) = schema_tool_call(&first.content) {
                 calls.push(("websearch".to_string(), q));
-                messages.push(serde_json::json!({"role": "assistant", "content": first.content.clone()}));
+                messages.push(
+                    serde_json::json!({"role": "assistant", "content": first.content.clone()}),
+                );
             }
         } else {
             messages.push(serde_json::json!({
@@ -1005,7 +1043,9 @@ pub(crate) async fn ollama_chat(host: &str, model: &str, okey: &str, channel: u6
         if next.is_none() {
             if let Some((_, q)) = schema_tool_call(&second.content) {
                 next = Some(q);
-                messages.push(serde_json::json!({"role": "assistant", "content": second.content.clone()}));
+                messages.push(
+                    serde_json::json!({"role": "assistant", "content": second.content.clone()}),
+                );
             }
         }
         rounds += 1;
@@ -1133,4 +1173,3 @@ pub(crate) fn chunk_reply(s: &str) -> Vec<String> {
         chunks
     }
 }
-
