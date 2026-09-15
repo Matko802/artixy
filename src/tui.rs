@@ -222,6 +222,7 @@ enum Command {
     Say { target: String, text: String },
     Typing(String),
     Websearch(String),
+    Run(String),
     Clear,
     Quit,
     Local(String),
@@ -301,6 +302,12 @@ impl Command {
             }
             return Self::Websearch(q);
         }
+        if text == "/run" {
+            return Self::Run(String::new());
+        }
+        if let Some(rest) = text.strip_prefix("/run ") {
+            return Self::Run(rest.trim().to_string());
+        }
         if text.starts_with('/') {
             return Self::Unknown("unknown command — F1 for help".to_string());
         }
@@ -326,6 +333,7 @@ impl Command {
                 | "say"
                 | "typing"
                 | "websearch"
+                | "run"
         )
     }
 
@@ -333,7 +341,8 @@ impl Command {
         vec![
             ("artixy <q>".into(), "chat with local AI".into()),
             ("typing in #live".into(), "sends as artixy there".into()),
-            ("/run, /ps… in #live".into(), "run on discord as artixy".into()),
+            ("/run <cmd>".into(), "run in the VM, output here".into()),
+            ("/ps, /status… in #live".into(), "run on discord as artixy".into()),
             ("//cmd in #live".into(), "force discord version".into()),
             ("/say #ch <text>".into(), "send as bot from anywhere".into()),
             ("/typing #ch".into(), "bot typing indicator".into()),
@@ -1164,6 +1173,82 @@ impl App {
         });
     }
 
+    /// Run a command in the VM straight from the TUI and post plain-text
+    /// output back into this view (no Discord round-trip, so it works even
+    /// when the bot is down). `//run …` still forces the Discord version.
+    fn spawn_run(&mut self, cmd: String) {
+        let cmd = cmd.trim().to_string();
+        if cmd.is_empty() {
+            self.say_active("system", DIM, "", "usage: /run <command>");
+            return;
+        }
+        let chan = self.chan();
+        let idx = self.active;
+        self.say(idx, "you", MINE, "", &format!("/run {cmd}"));
+        *self.pending.entry(chan).or_insert(0) += 1;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let cfg = crate::config::load_file_config();
+            let vm = cfg
+                .vm_name
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_default();
+            if vm.trim().is_empty() {
+                let _ = tx.send(Job {
+                    channel: chan,
+                    reply: Reply::Text(vec![
+                        "VM not configured — set `vm_name` in config or `VM_NAME` env.".to_string(),
+                    ]),
+                });
+                return;
+            }
+            if !crate::vm::agent_ping(&vm).await {
+                let _ = tx.send(Job {
+                    channel: chan,
+                    reply: Reply::Text(vec!["Artix is off.".to_string()]),
+                });
+                return;
+            }
+            // Same account the bot would use for the owner on Discord.
+            let runas = cfg
+                .owner_id
+                .and_then(|id| cfg.linux.get(&id.to_string()).cloned())
+                .filter(|u| crate::util::valid_runas(u));
+            let shown = format!("/run {cmd}");
+            match tui_guest_run(&vm, runas.as_deref(), &cmd).await {
+                Ok((code, out, err)) => {
+                    let mut body = out.trim_end().to_string();
+                    let err = err.trim_end();
+                    if !err.is_empty() {
+                        if !body.is_empty() {
+                            body.push('\n');
+                        }
+                        body.push_str(err);
+                    }
+                    let text = if body.trim().is_empty() {
+                        format!("$ {cmd}\n(no output, exit {code})")
+                    } else if code == 0 {
+                        format!("$ {cmd}\n{body}")
+                    } else {
+                        format!("$ {cmd}\n{body}\n(exit {code})")
+                    };
+                    let _ = tx.send(Job {
+                        channel: chan,
+                        reply: Reply::Text(chunk_reply(&text)),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(Job {
+                        channel: chan,
+                        reply: Reply::Text(vec![format!("{shown} failed: {e}")]),
+                    });
+                }
+            }
+        });
+        self.notify("running in VM…");
+    }
+
 
     fn say(&mut self, idx: usize, author: &str, color: Color, tag: &str, text: &str) {
         let ch = &mut self.channels[idx];
@@ -1522,6 +1607,7 @@ impl App {
                 }
             }
             Command::Websearch(q) => self.spawn_search(q),
+            Command::Run(arg) => self.spawn_run(arg),
             Command::Local(msg) => self.chat(msg),
             Command::Unknown(hint) => {
                 if self.try_forward_to_discord(&text) {
@@ -2106,6 +2192,33 @@ fn update_file_config(f: impl FnOnce(&mut crate::config::FileConfig)) -> Result<
 }
 
 
+
+/// Synchronous VM run for the TUI: same `su - <user>` wrapping the bot
+/// uses, but plain captured output instead of the Discord live feed.
+async fn tui_guest_run(
+    vm: &str,
+    runas: Option<&str>,
+    cmd: &str,
+) -> Result<(i64, String, String), Error> {
+    use crate::vm::guest_exec;
+    const TIMEOUT_SECS: u64 = 120;
+    if let Some(u) = runas {
+        match guest_exec(vm, "su", &["-", u, "-s", "/bin/bash", "-c", cmd], true, TIMEOUT_SECS).await
+        {
+            Err(e) if e.to_string().contains("No such file") => {
+                guest_exec(vm, "su", &["-", u, "-s", "/bin/sh", "-c", cmd], true, TIMEOUT_SECS).await
+            }
+            other => other,
+        }
+    } else {
+        match guest_exec(vm, "/bin/bash", &["-c", cmd], true, TIMEOUT_SECS).await {
+            Err(e) if e.to_string().contains("No such file") => {
+                guest_exec(vm, "/bin/sh", &["-c", cmd], true, TIMEOUT_SECS).await
+            }
+            other => other,
+        }
+    }
+}
 
 async fn fetch_all_guild_channels(token: &str) -> Vec<GuildChans> {
     let http = serenity::Http::new(token);
