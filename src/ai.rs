@@ -729,6 +729,51 @@ struct HostedFetchResponse {
     content: String,
 }
 
+fn web_disabled_flag() -> &'static Mutex<bool> {
+    static DISABLED: OnceLock<Mutex<bool>> = OnceLock::new();
+    DISABLED.get_or_init(|| Mutex::new(false))
+}
+
+/// True once the hosted web API reports out-of-credits: web is turned off
+/// and the bot answers from knowledge without mentioning it.
+pub(crate) fn web_search_disabled() -> bool {
+    *web_disabled_flag()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+pub(crate) fn disable_web_search() {
+    let mut flag = web_disabled_flag()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if !*flag {
+        *flag = true;
+        eprintln!("web search disabled: out of credits — answering from knowledge");
+    }
+}
+
+pub(crate) fn is_out_of_credits_err(s: &str) -> bool {
+    let t = s.to_lowercase();
+    t.contains("402")
+        || t.contains("payment required")
+        || t.contains("out of credit")
+        || t.contains("out-of-credit")
+        || t.contains("insufficient credit")
+        || t.contains("insufficient balance")
+        || t.contains("insufficient funds")
+        || t.contains("insufficient quota")
+        || t.contains("no credits")
+        || t.contains("credits exhausted")
+        || t.contains("credit exhausted")
+        || t.contains("not enough credit")
+        || t.contains("billing")
+        || t.contains("free limit")
+        || t.contains("free-tier limit")
+        || t.contains("must upgrade")
+        || t.contains("upgrade required")
+        || t.contains("web search disabled")
+}
+
 fn search_backoff() -> &'static Mutex<Option<std::time::Instant>> {
     static BACKOFF: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
     BACKOFF.get_or_init(|| Mutex::new(None))
@@ -749,6 +794,9 @@ fn cool_down() {
 }
 
 pub(crate) async fn hosted_search(key: &str, query: &str) -> Result<Vec<(String, String, String)>, String> {
+    if web_search_disabled() {
+        return Err("web search disabled (out of credits)".into());
+    }
     if rate_limited() {
         return Err("ollama 429: backing off after rate limit".into());
     }
@@ -769,11 +817,16 @@ pub(crate) async fn hosted_search(key: &str, query: &str) -> Result<Vec<(String,
         let body = resp.text().await.unwrap_or_default();
         let body: String = body.chars().take(200).collect();
         eprintln!("hosted_search: status={status} body={body}");
+        let msg = format!("ollama {status}: {body}");
+        if status.as_u16() == 402 || is_out_of_credits_err(&msg) {
+            disable_web_search();
+            return Err("web search disabled (out of credits)".into());
+        }
         if status.as_u16() == 429 {
             cool_down();
             return Err("ollama 429: web search rate limited, try again in a couple minutes".into());
         }
-        return Err(format!("ollama {status}: {body}"));
+        return Err(msg);
     }
     let data: HostedSearchResponse =
         tokio::time::timeout(std::time::Duration::from_secs(15), resp.json())
@@ -798,6 +851,9 @@ pub(crate) async fn hosted_search(key: &str, query: &str) -> Result<Vec<(String,
 }
 
 pub(crate) async fn hosted_fetch(key: &str, url: &str) -> Option<String> {
+    if web_search_disabled() {
+        return None;
+    }
     let req = serde_json::json!({"url": url});
     let resp = tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -863,7 +919,9 @@ fn offline_tool_fallback() -> String {
 pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
     let t0 = std::time::Instant::now();
     let query: String = query.chars().take(200).collect();
-    if key.trim().is_empty() {
+    // Silent offline path: no key or web disabled (out of credits) -> empty,
+    // so callers answer from knowledge without ever mentioning the web.
+    if key.trim().is_empty() || web_search_disabled() {
         return String::new();
     }
     let mut blocks = Vec::new();
@@ -871,6 +929,10 @@ pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
         Ok(r) => r,
         Err(e) => {
             eprintln!("run_websearch: {e}");
+            if is_out_of_credits_err(&e) {
+                disable_web_search();
+                return String::new();
+            }
             if is_rate_limit_err(&e) {
                 return RATE_LIMIT_USER_MSG.to_string();
             }
@@ -910,8 +972,11 @@ pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
 }
 
 pub(crate) async fn web_status(key: &str) -> String {
+    if web_search_disabled() {
+        return "web: off (out of credits — answering from knowledge)".to_string();
+    }
     if key.trim().is_empty() {
-        return "web: FAIL no ollama_api_key in config or OLLAMA_API_KEY env".to_string();
+        return "web: off (no ollama_api_key — answering from knowledge)".to_string();
     }
     let t0 = std::time::Instant::now();
     let ms;
@@ -922,6 +987,10 @@ pub(crate) async fn web_status(key: &str) -> String {
         }
         Err(e) => {
             ms = t0.elapsed().as_millis();
+            if is_out_of_credits_err(&e) {
+                disable_web_search();
+                return "web: off (out of credits — answering from knowledge)".to_string();
+            }
             return format!("web: FAIL {e} ms={ms}");
         }
     };
@@ -973,10 +1042,13 @@ pub(crate) fn stale_history_line(s: &str) -> bool {
     let t = s.trim().to_lowercase();
     t.contains("couldn't reach the web")
         || t.contains("could not reach the web")
+        || t.contains("could not access")
         || t == "web search returned no results."
         || t.contains("web search is not configured")
         || t.contains("web search is rate limited")
+        || t.contains("web search disabled")
         || t.contains("running hot right now")
+        || t.contains("out of credits")
 }
 
 pub(crate) async fn glitch_text(host: &str, model: &str) -> String {
@@ -1013,14 +1085,23 @@ pub(crate) async fn ollama_chat(
 ) -> Result<String, Error> {
     let host = host.trim_end_matches('/');
     let url = format!("{host}/api/chat");
-    let want_web = explicit_search_asked(prompt);
+    // When web is disabled (out of credits / no key) the model must answer
+    // from knowledge WITHOUT mentioning search, web, credits or limits.
+    let web_off = web_search_disabled() || okey.trim().is_empty();
+    let search_asked = explicit_search_asked(prompt);
+    let want_web = search_asked && !web_off;
     let tagged = format!("[{}]: {}", speaker_tag(speaker), prompt);
     let pages = linked_pages(prompt).await;
-    let user_text = if pages.trim().is_empty() {
+    let mut user_text = if pages.trim().is_empty() {
         tagged.clone()
     } else {
         format!("{tagged}\n\n[linked pages below, prefer over training data]\n{pages}")
     };
+    if web_off && search_asked {
+        user_text.push_str(
+            "\n\n[Answer from your own knowledge. Do not mention web search, browsing, credits, or any limitation.]",
+        );
+    }
     let past = snapshot(channel);
     let mut names: Vec<String> = vec![speaker_tag(speaker)];
     for e in &past {
@@ -1058,8 +1139,8 @@ pub(crate) async fn ollama_chat(
         }
     }
     messages.push(serde_json::json!({"role": "user", "content": user_text}));
-    let mut used_tools = true;
-    let first = match chat_once(&url, model, &messages, true).await {
+    let mut used_tools = want_web;
+    let first = match chat_once(&url, model, &messages, want_web).await {
         Ok(m) => m,
         Err(e) if e.to_string().contains("does not support tools") => {
             eprintln!("ollama_chat: model lacks tool support, retry without tools");
@@ -1164,10 +1245,14 @@ pub(crate) async fn ollama_chat(
         if query.trim().is_empty() {
             return Err("ollama returned an empty reply".into());
         }
-        // Alternative approach when the web API is full: answer from knowledge
-        // instead of parroting "rate limited" to the user.
+        // Silent offline path: empty / disabled (out of credits) -> answer
+        // from knowledge without ever mentioning search or the web.
+        // Rate-limited -> model gets a fallback note (never shown to user).
         let raw_result = run_websearch(okey, &query).await;
-        let tool_result = if raw_result.trim().is_empty() {
+        let tool_result = if raw_result.trim().is_empty()
+            || is_out_of_credits_err(&raw_result)
+            || web_search_disabled()
+        {
             "No web results found. Answer briefly from your own knowledge and never mention searching or the web.".to_string()
         } else if is_rate_limit_err(&raw_result) || rate_limited() {
             offline_tool_fallback()
@@ -1362,5 +1447,21 @@ mod tests {
     fn stale_history_skips_rate_limit_lines() {
         assert!(stale_history_line("Web search is rate limited right now, try again"));
         assert!(stale_history_line(&api_full_message()));
+    }
+
+    #[test]
+    fn out_of_credits_detected() {
+        assert!(is_out_of_credits_err("ollama 402: Payment Required"));
+        assert!(is_out_of_credits_err("out of credits, please upgrade"));
+        assert!(is_out_of_credits_err("insufficient balance"));
+        assert!(is_out_of_credits_err("billing issue, free limit reached"));
+        assert!(is_out_of_credits_err("web search disabled (out of credits)"));
+        assert!(!is_out_of_credits_err("No web results found"));
+    }
+
+    #[test]
+    fn stale_history_skips_credit_lines() {
+        assert!(stale_history_line("web search disabled (out of credits)"));
+        assert!(stale_history_line("could not access the web"));
     }
 }

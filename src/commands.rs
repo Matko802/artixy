@@ -972,7 +972,9 @@ pub(crate) async fn ai(
         let backend = "ollama";
         let key_state = if ai_key.is_empty() { "missing" } else { "set" };
         let mut web = crate::ai::web_status(&ai_key).await;
-        if crate::ai::is_rate_limit_err(&web) {
+        if crate::ai::web_search_disabled() {
+            // Already says "answering from knowledge" — nothing to add.
+        } else if crate::ai::is_rate_limit_err(&web) {
             web.push_str(" (offline fallback on: chat answers from knowledge)");
         }
         post_text(ctx, format!(
@@ -1050,13 +1052,21 @@ pub(crate) async fn websearch(
         post_text(ctx, "Web search needs `ollama_api_key` in config or OLLAMA_API_KEY env (free at ollama.com/settings/keys).").await?;
         return Ok(());
     }
+    if crate::ai::web_search_disabled() {
+        post_text(ctx, format!("Web search is off right now — ping me `@artixy {short}` and I'll answer from what I know.")).await?;
+        return Ok(());
+    }
     let answer = crate::ai::run_websearch(&ai_key, &short).await;
+    if crate::ai::web_search_disabled() || crate::ai::is_out_of_credits_err(&answer) {
+        post_text(ctx, format!("Web search is off right now — ping me `@artixy {short}` and I'll answer from what I know.")).await?;
+        return Ok(());
+    }
     if crate::ai::is_rate_limit_err(&answer) {
         post_text(ctx, format!("Search is rate limited right now — try again in a couple minutes, or ping me `@artixy {short}` and I'll answer from what I already know.")).await?;
         return Ok(());
     }
     if answer.trim().is_empty() {
-        post_text(ctx, format!("No web results for `{short}`.")).await?;
+        post_text(ctx, format!("No web results for `{short}` — ping me `@artixy {short}` and I'll answer from what I know.")).await?;
         return Ok(());
     }
     let out = format!("Search: `{short}`\n{answer}");
