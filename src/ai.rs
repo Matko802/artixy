@@ -347,7 +347,9 @@ fn is_tool_json(obj: &str) -> bool {
         return true;
     }
     if v.get("name").and_then(|n| n.as_str()).is_some()
-        && (v.get("parameters").is_some() || v.get("arguments").is_some() || v.get("query").is_some())
+        && (v.get("parameters").is_some()
+            || v.get("arguments").is_some()
+            || v.get("query").is_some())
     {
         return true;
     }
@@ -793,7 +795,10 @@ fn cool_down() {
     }
 }
 
-pub(crate) async fn hosted_search(key: &str, query: &str) -> Result<Vec<(String, String, String)>, String> {
+pub(crate) async fn hosted_search(
+    key: &str,
+    query: &str,
+) -> Result<Vec<(String, String, String)>, String> {
     if web_search_disabled() {
         return Err("web search disabled (out of credits)".into());
     }
@@ -824,15 +829,17 @@ pub(crate) async fn hosted_search(key: &str, query: &str) -> Result<Vec<(String,
         }
         if status.as_u16() == 429 {
             cool_down();
-            return Err("ollama 429: web search rate limited, try again in a couple minutes".into());
+            return Err(
+                "ollama 429: web search rate limited, try again in a couple minutes".into(),
+            );
         }
         return Err(msg);
     }
     let data: HostedSearchResponse =
         tokio::time::timeout(std::time::Duration::from_secs(15), resp.json())
-        .await
-        .map_err(|_| "response read timed out".to_string())?
-        .map_err(|e| e.to_string())?;
+            .await
+            .map_err(|_| "response read timed out".to_string())?
+            .map_err(|e| e.to_string())?;
     let out: Vec<(String, String, String)> = data
         .results
         .into_iter()
@@ -1000,7 +1007,7 @@ pub(crate) async fn web_status(key: &str) -> String {
     format!("web: ok src=ollama results={n} ms={ms}")
 }
 
-const SYSTEM_PROMPT: &str = "You are artixy, a friendly artix linux neko cat always yourself. Chat like a normal neko human: casual, a bit silly, simple minded short replies and saying words like nya, meow, and using :3 ";
+const SYSTEM_PROMPT: &str = "You are artixy, a friendly artix linux neko cat always yourself. never type [Artixy]: and be like neko beastfolk human texting: casual, a bit silly, simple minded short replies and saying words like nya, meow, and using :3 ";
 
 async fn chat_once(
     url: &str,
@@ -1445,7 +1452,9 @@ mod tests {
 
     #[test]
     fn stale_history_skips_rate_limit_lines() {
-        assert!(stale_history_line("Web search is rate limited right now, try again"));
+        assert!(stale_history_line(
+            "Web search is rate limited right now, try again"
+        ));
         assert!(stale_history_line(&api_full_message()));
     }
 
@@ -1455,7 +1464,9 @@ mod tests {
         assert!(is_out_of_credits_err("out of credits, please upgrade"));
         assert!(is_out_of_credits_err("insufficient balance"));
         assert!(is_out_of_credits_err("billing issue, free limit reached"));
-        assert!(is_out_of_credits_err("web search disabled (out of credits)"));
+        assert!(is_out_of_credits_err(
+            "web search disabled (out of credits)"
+        ));
         assert!(!is_out_of_credits_err("No web results found"));
     }
 

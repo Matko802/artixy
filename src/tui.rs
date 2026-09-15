@@ -1,20 +1,3 @@
-// artixy TUI — bot control center.
-//
-// Clean layout (ratatui 0.26, immediate-mode MVC as per ratatui best
-// practices: App = model, render() = view, run_tui/on_key = controller):
-//
-//   header   one line: brand + LIVE/OFFLINE + where + typing
-//   main     sidebar (channels) | chat (messages)
-//   input    single-line composer for the active channel
-//   footer   key hints + transient notices
-//
-// Chat UX conventions:
-// - Up/Down = input history, PgUp/PgDn = scroll chat, Tab = next channel.
-// - F1 or /help opens a help popup (chat stays clean).
-// - #spy is a watch-only mirror; #<live> channels send as artixy when you
-//   type, and /commands there run on discord (/say works from anywhere).
-// - When hosted web search is out of credits it is silently off and the
-//   bot answers from knowledge without mentioning it.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -33,9 +16,6 @@ use crate::{
     Error,
 };
 
-// ---------------------------------------------------------------------------
-// settings + theme
-// ---------------------------------------------------------------------------
 
 pub(crate) struct TuiSettings {
     pub(crate) ai_enabled: bool,
@@ -51,15 +31,10 @@ const BOT_MSG: Color = Color::Yellow;
 const USER_MSG: Color = Color::Cyan;
 const DIM: Color = Color::DarkGray;
 
-// ---------------------------------------------------------------------------
-// model
-// ---------------------------------------------------------------------------
 
 struct Msg {
     author: String,
     color: Color,
-    /// Channel tag shown in the header line (e.g. "#general").
-    /// Empty when the channel is obvious (local chat, per-channel view).
     tag: String,
     text: String,
     time: String,
@@ -83,8 +58,17 @@ struct Channel {
     last_active: Option<Instant>,
 }
 
+struct HistMsg {
+    channel: u64,
+    author: String,
+    bot: bool,
+    text: String,
+}
+
 enum Reply {
     Text(Vec<String>),
+    ChannelList(Vec<(u64, String)>),
+    ChannelHistory(Vec<HistMsg>),
 }
 
 struct Job {
@@ -102,7 +86,7 @@ pub(crate) fn stamp() -> String {
 
 const TYPING_TTL: Duration = Duration::from_secs(9);
 const BOT_LIVE_SECS: u64 = 60;
-const MAX_LIVE_CHANNELS: usize = 20;
+const MAX_LIVE_CHANNELS: usize = 500;
 const MAX_MSGS: usize = 300;
 const NOTICE_SECS: u64 = 6;
 
@@ -111,7 +95,7 @@ struct App {
     active: usize,
     list_state: ListState,
     input: String,
-    cursor: usize, // char index into input
+    cursor: usize,
     history: Vec<String>,
     hist_pos: Option<usize>,
     show_help: bool,
@@ -129,6 +113,9 @@ struct App {
     last_feed: Option<Instant>,
     feed_total: u64,
     filter_mentions: bool,
+    chan_syncing: bool,
+    chan_sync_at: Option<Instant>,
+    hist_syncing: bool,
 }
 
 fn mk_channel(name: &str, id: u64, kind: ChannelKind) -> Channel {
@@ -162,13 +149,11 @@ fn display_width(s: &str) -> usize {
         .sum()
 }
 
-// ---------------------------------------------------------------------------
-// commands
-// ---------------------------------------------------------------------------
 
 enum Command {
     Help,
     Channels,
+    History(String),
     Status,
     Forget,
     Ai(String),
@@ -199,6 +184,12 @@ impl Command {
         }
         if text == "/channels" {
             return Self::Channels;
+        }
+        if text == "/history" {
+            return Self::History(String::new());
+        }
+        if let Some(rest) = text.strip_prefix("/history ") {
+            return Self::History(rest.trim().to_string());
         }
         if text == "/status" {
             return Self::Status;
@@ -258,7 +249,6 @@ impl Command {
         Self::Local(text.to_string())
     }
 
-    /// Commands handled locally by the TUI (take precedence over forwarding).
     fn is_native(name: &str) -> bool {
         matches!(
             name,
@@ -267,6 +257,7 @@ impl Command {
                 | "exit"
                 | "clear"
                 | "channels"
+                | "history"
                 | "status"
                 | "forget"
                 | "ai"
@@ -288,7 +279,8 @@ impl Command {
             ("//cmd in #live".into(), "force discord version".into()),
             ("/say #ch <text>".into(), "send as bot from anywhere".into()),
             ("/typing #ch".into(), "bot typing indicator".into()),
-            ("/channels".into(), "list live discord channels".into()),
+            ("/channels".into(), "list all discord channels".into()),
+            ("/history [n]".into(), "load recent messages per channel".into()),
             ("/status".into(), "bot + AI + typing status".into()),
             ("/ai on|off|model".into(), "control AI (saves)".into()),
             ("/war on|off".into(), "protections (saves)".into()),
@@ -303,9 +295,6 @@ impl Command {
     }
 }
 
-// ---------------------------------------------------------------------------
-// App impl
-// ---------------------------------------------------------------------------
 
 impl App {
     fn new(settings: TuiSettings) -> Self {
@@ -338,6 +327,9 @@ impl App {
             last_feed: None,
             feed_total: 0,
             filter_mentions: false,
+            chan_syncing: false,
+            chan_sync_at: None,
+            hist_syncing: false,
         };
         app.say(
             0,
@@ -349,7 +341,6 @@ impl App {
         app
     }
 
-    // -- basics ------------------------------------------------------------
 
     fn active_channel(&self) -> &Channel {
         &self.channels[self.active]
@@ -391,7 +382,6 @@ impl App {
         })
     }
 
-    // -- typing ------------------------------------------------------------
 
     fn prune_typing(&mut self) {
         let now = Instant::now();
@@ -437,7 +427,6 @@ impl App {
         format!("#{}", id)
     }
 
-    // -- live feed ----------------------------------------------------------
 
     fn ensure_live_channel(&mut self, id: u64) {
         if id == u64::MAX || id == 1 {
@@ -454,7 +443,6 @@ impl App {
             return;
         }
         if self.channels.iter().filter(|c| c.kind == ChannelKind::Live).count() >= MAX_LIVE_CHANNELS {
-            // Evict the stalest live channel to stay tidy.
             let mut oldest: Option<(usize, Instant)> = None;
             for (i, c) in self.channels.iter().enumerate() {
                 if c.kind != ChannelKind::Live {
@@ -484,6 +472,177 @@ impl App {
         let mut ch = mk_channel(&name, id, ChannelKind::Live);
         ch.last_active = Some(Instant::now());
         self.channels.push(ch);
+    }
+
+    fn apply_channel_list(&mut self, list: Vec<(u64, String)>) {
+        if list.is_empty() {
+            return;
+        }
+        let active_id = self.channels.get(self.active).map(|c| c.id).unwrap_or(0);
+        for (id, raw) in list {
+            let name = raw.trim().to_string();
+            if name.is_empty() || id == 0 || id == u64::MAX || id == 1 {
+                continue;
+            }
+            self.chan_names
+                .entry(name.to_lowercase())
+                .or_insert(id);
+            self.id_to_name.insert(id, name);
+            self.ensure_live_channel(id);
+        }
+        self.sort_live_channels();
+        if let Some(idx) = self.channels.iter().position(|c| c.id == active_id) {
+            self.goto(idx);
+        }
+    }
+
+    fn sort_live_channels(&mut self) {
+        if self.channels.len() <= 3 {
+            return;
+        }
+        let active_id = self.channels.get(self.active).map(|c| c.id).unwrap_or(0);
+        self.channels[2..].sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        if let Some(idx) = self.channels.iter().position(|c| c.id == active_id) {
+            self.active = idx;
+            self.list_state.select(Some(idx));
+        }
+    }
+
+    fn spawn_channel_sync(&mut self) {
+        let Some(token) = self.settings.token.clone() else {
+            return;
+        };
+        if self.chan_syncing {
+            return;
+        };
+        self.chan_syncing = true;
+        let tx = self.tx.clone();
+        let reply_to = self.chan();
+        *self.pending.entry(reply_to).or_insert(0) += 1;
+        tokio::spawn(async move {
+            let list = fetch_all_guild_channels(&token).await;
+            let _ = tx.send(Job {
+                channel: reply_to,
+                reply: Reply::ChannelList(list),
+            });
+        });
+    }
+
+    fn spawn_history_sync(&mut self, per: u8) {
+        let Some(token) = self.settings.token.clone() else {
+            self.say_active(
+                "system",
+                DIM,
+                "",
+                "no discord token — set discord_token, then restart tui.",
+            );
+            return;
+        };
+        if self.hist_syncing {
+            return;
+        }
+        self.hist_syncing = true;
+        let per = per.clamp(5, 100);
+        let tx = self.tx.clone();
+        let reply_to = self.chan();
+        *self.pending.entry(reply_to).or_insert(0) += 1;
+        tokio::spawn(async move {
+            let channels = fetch_all_guild_channels(&token).await;
+            let _ = tx.send(Job {
+                channel: reply_to,
+                reply: Reply::ChannelList(channels.clone()),
+            });
+            let items = fetch_recent_history(&token, &channels, per).await;
+            let _ = tx.send(Job {
+                channel: reply_to,
+                reply: Reply::ChannelHistory(items),
+            });
+        });
+        self.notify("loading recent discord messages…");
+    }
+
+    fn load_history(&mut self, arg: String) {
+        let per: u8 = arg
+            .split_whitespace()
+            .next()
+            .and_then(|w| w.parse().ok())
+            .unwrap_or(30);
+        self.spawn_history_sync(per);
+    }
+
+    fn push_hist(&mut self, idx: usize, author: &str, color: Color, tag: &str, text: &str) {
+        let ch = &mut self.channels[idx];
+        ch.messages.push(Msg {
+            author: author.to_string(),
+            color,
+            tag: tag.to_string(),
+            text: text.chars().take(1500).collect(),
+            time: stamp(),
+        });
+        if ch.messages.len() > MAX_MSGS {
+            let drop = ch.messages.len() - MAX_MSGS;
+            ch.messages.drain(..drop);
+        }
+    }
+
+    fn apply_history(&mut self, items: Vec<HistMsg>) {
+        if items.is_empty() {
+            self.say_active(
+                "system",
+                DIM,
+                "",
+                "no readable history — the bot needs View Channel + Read Message History there.",
+            );
+            return;
+        }
+        let spy_idx = self.spy_idx();
+        let mut empty: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for h in &items {
+            if h.text.trim().is_empty() {
+                continue;
+            }
+            if let Some(pi) = self.channels.iter().position(|c| c.id == h.channel) {
+                if self.channels[pi].messages.is_empty() {
+                    empty.insert(h.channel);
+                }
+            }
+        }
+        if empty.is_empty() {
+            self.notify("history already loaded");
+            return;
+        }
+        let mut loaded: usize = 0;
+        for h in items {
+            if h.text.trim().is_empty() || !empty.contains(&h.channel) {
+                continue;
+            }
+            let Some(pi) = self.channels.iter().position(|c| c.id == h.channel) else {
+                continue;
+            };
+            let color = if h.bot { BOT_MSG } else { USER_MSG };
+            self.push_hist(pi, &h.author, color, "", &h.text);
+            loaded += 1;
+            if let Some(si) = spy_idx {
+                if si != pi {
+                    let tag = self.channel_tag(h.channel);
+                    self.push_hist(si, &h.author, color, &tag, &h.text);
+                }
+            }
+        }
+        for c in self.channels.iter_mut() {
+            if c.kind == ChannelKind::Live {
+                c.follow = true;
+            }
+        }
+        if let Some(si) = spy_idx {
+            self.channels[si].follow = true;
+        }
+        self.notify(&format!("loaded {loaded} messages in {} channels", empty.len()));
     }
 
     fn poll_feed(&mut self) {
@@ -535,14 +694,12 @@ impl App {
             } else {
                 (e.author.clone(), USER_MSG)
             };
-            // Per-channel mirror (no tag needed — context is obvious).
             if let Some(pi) = self.channels.iter().position(|c| c.id == e.channel) {
                 if pi != spy_idx {
                     self.say(pi, &author, color, "", &e.text);
                     self.bump(pi);
                 }
             }
-            // #spy mirror (tag shows where it came from).
             if self.filter_mentions && !to_artixy {
                 continue;
             }
@@ -557,7 +714,6 @@ impl App {
         }
     }
 
-    // -- sending -------------------------------------------------------------
 
     fn resolve_target(&self, target: &str) -> Option<u64> {
         let t = target.trim().trim_start_matches('#').trim();
@@ -642,7 +798,6 @@ impl App {
         });
     }
 
-    // -- chat -----------------------------------------------------------------
 
     fn say(&mut self, idx: usize, author: &str, color: Color, tag: &str, text: &str) {
         let ch = &mut self.channels[idx];
@@ -750,21 +905,32 @@ impl App {
             if let Some(n) = self.pending.get_mut(&job.channel) {
                 *n = n.saturating_sub(1);
             }
-            if let Some(idx) = self.channels.iter().position(|c| c.id == job.channel) {
-                let Reply::Text(chunks) = job.reply;
-                let n = chunks.len();
-                for c in chunks {
-                    self.say(idx, "artixy", ACCENT, "", &c);
+            match job.reply {
+                Reply::ChannelList(list) => {
+                    self.chan_syncing = false;
+                    self.chan_sync_at = Some(Instant::now());
+                    self.apply_channel_list(list);
                 }
-                if idx != self.active {
-                    self.channels[idx].unread =
-                        self.channels[idx].unread.saturating_add(n);
+                Reply::ChannelHistory(items) => {
+                    self.hist_syncing = false;
+                    self.apply_history(items);
+                }
+                Reply::Text(chunks) => {
+                    if let Some(idx) = self.channels.iter().position(|c| c.id == job.channel) {
+                        let n = chunks.len();
+                        for c in chunks {
+                            self.say(idx, "artixy", ACCENT, "", &c);
+                        }
+                        if idx != self.active {
+                            self.channels[idx].unread =
+                                self.channels[idx].unread.saturating_add(n);
+                        }
+                    }
                 }
             }
         }
     }
 
-    // -- navigation ------------------------------------------------------------
 
     fn goto(&mut self, idx: usize) {
         if idx < self.channels.len() {
@@ -786,7 +952,6 @@ impl App {
         self.goto((self.active + n - 1) % n);
     }
 
-    // -- input editing ----------------------------------------------------------
 
     fn insert_str(&mut self, s: &str) {
         if s.is_empty() {
@@ -796,7 +961,6 @@ impl App {
         let at = self.cursor.min(chars.len());
         let mut i = at;
         for c in s.chars() {
-            // Single-line composer: turn newlines into spaces.
             let c = if c == '\n' || c == '\r' { ' ' } else { c };
             chars.insert(i, c);
             i += 1;
@@ -883,7 +1047,6 @@ impl App {
         }
     }
 
-    // -- submit -------------------------------------------------------------------
 
     fn submit(&mut self) {
         let line = std::mem::take(&mut self.input);
@@ -903,6 +1066,7 @@ impl App {
             }
             Command::Help => self.show_help = true,
             Command::Channels => self.list_channels(),
+            Command::History(arg) => self.load_history(arg),
             Command::Status => {
                 self.local_status();
                 self.spawn_status();
@@ -937,8 +1101,6 @@ impl App {
             Command::Websearch(q) => self.spawn_search(q),
             Command::Local(msg) => self.chat(msg),
             Command::Unknown(hint) => {
-                // In a remembered channel, bot commands run on discord as
-                // artixy — no /say <id> needed.
                 if self.try_forward_to_discord(&text) {
                     return;
                 }
@@ -948,8 +1110,6 @@ impl App {
         }
     }
 
-    /// In a remembered (live) channel, `/cmd` runs on discord when it names
-    /// a real bot command (`//cmd` forces it). Returns true when handled.
     fn try_forward_to_discord(&mut self, text: &str) -> bool {
         if self.channels[self.active].kind != ChannelKind::Live {
             return false;
@@ -970,8 +1130,6 @@ impl App {
         true
     }
 
-    /// Post `/cmd …` as artixy so the bot executes it like on discord.
-    /// The message id is claimed so ONLY this exact message may run.
     fn forward_command(&mut self, text: String) {
         if !self.bot_live() {
             self.say_active("system", DIM, "", "bot looks OFFLINE — start it first or the command posts as text and never runs.");
@@ -990,8 +1148,6 @@ impl App {
         let shown: String = text.chars().take(80).collect();
         tokio::spawn(async move {
             let http = serenity::Http::new(&token);
-            // DIRECT bot post (author = the bot itself): the only kind the
-            // relay check may execute. Webhook posts never execute.
             let msg = match serenity::ChannelId::new(id).say(&http, &text).await {
                 Ok(m) => {
                     crate::tuirelay::claim_message(m.id.get());
@@ -1013,7 +1169,6 @@ impl App {
             return;
         }
         if self.channels[self.active].kind == ChannelKind::Live {
-            // Remembered channel: just type — it goes out as artixy.
             let tag = self.channel_tag(self.chan());
             self.send_as_bot(tag, msg);
             return;
@@ -1032,27 +1187,40 @@ impl App {
     }
 
     fn list_channels(&mut self) {
+        self.spawn_channel_sync();
         if self.id_to_name.is_empty() {
             self.say_active("system", DIM, "", "no discord channels yet — run the bot with a token and chat in discord.");
             return;
         }
         let mut pairs: Vec<(u64, String)> =
             self.id_to_name.iter().map(|(k, v)| (*k, v.clone())).collect();
-        pairs.sort_by_key(|(id, _)| *id);
-        let mut lines = vec![format!("{} live channels (use with /say):", pairs.len())];
-        for (id, name) in pairs.iter().take(20) {
+        pairs.sort_by(|a, b| {
+            a.1.to_lowercase()
+                .cmp(&b.1.to_lowercase())
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        let header = format!("{} channels (use with /say):", pairs.len());
+        let mut chunk = vec![header];
+        let mut len = 0usize;
+        for (id, name) in &pairs {
             let typing = self.typing_in(*id);
             let t = if typing.is_empty() {
                 String::new()
             } else {
                 format!(" — typing: {}", typing.join(", "))
             };
-            lines.push(format!("- #{name} (<#{id}>){t}"));
+            let line = format!("- #{name} (<#{id}>){t}");
+            len += line.len() + 1;
+            if len > 3500 {
+                self.say_active("system", DIM, "", &chunk.join("\n"));
+                chunk = Vec::new();
+                len = line.len() + 1;
+            }
+            chunk.push(line);
         }
-        if pairs.len() > 20 {
-            lines.push(format!("…and {} more", pairs.len() - 20));
+        if !chunk.is_empty() {
+            self.say_active("system", DIM, "", &chunk.join("\n"));
         }
-        self.say_active("system", DIM, "", &lines.join("\n"));
     }
 
     fn local_status(&mut self) {
@@ -1251,7 +1419,6 @@ impl App {
         }
     }
 
-    // -- keys --------------------------------------------------------------------
 
     fn scroll_by(&mut self, delta: isize) {
         let ch = &mut self.channels[self.active];
@@ -1260,12 +1427,10 @@ impl App {
             ch.scroll = ch.scroll.saturating_sub((-delta) as usize);
         } else {
             ch.scroll = ch.scroll.saturating_add(delta as usize);
-            // Reaching the bottom re-follows; clamped at render time.
         }
     }
 
     fn on_key(&mut self, key: KeyEvent) {
-        // Help popup eats everything except close keys.
         if self.show_help {
             match key.code {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::F(1) => {
@@ -1334,9 +1499,6 @@ impl App {
     }
 }
 
-// ---------------------------------------------------------------------------
-// config helper
-// ---------------------------------------------------------------------------
 
 fn key_key_cmd(key: &str) -> &str {
     match key {
@@ -1369,9 +1531,65 @@ fn update_file_config(f: impl FnOnce(&mut crate::config::FileConfig)) -> Result<
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// view
-// ---------------------------------------------------------------------------
+
+
+async fn fetch_all_guild_channels(token: &str) -> Vec<(u64, String)> {
+    let http = serenity::Http::new(token);
+    let guilds = http.get_guilds(None, Some(200)).await.unwrap_or_default();
+    let mut out: Vec<(u64, String)> = Vec::new();
+    for g in guilds {
+        let chans = http.get_channels(g.id).await.unwrap_or_default();
+        for c in chans {
+            if c.is_text_based() || c.kind == serenity::ChannelType::Forum {
+                let name = c.name.trim().to_string();
+                if !name.is_empty() {
+                    out.push((c.id.get(), name));
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        a.1.to_lowercase()
+            .cmp(&b.1.to_lowercase())
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    out.dedup_by_key(|(id, _)| *id);
+    out
+}
+
+async fn fetch_recent_history(
+    token: &str,
+    channels: &[(u64, String)],
+    per: u8,
+) -> Vec<HistMsg> {
+    use serenity::builder::GetMessages;
+    let http = serenity::Http::new(token);
+    let mut out: Vec<HistMsg> = Vec::new();
+    for (id, _) in channels {
+        let msgs = serenity::ChannelId::new(*id)
+            .messages(&http, GetMessages::new().limit(per))
+            .await
+            .unwrap_or_default();
+        for m in msgs.iter().rev() {
+            let text = m.content.trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            let author = m
+                .author
+                .global_name
+                .clone()
+                .unwrap_or_else(|| m.author.name.clone());
+            out.push(HistMsg {
+                channel: *id,
+                author,
+                bot: m.author.bot,
+                text,
+            });
+        }
+    }
+    out
+}
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup = Layout::default()
@@ -1410,7 +1628,6 @@ fn render(frame: &mut Frame, app: &mut App) {
         .split(main);
     let (side, chat) = (cols[0], cols[1]);
 
-    // Header: brand + status + typing (kept short so it never wraps).
     let live = app.bot_live();
     let typing = app.typing_summary();
     let typing_txt = if typing.is_empty() {
@@ -1445,7 +1662,6 @@ fn render(frame: &mut Frame, app: &mut App) {
     ]);
     frame.render_widget(Paragraph::new(header_line), header);
 
-    // Sidebar: grouped, highlighted, with unread + typing marks.
     let mut items: Vec<ListItem> = Vec::new();
     for (i, c) in app.channels.iter().enumerate() {
         let mark = if !app.typing_in(c.id).is_empty() {
@@ -1485,8 +1701,6 @@ fn render(frame: &mut Frame, app: &mut App) {
         .highlight_symbol("▸ ");
     frame.render_stateful_widget(side_list, side, &mut app.list_state);
 
-    // Chat: one header line per message (author · time · tag), body as-is.
-    // Paragraph::wrap handles display wrapping — no manual wrapping.
     let mut lines: Vec<Line> = Vec::new();
     for m in &app.active_channel().messages {
         let mut head: Vec<Span> = vec![Span::styled(
@@ -1545,7 +1759,6 @@ fn render(frame: &mut Frame, app: &mut App) {
         .wrap(Wrap { trim: false })
         .scroll((scroll as u16, 0));
     frame.render_widget(body, chat);
-    // Thin scrollbar so position is visible while scrolled back.
     if max_off > 0 {
         let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
@@ -1554,7 +1767,6 @@ fn render(frame: &mut Frame, app: &mut App) {
         frame.render_stateful_widget(bar, chat, &mut bar_state);
     }
 
-    // Input: single-line composer, native cursor.
     let state_txt = if !cur_typing.is_empty() {
         format!("{} typing…", cur_typing.join(", "))
     } else if pending > 0 {
@@ -1580,7 +1792,6 @@ fn render(frame: &mut Frame, app: &mut App) {
         frame.set_cursor(cx, inner.y);
     }
 
-    // Footer: hints, or a transient notice.
     let footer_line = if let Some(n) = app.fresh_notice() {
         Line::from(vec![Span::styled(format!(" {n}"), Style::default().fg(Color::Yellow))])
     } else {
@@ -1591,7 +1802,6 @@ fn render(frame: &mut Frame, app: &mut App) {
     };
     frame.render_widget(Paragraph::new(footer_line), footer);
 
-    // Help popup.
     if app.show_help {
         let area = centered_rect(70, 78, size);
         frame.render_widget(Clear, area);
@@ -1625,9 +1835,6 @@ fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// controller
-// ---------------------------------------------------------------------------
 
 pub(crate) async fn run_tui(settings: TuiSettings) -> Result<(), Error> {
     crossterm::terminal::enable_raw_mode()?;
@@ -1658,12 +1865,17 @@ async fn run_loop(
     app: &mut App,
 ) -> Result<(), Error> {
     let mut frame: u64 = 0;
+    app.spawn_channel_sync();
+    app.spawn_history_sync(30);
     loop {
         app.drain();
         app.prune_typing();
         frame += 1;
         if frame % 8 == 0 {
             app.poll_feed();
+        }
+        if frame % 1200 == 0 {
+            app.spawn_channel_sync();
         }
         terminal.draw(|f| render(f, app))?;
         if app.quit {
