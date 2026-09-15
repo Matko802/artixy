@@ -112,6 +112,7 @@ enum Reply {
     ChannelList(Vec<GuildChans>),
     ChannelHistory(Vec<HistMsg>, Vec<(u64, String)>),
     Echo { target: u64, mid: u64, text: String },
+    RunOutput { chunks: Vec<String>, seen: Vec<u64> },
 }
 
 struct Job {
@@ -341,13 +342,13 @@ impl Command {
         vec![
             ("artixy <q>".into(), "chat with local AI".into()),
             ("typing in #live".into(), "sends as artixy there".into()),
-            ("/run <cmd>".into(), "run in the VM, output here".into()),
+            ("/run <cmd>".into(), "run in the VM, here + discord".into()),
             ("/ps, /status… in #live".into(), "run on discord as artixy".into()),
             ("//cmd in #live".into(), "force discord version".into()),
             ("/say #ch <text>".into(), "send as bot from anywhere".into()),
             ("/typing #ch".into(), "bot typing indicator".into()),
             ("/channels".into(), "list all discord channels".into()),
-            ("/history [n]".into(), "load recent messages per channel".into()),
+            ("/history [#ch] [n]".into(), "load messages, or reload one channel".into()),
             ("/status".into(), "bot + AI + typing status".into()),
             ("/ai on|off|model".into(), "control AI (saves)".into()),
             ("/war on|off".into(), "protections (saves)".into()),
@@ -570,6 +571,7 @@ impl App {
             return;
         }
         let active_id = self.channels.get(self.active).map(|c| c.id).unwrap_or(0);
+        let listed: HashSet<u64> = list.iter().map(|g| g.id).collect();
         let mut cats: Vec<CatInfo> = Vec::new();
         for g in list {
             let gname = g.name.trim().to_string();
@@ -598,7 +600,22 @@ impl App {
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
                 .then_with(|| a.id.cmp(&b.id))
         });
-        self.cats = cats;
+        // Merge: replace categories only for guilds in this list, so a
+        // single-channel sync can't wipe the other servers' sections.
+        let mut merged: Vec<CatInfo> = self
+            .cats
+            .iter()
+            .filter(|c| !listed.contains(&c.guild))
+            .cloned()
+            .collect();
+        merged.extend(cats);
+        merged.sort_by(|a, b| {
+            a.pos
+                .cmp(&b.pos)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        self.cats = merged;
         self.sort_live_channels();
         if self.cur_guild == 0 || !self.guild_order().contains(&self.cur_guild) {
             self.cur_guild = self
@@ -877,13 +894,147 @@ impl App {
         self.notify("loading recent discord messages…");
     }
 
+    fn resolve_history_target(&self, tok: &str) -> Option<u64> {
+        let mut t = tok.trim();
+        if t.is_empty() {
+            return None;
+        }
+        if t.starts_with("<#") && t.ends_with('>') && t.len() > 3 {
+            t = t[2..t.len() - 1].trim();
+        }
+        let h = t.trim_start_matches('#').trim();
+        // Raw snowflakes are 15+ digits; small numbers are counts, not channels.
+        if !h.is_empty() && h.bytes().all(|b| b.is_ascii_digit()) && h.len() >= 15 {
+            if let Ok(n) = h.parse::<u64>() {
+                if n != 0 {
+                    return Some(n);
+                }
+            }
+        }
+        let low = h.to_lowercase();
+        if low.is_empty() {
+            return None;
+        }
+        if let Some(id) = self.chan_names.get(&low).copied() {
+            return Some(id);
+        }
+        for (id, name) in &self.id_to_name {
+            if name.to_lowercase() == low {
+                return Some(*id);
+            }
+        }
+        None
+    }
+
     fn load_history(&mut self, arg: String) {
-        let per: u8 = arg
-            .split_whitespace()
-            .next()
-            .and_then(|w| w.parse().ok())
-            .unwrap_or(30);
+        let mut parts = arg.split_whitespace();
+        let first = parts.next().unwrap_or("");
+        if let Some(id) = self.resolve_history_target(first) {
+            let per: u8 = parts.next().and_then(|w| w.parse().ok()).unwrap_or(30);
+            self.spawn_single_history(id, per);
+            return;
+        }
+        let per: u8 = first.parse().unwrap_or(30);
         self.spawn_history_sync(per);
+    }
+
+    /// Reload one channel (e.g. `/history #bot-shenanigans` or
+    /// `/history 1546591363469148281`): clears its view and fetches it
+    /// directly, reporting the exact Discord error instead of leaving it
+    /// silently empty.
+    fn spawn_single_history(&mut self, id: u64, per: u8) {
+        let Some(token) = self.settings.token.clone() else {
+            self.say_active(
+                "system",
+                DIM,
+                "",
+                "no discord token — set discord_token, then restart tui.",
+            );
+            return;
+        };
+        if self.hist_syncing {
+            self.notify("history already loading…");
+            return;
+        }
+        self.hist_syncing = true;
+        let per = per.clamp(5, 100);
+        let tx = self.tx.clone();
+        let reply_to = self.chan();
+        *self.pending.entry(reply_to).or_insert(0) += 1;
+        // Clear first: the shared fill step skips non-empty views, so an
+        // explicit reload must start empty or its own fetch is ignored.
+        if let Some(idx) = self.channels.iter().position(|c| c.id == id) {
+            self.channels[idx].messages.clear();
+            self.channels[idx].scroll = 0;
+        } else {
+            self.ensure_live_channel(id);
+        }
+        self.hist_failed.remove(&id);
+        let tag = self.channel_tag(id);
+        tokio::spawn(async move {
+            let http = serenity::Http::new(&token);
+            // Resolve the channel directly: exact name/guild, exact error.
+            let mut meta: Option<GuildChans> = None;
+            let mut early_fail: Option<(u64, String)> = None;
+            match serenity::ChannelId::new(id).to_channel(&http).await {
+                Ok(ch) => {
+                    if let Some(g) = ch.guild() {
+                        let name = g.name.trim().to_string();
+                        if name.is_empty() {
+                            early_fail = Some((id, "unavailable".to_string()));
+                        } else {
+                            let gid = g.guild_id.get();
+                            let fc = FetchedChan {
+                                id,
+                                name,
+                                pos: g.position as u32,
+                                parent: g.parent_id.map(|p| p.get()).unwrap_or(0),
+                                voice: false,
+                            };
+                            let gname = http
+                                .get_guild(serenity::GuildId::new(gid))
+                                .await
+                                .map(|guild| guild.name.trim().to_string())
+                                .unwrap_or_default();
+                            let gname = if gname.is_empty() {
+                                format!("server-{gid}")
+                            } else {
+                                gname
+                            };
+                            meta = Some(GuildChans {
+                                id: gid,
+                                name: gname,
+                                cats: Vec::new(),
+                                channels: vec![fc],
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    early_fail = Some((id, hist_reason(&e.to_string())));
+                }
+            }
+            if let Some(entry) = meta {
+                let _ = tx.send(Job {
+                    channel: reply_to,
+                    reply: Reply::ChannelList(vec![entry]),
+                });
+            }
+            if let Some(f) = early_fail {
+                let _ = tx.send(Job {
+                    channel: reply_to,
+                    reply: Reply::ChannelHistory(vec![], vec![f]),
+                });
+                return;
+            }
+            let (items, failed) =
+                fetch_recent_history(&token, &[(id, String::new())], per).await;
+            let _ = tx.send(Job {
+                channel: reply_to,
+                reply: Reply::ChannelHistory(items, failed),
+            });
+        });
+        self.notify(&format!("loading {tag}…"));
     }
 
     fn push_hist(&mut self, idx: usize, author: &str, color: Color, tag: &str, text: &str) {
@@ -908,7 +1059,7 @@ impl App {
                     "system",
                     DIM,
                     "",
-                    "no readable history — the bot needs View Channel + Read Message History there.",
+                    "no messages found there — if it should have some, the bot needs View Channel + Read Message History.",
                 );
             } else {
                 let mut reasons: Vec<String> = Vec::new();
@@ -949,7 +1100,7 @@ impl App {
             }
         }
         if empty.is_empty() {
-            self.notify("history already loaded");
+            self.notify("history already loaded — /history #channel reloads one");
             return;
         }
         let mut loaded: usize = 0;
@@ -1185,9 +1336,21 @@ impl App {
         let chan = self.chan();
         let idx = self.active;
         self.say(idx, "you", MINE, "", &format!("/run {cmd}"));
+        // Mirror to Discord when run from a live channel: the output lands
+        // there as artixy as well as here.
+        let mirror = if self.channels[idx].kind == ChannelKind::Live {
+            Some(chan)
+        } else {
+            None
+        };
+        let token = self.settings.token.clone();
         *self.pending.entry(chan).or_insert(0) += 1;
         let tx = self.tx.clone();
         tokio::spawn(async move {
+            let out_job = |chunks: Vec<String>, seen: Vec<u64>| Job {
+                channel: chan,
+                reply: Reply::RunOutput { chunks, seen },
+            };
             let cfg = crate::config::load_file_config();
             let vm = cfg
                 .vm_name
@@ -1195,19 +1358,16 @@ impl App {
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_default();
             if vm.trim().is_empty() {
-                let _ = tx.send(Job {
-                    channel: chan,
-                    reply: Reply::Text(vec![
+                let _ = tx.send(out_job(
+                    vec![
                         "VM not configured — set `vm_name` in config or `VM_NAME` env.".to_string(),
-                    ]),
-                });
+                    ],
+                    vec![],
+                ));
                 return;
             }
             if !crate::vm::agent_ping(&vm).await {
-                let _ = tx.send(Job {
-                    channel: chan,
-                    reply: Reply::Text(vec!["Artix is off.".to_string()]),
-                });
+                let _ = tx.send(out_job(vec!["Artix is off.".to_string()], vec![]));
                 return;
             }
             // Same account the bot would use for the owner on Discord.
@@ -1216,7 +1376,7 @@ impl App {
                 .and_then(|id| cfg.linux.get(&id.to_string()).cloned())
                 .filter(|u| crate::util::valid_runas(u));
             let shown = format!("/run {cmd}");
-            match tui_guest_run(&vm, runas.as_deref(), &cmd).await {
+            let mut chunks: Vec<String> = match tui_guest_run(&vm, runas.as_deref(), &cmd).await {
                 Ok((code, out, err)) => {
                     let mut body = out.trim_end().to_string();
                     let err = err.trim_end();
@@ -1233,18 +1393,31 @@ impl App {
                     } else {
                         format!("$ {cmd}\n{body}\n(exit {code})")
                     };
-                    let _ = tx.send(Job {
-                        channel: chan,
-                        reply: Reply::Text(chunk_reply(&text)),
-                    });
+                    chunk_reply(&text)
                 }
-                Err(e) => {
-                    let _ = tx.send(Job {
-                        channel: chan,
-                        reply: Reply::Text(vec![format!("{shown} failed: {e}")]),
-                    });
+                Err(e) => vec![format!("{shown} failed: {e}")],
+            };
+            // Post the output to Discord as artixy; the echoed-back feed
+            // lines are skipped via seen ids so the TUI shows it once.
+            let mut seen: Vec<u64> = Vec::new();
+            if let Some(did) = mirror {
+                match token {
+                    Some(t) => {
+                        let http = serenity::Http::new(&t);
+                        for c in &chunks {
+                            match serenity::ChannelId::new(did).say(&http, c).await {
+                                Ok(m) => seen.push(m.id.get()),
+                                Err(e) => {
+                                    chunks.push(format!("(discord mirror stopped: {e})"));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    None => chunks.push("(discord mirror skipped: no token)".to_string()),
                 }
             }
+            let _ = tx.send(out_job(chunks, seen));
         });
         self.notify("running in VM…");
     }
@@ -1417,6 +1590,28 @@ impl App {
                     }
                 }
                 Reply::Text(chunks) => {
+                    if let Some(idx) = self.channels.iter().position(|c| c.id == job.channel) {
+                        let n = chunks.len();
+                        for c in chunks {
+                            self.say(idx, "artixy", ACCENT, "", &c);
+                        }
+                        if idx != self.active {
+                            self.channels[idx].unread =
+                                self.channels[idx].unread.saturating_add(n);
+                        }
+                    }
+                }
+                Reply::RunOutput { chunks, seen } => {
+                    // Discord-side ids of the mirrored posts: the feed echo
+                    // of each is skipped so the output shows once, here.
+                    if self.seen_mids.len() + seen.len() > 2000 {
+                        self.seen_mids.clear();
+                    }
+                    for mid in seen {
+                        if mid != 0 {
+                            self.seen_mids.insert(mid);
+                        }
+                    }
                     if let Some(idx) = self.channels.iter().position(|c| c.id == job.channel) {
                         let n = chunks.len();
                         for c in chunks {
@@ -2379,11 +2574,13 @@ fn flatten_guilds(groups: &[GuildChans]) -> Vec<(u64, String)> {
 
 fn hist_reason(s: &str) -> String {
     if s.contains("403") {
-        "bot cannot read it".to_string()
+        "bot cannot read it (needs View Channel + Read History)".to_string()
     } else if s.contains("404") {
         "channel is gone".to_string()
     } else if s.contains("401") {
         "bad token".to_string()
+    } else if s.contains("405") {
+        "not a text channel".to_string()
     } else {
         "unavailable".to_string()
     }
