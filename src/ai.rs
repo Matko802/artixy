@@ -357,6 +357,59 @@ pub(crate) fn clean_reply(text: &str) -> String {
     collapsed.trim().to_string()
 }
 
+pub(crate) fn strip_leading_speaker(text: &str, names: &[String]) -> String {
+    let mut out = text.trim_start().to_string();
+    loop {
+        let t = out.trim_start();
+        if !t.starts_with('[') {
+            break;
+        }
+        let end = match t.find(']') {
+            Some(e) if e > 1 && e <= 65 => e,
+            _ => break,
+        };
+        let after = t[end + 1..].trim_start();
+        if !after.starts_with(':') {
+            break;
+        }
+        out = after[1..].trim_start().to_string();
+    }
+    let mut ordered: Vec<&String> = names.iter().collect();
+    ordered.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    loop {
+        let t = out.trim_start();
+        let mut hit = false;
+        for n in &ordered {
+            let n = n.trim();
+            if n.is_empty() {
+                continue;
+            }
+            if t.len() > n.len()
+                && t[..n.len()] == *n
+                && t[n.len()..].starts_with(':')
+            {
+                out = t[n.len() + 1..].trim_start().to_string();
+                hit = true;
+                break;
+            }
+        }
+        if !hit {
+            break;
+        }
+    }
+    out
+}
+
+pub(crate) fn finalize_reply(channel: u64, tagged: String, names: &[String], raw: &str) -> Result<String, Error> {
+    let text = strip_leading_speaker(&clean_reply(raw), names);
+    if text.trim().is_empty() {
+        return Err("ollama returned an empty reply".into());
+    }
+    push(channel, "user".to_string(), tagged);
+    push(channel, "assistant".to_string(), text.clone());
+    Ok(text)
+}
+
 pub(crate) fn looks_like_search_placeholder(text: &str) -> bool {
     let t = text.trim().to_lowercase();
     if t.chars().count() > 140 {
@@ -699,7 +752,7 @@ pub(crate) async fn web_status(key: &str) -> String {
     format!("web: ok src=ollama results={n} ms={ms}")
 }
 
-const SYSTEM_PROMPT: &str = "You are artixy, a friendly artix linux neko cat. Chat like a normal neko human: casual, a bit silly, short replies. \
+const SYSTEM_PROMPT: &str = "You are artixy, a friendly artix linux neko cat — always yourself, never anyone else. Chat like a normal neko human: casual, a bit silly, short replies, never starting with a name. \
 You have a websearch tool — use it only when explicitly asked to search, and never mention it or output JSON.";
 
 async fn chat_once(
@@ -758,12 +811,29 @@ pub(crate) async fn ollama_chat(host: &str, model: &str, okey: &str, channel: u6
         format!("{tagged}\n\n[linked pages below, prefer over training data]\n{pages}")
     };
     let past = snapshot(channel);
+    let mut names: Vec<String> = vec![speaker_tag(speaker)];
+    for e in &past {
+        if e.role == "assistant" {
+            continue;
+        }
+        let t = e.content.trim_start();
+        if let Some(rest) = t.strip_prefix('[') {
+            if let Some(end) = rest.find(']') {
+                if end > 0 && end <= 64 {
+                    let n = rest[..end].trim().to_string();
+                    if !n.is_empty() && !names.contains(&n) {
+                        names.push(n);
+                    }
+                }
+            }
+        }
+    }
     let mut messages: Vec<serde_json::Value> = Vec::with_capacity(past.len() + 2);
     messages.push(serde_json::json!({"role": "system", "content": SYSTEM_PROMPT}));
     for e in &past {
         let role = if e.role == "assistant" { "assistant" } else { "user" };
         if role == "assistant" {
-            let cleaned = clean_reply(&e.content);
+            let cleaned = strip_leading_speaker(&clean_reply(&e.content), &names);
             if cleaned.trim().is_empty() || stale_history_line(&cleaned) {
                 continue;
             }
@@ -815,20 +885,11 @@ pub(crate) async fn ollama_chat(host: &str, model: &str, okey: &str, channel: u6
         }
     }
     if calls.is_empty() {
-        let text = clean_reply(&first.content);
-        if !text.trim().is_empty() && !looks_like_search_placeholder(&first.content) {
-            push(channel, "user".to_string(), tagged);
-            push(channel, "assistant".to_string(), text.clone());
-            return Ok(text);
+        if !looks_like_search_placeholder(&first.content) {
+            return finalize_reply(channel, tagged, &names, &first.content);
         }
         let retry = chat_once(&url, model, &messages, false).await?;
-        let text = clean_reply(&retry.content);
-        if text.trim().is_empty() {
-            return Err("ollama returned an empty reply".into());
-        }
-        push(channel, "user".to_string(), tagged);
-        push(channel, "assistant".to_string(), text.clone());
-        return Ok(text);
+        return finalize_reply(channel, tagged, &names, &retry.content);
     }
     let mut rounds = 0;
     let mut pending: Option<String> = calls.into_iter().next().map(|(_, q)| q);
@@ -873,24 +934,12 @@ pub(crate) async fn ollama_chat(host: &str, model: &str, okey: &str, channel: u6
         rounds += 1;
         if let Some(q) = next {
             if rounds >= 2 {
-                let text = clean_reply(&second.content);
-                if text.trim().is_empty() {
-                    return Err("ollama returned an empty reply".into());
-                }
-                push(channel, "user".to_string(), tagged);
-                push(channel, "assistant".to_string(), text.clone());
-                return Ok(text);
+                return finalize_reply(channel, tagged, &names, &second.content);
             }
             pending = Some(q);
             continue;
         }
-        let text = clean_reply(&second.content);
-        if text.trim().is_empty() {
-            return Err("ollama returned an empty reply".into());
-        }
-        push(channel, "user".to_string(), tagged);
-        push(channel, "assistant".to_string(), text.clone());
-        return Ok(text);
+        return finalize_reply(channel, tagged, &names, &second.content);
     }
 }
 
@@ -1152,6 +1201,17 @@ mod tests {
         assert!(!explicit_search_asked("what is the latest nvidia gpu"));
         assert!(!explicit_search_asked("how are you"));
         assert!(!explicit_search_asked(""));
+    }
+
+    #[test]
+    fn speaker_prefix_stripped_for_known_names() {
+        let names = vec!["Matko802".to_string(), "Bob".to_string()];
+        assert_eq!(strip_leading_speaker("[Matko802]: oh, just chillin!", &names), "oh, just chillin!");
+        assert_eq!(strip_leading_speaker("Matko802: oh, just chillin!", &names), "oh, just chillin!");
+        assert_eq!(strip_leading_speaker("[Bob]: [Matko802]: hi", &names), "hi");
+        assert_eq!(strip_leading_speaker("hehe wdym is slang", &names), "hehe wdym is slang");
+        assert_eq!(strip_leading_speaker("Note: remember this", &names), "Note: remember this");
+        assert_eq!(strip_leading_speaker("[1234]: hi", &[] as &[String]), "hi");
     }
 
     #[test]
