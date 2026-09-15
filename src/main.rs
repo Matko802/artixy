@@ -202,7 +202,16 @@ async fn main() {
         })
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
-                poise::builtins::register_globally(ctx, &framework.options().commands).await?;
+                poise::builtins::register_globally(ctx, &framework.options().commands)
+                    .await
+                    .map_err(|e| -> Error {
+                        let msg = e.to_string();
+                        if msg.contains("401") || msg.to_lowercase().contains("unauthorized") {
+                            format!("Discord rejected the token (401 Unauthorized) — check discord_token in config: {e}").into()
+                        } else {
+                            format!("failed to register slash commands (network or Discord API issue): {e}").into()
+                        }
+                    })?;
                 let stale_vm = data.vm.read().await.clone();
                 crate::live::cleanup_stale_live_files(&stale_vm).await;
                 if let Some(ch) = data.settings.read().await.notify_channel {
