@@ -2,6 +2,7 @@ mod ai;
 mod commands;
 mod config;
 mod events;
+mod feed;
 mod kitty;
 mod live;
 mod pngencode;

@@ -42,7 +42,7 @@ struct Job {
     reply: Reply,
 }
 
-fn stamp() -> String {
+pub(crate) fn stamp() -> String {
     let s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -101,6 +101,8 @@ struct App {
     tx: tokio::sync::mpsc::UnboundedSender<Job>,
     rx: tokio::sync::mpsc::UnboundedReceiver<Job>,
     quit: bool,
+    feed_off: u64,
+    spy_hint: bool,
 }
 
 impl App {
@@ -122,6 +124,13 @@ impl App {
                     scroll: 0,
                     follow: true,
                 },
+                Channel {
+                    name: "spy",
+                    id: u64::MAX,
+                    messages: Vec::new(),
+                    scroll: 0,
+                    follow: true,
+                },
             ],
             active: 0,
             input: String::new(),
@@ -131,14 +140,47 @@ impl App {
             tx,
             rx,
             quit: false,
+            feed_off: 0,
+            spy_hint: false,
         };
         app.say(
             0,
             "artixy",
             Color::Magenta,
-            "welcome to the local playground. type artixy <question> to chat, /websearch <q>, /ai, /forget, /clear, /quit.",
+            "welcome to the local playground. type artixy <question> to chat, /websearch <q>, /ai, /forget, /clear, /quit. #spy mirrors live discord traffic when the bot runs with a token.",
         );
         app
+    }
+
+    fn is_spy(&self) -> bool {
+        self.channels[self.active].id == u64::MAX
+    }
+
+    fn poll_feed(&mut self) {
+        let lines = crate::feed::read_new(&mut self.feed_off);
+        if lines.is_empty() {
+            if !self.spy_hint {
+                self.spy_hint = true;
+                if let Some(idx) = self.channels.iter().position(|c| c.id == u64::MAX) {
+                    self.say(
+                        idx,
+                        "system",
+                        Color::DarkGray,
+                        "no discord traffic yet — run `artixy` with a token and every message the bot sees appears here.",
+                    );
+                }
+            }
+            return;
+        }
+        let idx = match self.channels.iter().position(|c| c.id == u64::MAX) {
+            Some(i) => i,
+            None => return,
+        };
+        for e in lines {
+            let color = if e.bot { Color::Yellow } else { Color::Cyan };
+            let body = format!("[#{}] {}", e.channel, e.text);
+            self.say(idx, &e.author, color, &body);
+        }
     }
 
     fn chan(&self) -> u64 {
@@ -253,6 +295,14 @@ impl App {
             let ch = &mut self.channels[self.active];
             ch.messages.clear();
             ch.scroll = 0;
+            return;
+        }
+        if self.is_spy() {
+            self.say_active(
+                "system",
+                Color::DarkGray,
+                "spy is read-only — tab to #general to chat.",
+            );
             return;
         }
         if text == "/help" {
@@ -388,7 +438,7 @@ fn render(frame: &mut Frame, app: &mut App) {
             " artixy ",
             Style::default().fg(Color::Black).bg(Color::Magenta),
         ),
-        Span::raw(" local chat  |  tab: channel  pgup/pgdn: scroll  /quit: leave "),
+        Span::raw(" local chat + #spy discord mirror  |  tab: channel  /quit: leave "),
     ]);
     frame.render_widget(Paragraph::new(title), rows[0]);
 
@@ -472,8 +522,13 @@ pub(crate) async fn run_tui(settings: TuiSettings) -> Result<(), Error> {
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::new(settings);
 
+    let mut frame: u64 = 0;
     loop {
         app.drain();
+        frame += 1;
+        if frame % 10 == 0 {
+            app.poll_feed();
+        }
         terminal.draw(|f| render(f, &mut app))?;
         if app.quit {
             break;

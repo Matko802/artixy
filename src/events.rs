@@ -56,6 +56,13 @@ pub(crate) async fn event_handler(
     let serenity::FullEvent::Message { new_message } = event else {
         return Ok(());
     };
+    let _ = crate::feed::log_message(
+        &new_message.author.name,
+        new_message.author.bot,
+        new_message.channel_id.get(),
+        &new_message.content,
+    )
+    .await;
     let id = new_message.author.id.get();
     let (owner, blocked, war) = {
         let a = data.allowed.read().await;
