@@ -710,7 +710,7 @@ struct HostedFetchResponse {
     content: String,
 }
 
-pub(crate) async fn hosted_search(key: &str, query: &str) -> Vec<(String, String, String)> {
+pub(crate) async fn hosted_search(key: &str, query: &str) -> Result<Vec<(String, String, String)>, String> {
     let req = serde_json::json!({"query": query});
     let resp = tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -721,22 +721,20 @@ pub(crate) async fn hosted_search(key: &str, query: &str) -> Vec<(String, String
             .send(),
     )
     .await
-    .ok()
-    .and_then(|r| r.ok());
-    let resp = match resp {
-        Some(r) => r,
-        None => return Vec::new(),
-    };
+    .map_err(|_| "request timed out".to_string())?
+    .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        eprintln!("hosted_search: status={}", resp.status());
-        return Vec::new();
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let body: String = body.chars().take(200).collect();
+        eprintln!("hosted_search: status={status} body={body}");
+        return Err(format!("ollama {status}: {body}"));
     }
     let data: HostedSearchResponse =
         tokio::time::timeout(std::time::Duration::from_secs(15), resp.json())
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .unwrap_or_default();
+        .await
+        .map_err(|_| "response read timed out".to_string())?
+        .map_err(|e| e.to_string())?;
     let out: Vec<(String, String, String)> = data
         .results
         .into_iter()
@@ -751,7 +749,7 @@ pub(crate) async fn hosted_search(key: &str, query: &str) -> Vec<(String, String
         })
         .collect();
     eprintln!("hosted_search: results={}", out.len());
-    out
+    Ok(out)
 }
 
 pub(crate) async fn hosted_fetch(key: &str, url: &str) -> Option<String> {
@@ -789,7 +787,13 @@ pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
         return String::new();
     }
     let mut blocks = Vec::new();
-    let fresh = hosted_search(key, &query).await;
+    let fresh = match hosted_search(key, &query).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("run_websearch: {e}");
+            Vec::new()
+        }
+    };
     if !fresh.is_empty() {
         eprintln!("run_websearch: src=ollama results={}", fresh.len());
         let mut lines = Vec::new();
@@ -827,8 +831,17 @@ pub(crate) async fn web_status(key: &str) -> String {
         return "web: FAIL no ollama_api_key in config or OLLAMA_API_KEY env".to_string();
     }
     let t0 = std::time::Instant::now();
-    let n = hosted_search(key, "test").await.len();
-    let ms = t0.elapsed().as_millis();
+    let ms;
+    let n = match hosted_search(key, "test").await {
+        Ok(r) => {
+            ms = t0.elapsed().as_millis();
+            r.len()
+        }
+        Err(e) => {
+            ms = t0.elapsed().as_millis();
+            return format!("web: FAIL {e} ms={ms}");
+        }
+    };
     if n == 0 {
         return format!("web: FAIL ollama hosted search returned nothing ms={ms}");
     }
