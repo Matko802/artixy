@@ -981,12 +981,17 @@ pub(crate) async fn ai(
         return Ok(());
     }
     if !changing {
-        let s = ctx.data().settings.read().await;
-        let state = if s.ai_enabled { "enabled" } else { "disabled" };
+        let (state, ai_model, ai_host) = {
+            let s = ctx.data().settings.read().await;
+            (
+                if s.ai_enabled { "enabled" } else { "disabled" }.to_string(),
+                s.ai_model.clone(),
+                crate::ai::resolve_host(&s.ollama_host),
+            )
+        };
+        let web = crate::ai::web_status().await;
         post_text(ctx, format!(
-            "AI chat is **{state}** — model `{}` on `{}`.\nOwner: `/ai true model:llama3.1` to enable (or `/ai false` to disable). Then just ping me `@artixy <question>`.",
-            s.ai_model,
-            crate::ai::resolve_host(&s.ollama_host),
+            "AI chat is **{state}** — model `{ai_model}` on `{ai_host}`.\n{web}\nOwner: `/ai true model:llama3.1` to enable (or `/ai false` to disable). Then just ping me `@artixy <question>`.",
         ))
         .await?;
         return Ok(());
