@@ -15,7 +15,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::commands::{
     ai, botrestart, help, info, notify, ps, purge_replies, restart, run, sayas, send, shell,
-    start, status, stop, upload, user, warmode, websearch,
+    admin, start, status, stop, upload, user, warmode, websearch,
 };
 use crate::commands::BOOT_ART;
 use crate::config::{Allowed, AllowedFile, BotSettings, Data, apply_legacy_import, config_file_path, ensure_config_template, load_file_config, save_json};
@@ -39,6 +39,7 @@ mod tests {
             restart(),
             info(),
             user(),
+            admin(),
             shell(),
             botrestart(),
             run(),
@@ -51,7 +52,7 @@ mod tests {
             ai(),
             websearch(),
         ];
-        assert_eq!(cmds.len(), 19, "test must mirror the framework command list");
+        assert_eq!(cmds.len(), 20, "test must mirror the framework command list");
         for cmd in &cmds {
             let builder = cmd
                 .create_as_slash_command()
@@ -915,6 +916,7 @@ async fn main() {
                 restart(),
                 info(),
                 user(),
+                admin(),
                 shell(),
                 botrestart(),
                 run(),

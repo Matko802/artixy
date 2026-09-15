@@ -77,7 +77,7 @@ async fn require_vm(ctx: Context<'_>) -> Option<String> {
 pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. VM commands need owner + added users, but AI chat (`@artixy`), `/ai` view/forget and `/websearch` work for everyone except blocked users. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
-\n**Who can use me**\nOwner does everything. Admins (`admin_ids` in config) do everything except `/user add/remove`, which stay owner-only. Managers run VM commands + AI. Everyone except blocked users gets AI chat and `/websearch`.\n`/user` — one command: `/user list` shows owner + admins + managers, `/user add @user` (owner only) links them and creates their Linux account in Artix, `/user remove @user` (owner only) revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner/admin: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner/admin: delete their replies to my messages here\n`/warmode <true|false>` — owner/admin: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner/admin (`/ai true model:llama3.1` or `/ai true model:qwen3:4b` for local Ollama models), view is for all users. When enabled, ping me (`@artixy <question>` or `artixy <question>`) and I answer with the configured model.\n`/websearch <query>` — Ollama hosted web search, simple list of answers (needs `ollama_api_key`).\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
+\n**Who can use me**\nOwner does everything. Admins (`admin_ids` in config or `/admin add`) do everything except `/admin add/remove`, which stay owner-only. Managers run VM commands + AI. Everyone except blocked users gets AI chat and `/websearch`.\n`/user` — one command for linux accounts (owner/admin): `/user list` shows owner + admins + managers, `/user add @user` creates their Linux account in Artix and links it, `/user remove @user` deletes their Linux account in the VM (and revokes bot access if they had it)\n`/admin` — one command for bot admins: `/admin list` shows admins (owner/admin), `/admin add @user` (owner only) grants everything except `/admin` mgmt itself, `/admin remove @user` (owner only) revokes them\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner/admin: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner/admin: delete their replies to my messages here\n`/warmode <true|false>` — owner/admin: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner/admin (`/ai true model:llama3.1` or `/ai true model:qwen3:4b` for local Ollama models), view is for all users. When enabled, ping me (`@artixy <question>` or `artixy <question>`) and I answer with the configured model.\n`/websearch <query>` — Ollama hosted web search, simple list of answers (needs `ollama_api_key`).\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
 \n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to] [file] [file2] [file3]` — owner/admin: `no args` toggles auto say-as-artix mode, `message` and/or attached files send as artix (reply_to = message ID/link). Files attached to the slash command (or to the `;sayas` prefix message) are re-uploaded as artix. Output is ephemeral (only you see it).\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
@@ -1335,33 +1335,25 @@ pub(crate) async fn ensure_passwordless_sudo(vm: &str, user: &str) -> Result<(),
 }
 
 pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error> {
-    if !is_owner(ctx).await {
-        post_denied(ctx, "Owner only.").await?;
+    if !is_elevated(ctx).await {
+        post_denied(ctx, "Owner or admin only.").await?;
         return Ok(());
     }
     maybe_defer(ctx).await;
     let uid = user.id.get();
     let name = sanitize_discord_name(&user.name).unwrap_or_else(|| format!("u{}", uid));
-    {
-        let mut a = ctx.data().allowed.write().await;
-        if a.owner != uid && !a.users.contains(&uid) {
-            a.users.push(uid);
-            drop(a);
-            persist_runtime(ctx.data()).await?;
-        }
-    }
     let Some(vm) = require_vm(ctx).await else { return Ok(()); };
     let state = virsh(&["domstate", &vm]).await.unwrap_or_default();
     if state.trim() != "running" {
         post_text(ctx, format!(
-            "Authorized `{}` in the bot, but `{}` is off — run `/start` first, then rerun `/user add @user` to create their Linux account.",
-            uid, vm
+            "Linux account not created: `{}` is off — run `/start` first, then rerun `/user add @user`.",
+            vm
         ))
         .await?;
         return Ok(());
     }
     if !wait_agent(&vm, 60).await {
-            post_text(ctx, format!("Authorized `{}` in the bot, but the guest agent is silent — no Linux account created. Install `qemu-guest-agent` in Artix, then rerun `/user add @user`.", uid)).await?;
+            post_text(ctx, format!("Linux account not created: the guest agent is silent. Install `qemu-guest-agent` in Artix, then rerun `/user add @user`.")).await?;
         return Ok(());
     }
     let mut rc = guest_exec(&vm, "/usr/bin/useradd", &["-m", "-s", "/bin/bash", &name], false, 30).await;
@@ -1377,16 +1369,15 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
         }
         Ok((c, _, _)) => {
             post_text(ctx, format!(
-                "Authorized `{}` in the bot, but `useradd` in the VM failed (code {}).",
-                uid, c
+                "Linux account not created: `useradd` in the VM failed (code {}).",
+                c
             ))
             .await?;
             return Ok(());
         }
         Err(e) => {
             post_text(ctx, format!(
-                "Authorized `{}` in the bot, but `useradd` in the VM failed:\n{}",
-                uid,
+                "Linux account not created: `useradd` in the VM failed:\n{}",
                 codeblock(&e.to_string())
             ))
             .await?;
@@ -1435,50 +1426,145 @@ pub(crate) async fn do_useradd(ctx: Context<'_>, user: &serenity::User) -> Resul
 }
 
 pub(crate) async fn do_userdel(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error> {
-    if !is_owner(ctx).await {
-        post_denied(ctx, "Owner only.").await?;
+    if !is_elevated(ctx).await {
+        post_denied(ctx, "Owner or admin only.").await?;
         return Ok(());
     }
     maybe_defer(ctx).await;
     let uid = user.id.get();
     let mut a = ctx.data().allowed.write().await;
-    if let Some(i) = a.users.iter().position(|u| *u == uid) {
-        a.users.remove(i);
-        let linked = a.linux.remove(&uid.to_string());
+    let was_manager = a.users.iter().position(|u| *u == uid).map(|i| a.users.remove(i)).is_some();
+    let linked = a.linux.remove(&uid.to_string());
+    drop(a);
+    persist_runtime(ctx.data()).await?;
+    let revoked = if was_manager { " Bot access revoked." } else { "" };
+    match linked {
+        Some(n) if valid_runas(&n) => {
+            let Some(vm) = require_vm(ctx).await else { return Ok(()); };
+            let dropin = format!("/etc/sudoers.d/{n}");
+            let _ = guest_exec(&vm, "/bin/rm", &["-f", &dropin], false, 10).await;
+            let mut rc = guest_exec(&vm, "/usr/sbin/userdel", &["-r", &n], false, 30).await;
+            if let Err(e) = &rc {
+                if e.to_string().contains("No such file") {
+                    rc = guest_exec(&vm, "/usr/bin/userdel", &["-r", &n], false, 30).await;
+                }
+            }
+            match rc {
+                Ok((0, _, _)) => {
+                    post_text(ctx, format!("Deleted linux `{}` for <@{}>.{}", n, uid, revoked)).await?;
+                }
+                Ok((c, _, _)) => {
+                    post_text(ctx, format!("Deleting linux `{}` failed (code {}). Remove it by hand in the VM.{}", n, c, revoked)).await?;
+                }
+                Err(e) => {
+                    post_text(ctx, format!("Deleting linux `{}` failed:\n{}{}", n, codeblock(&e.to_string()), revoked)).await?;
+                }
+            };
+        }
+        Some(n) => {
+            post_text(ctx, format!("Linked name `{}` looked invalid, left alone in the VM.{}", n, revoked)).await?;
+        }
+        None => {
+            if was_manager {
+                post_text(ctx, format!("Removed <@{}> from the bot (no linux account was linked).", uid)).await?;
+            } else {
+                post_text(ctx, format!("<@{}> has no linked linux account.", uid)).await?;
+            }
+        }
+    };
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, poise::ChoiceParameter)]
+pub(crate) enum AdminAction {
+    #[name = "add"]
+    Add,
+    #[name = "list"]
+    List,
+    #[name = "remove"]
+    Remove,
+}
+
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
+pub(crate) async fn admin(
+    ctx: Context<'_>,
+    #[description = "What to do"] action: AdminAction,
+    #[description = "User for add/remove"] user: Option<serenity::User>,
+) -> Result<(), Error> {
+    match (action, user) {
+        (AdminAction::Add, Some(u)) => do_adminadd(ctx, &u).await,
+        (AdminAction::Add, None) => {
+            post_text(ctx, "Pick a user: `/admin action:add user:@user`.").await?;
+            Ok(())
+        }
+        (AdminAction::Remove, Some(u)) => do_admindel(ctx, &u).await,
+        (AdminAction::Remove, None) => {
+            post_text(ctx, "Pick a user: `/admin action:remove user:@user`.").await?;
+            Ok(())
+        }
+        (AdminAction::List, _) => do_admins(ctx).await,
+    }
+}
+
+pub(crate) async fn do_adminadd(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error> {
+    if !is_owner(ctx).await {
+        post_denied(ctx, "Owner only.").await?;
+        return Ok(());
+    }
+    let uid = user.id.get();
+    let mut a = ctx.data().allowed.write().await;
+    if uid == a.owner {
+        post_text(ctx, "That user is the owner already.").await?;
+        return Ok(());
+    }
+    if a.admins.contains(&uid) {
+        post_text(ctx, format!("<@{}> is already an admin.", uid)).await?;
+        return Ok(());
+    }
+    a.admins.push(uid);
+    drop(a);
+    persist_runtime(ctx.data()).await?;
+    post_text(ctx, format!("Added <@{}> as admin.", uid)).await?;
+    Ok(())
+}
+
+pub(crate) async fn do_admindel(ctx: Context<'_>, user: &serenity::User) -> Result<(), Error> {
+    if !is_owner(ctx).await {
+        post_denied(ctx, "Owner only.").await?;
+        return Ok(());
+    }
+    let uid = user.id.get();
+    let mut a = ctx.data().allowed.write().await;
+    if let Some(i) = a.admins.iter().position(|u| *u == uid) {
+        a.admins.remove(i);
         drop(a);
         persist_runtime(ctx.data()).await?;
-        match linked {
-            Some(n) if valid_runas(&n) => {
-                let Some(vm) = require_vm(ctx).await else { return Ok(()); };
-                let dropin = format!("/etc/sudoers.d/{n}");
-                let _ = guest_exec(&vm, "/bin/rm", &["-f", &dropin], false, 10).await;
-                let mut rc = guest_exec(&vm, "/usr/sbin/userdel", &["-r", &n], false, 30).await;
-                if let Err(e) = &rc {
-                    if e.to_string().contains("No such file") {
-                        rc = guest_exec(&vm, "/usr/bin/userdel", &["-r", &n], false, 30).await;
-                    }
-                }
-                match rc {
-                    Ok((0, _, _)) => {
-                        post_text(ctx, format!("Removed <@{}> and deleted linux `{}`.", uid, n)).await?;
-                    }
-                    Ok((c, _, _)) => {
-                        post_text(ctx, format!("Removed <@{}> from the bot, but deleting linux `{}` failed (code {}). Remove it by hand in the VM.", uid, n, c)).await?;
-                    }
-                    Err(e) => {
-                        post_text(ctx, format!("Removed <@{}> from the bot, but deleting linux `{}` failed:\n{}", uid, n, codeblock(&e.to_string()))).await?;
-                    }
-                };
-            }
-            Some(n) => {
-                post_text(ctx, format!("Removed <@{}> (linked name `{}` looked invalid, left alone in the VM).", uid, n)).await?;
-            }
-            None => {
-                post_text(ctx, format!("Removed <@{}>.", uid)).await?;
-            }
-        };
+        post_text(ctx, format!("Removed <@{}> from admins.", uid)).await?;
     } else {
-        post_text(ctx, format!("<@{}> was not a manager.", uid)).await?;
+        post_text(ctx, format!("<@{}> is not an admin.", uid)).await?;
     }
+    Ok(())
+}
+
+pub(crate) async fn do_admins(ctx: Context<'_>) -> Result<(), Error> {
+    if !is_elevated(ctx).await {
+        post_denied(ctx, "Owner or admin only.").await?;
+        return Ok(());
+    }
+    let admins: Vec<u64> = ctx.data().allowed.read().await.admins.clone();
+    if admins.is_empty() {
+        post_text(ctx, "No admins yet — owner runs `/admin add @user`.").await?;
+        return Ok(());
+    }
+    let mut msg = "Admins:".to_string();
+    for u in admins {
+        msg.push_str(&format!("\n`{}`", uname(ctx.http(), u).await));
+    }
+    post_text(ctx, msg).await?;
     Ok(())
 }
