@@ -1071,18 +1071,13 @@ pub(crate) fn strip_mention(content: &str, bot_id: u64) -> String {
 }
 
 pub(crate) fn mentions_name(content: &str) -> bool {
-    content
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|w| w.eq_ignore_ascii_case("artixy"))
+    content.to_lowercase().contains("artixy")
 }
 
 pub(crate) fn strip_name(content: &str) -> String {
     content
         .split_whitespace()
-        .filter(|w| {
-            let t = w.trim_matches(|c: char| !c.is_alphanumeric());
-            !t.eq_ignore_ascii_case("artixy")
-        })
+        .filter(|w| !w.to_lowercase().contains("artixy"))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -1185,12 +1180,11 @@ mod tests {
     }
 
     #[test]
-    fn name_trigger_matches_just_artixy() {
+    fn name_trigger_matches_any_artixy_text() {
         assert!(mentions_name("artixy hello"));
         assert!(mentions_name("hey ARTIXY help"));
         assert!(!mentions_name("hello there"));
-        assert!(!mentions_name("artixyz"));
-        assert_eq!(strip_name("artixy what is latest gpu"), "what is latest gpu");
+        assert_eq!(strip_name("artixy how are you"), "how are you");
         assert_eq!(strip_name("ARTIXY"), "");
     }
 
