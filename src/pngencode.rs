@@ -34,28 +34,6 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&crc32(&c).to_be_bytes());
 }
 
-#[cfg(test)]
-fn zlib_stream(raw: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(raw.len() + raw.len() / 1000 + 16);
-    out.extend_from_slice(&[0x78, 0x01]);
-    let mut rest = raw;
-    if rest.is_empty() {
-        out.extend_from_slice(&[0x01, 0x00, 0x00, 0xff, 0xff]);
-    }
-    while !rest.is_empty() {
-        let n = rest.len().min(65535);
-        let (block, tail) = rest.split_at(n);
-        out.push(if tail.is_empty() { 0x01 } else { 0x00 });
-        out.extend_from_slice(&(n as u16).to_le_bytes());
-        out.extend_from_slice(&(!(n as u16)).to_le_bytes());
-        out.extend_from_slice(block);
-        rest = tail;
-    }
-    let mut adler = adler2::Adler32::new();
-    adler.write_slice(raw);
-    out.extend_from_slice(&adler.checksum().to_be_bytes());
-    out
-}
 
 pub(crate) fn encode_rgb(width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>> {
     const LEVEL: u8 = 6;
@@ -87,34 +65,6 @@ pub(crate) fn encode_rgb(width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>>
     Some(out)
 }
 
-#[cfg(test)]
-pub(crate) fn encode_rgb_stored(width: u32, height: u32, rgb: &[u8]) -> Option<Vec<u8>> {
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let stride = width as u64 * 3;
-    let expect = stride.checked_mul(height as u64)?;
-    if rgb.len() as u64 != expect {
-        return None;
-    }
-    let mut raw = Vec::with_capacity(rgb.len() + height as usize);
-    for row in 0..height as usize {
-        raw.push(0x00);
-        let s = row * stride as usize;
-        raw.extend_from_slice(&rgb[s..s + stride as usize]);
-    }
-    let mut out = Vec::with_capacity(raw.len() + 64);
-    out.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
-    let mut ihdr = [0u8; 13];
-    ihdr[0..4].copy_from_slice(&width.to_be_bytes());
-    ihdr[4..8].copy_from_slice(&height.to_be_bytes());
-    ihdr[8] = 8;
-    ihdr[9] = 2;
-    chunk(&mut out, b"IHDR", &ihdr);
-    chunk(&mut out, b"IDAT", &zlib_stream(&raw));
-    chunk(&mut out, b"IEND", &[]);
-    Some(out)
-}
 
 fn paeth(a: u8, b: u8, c: u8) -> u8 {
     let (a, b, c) = (a as i32, b as i32, c as i32);

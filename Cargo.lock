@@ -61,7 +61,6 @@ dependencies = [
 name = "artixy"
 version = "0.1.0"
 dependencies = [
- "adler2",
  "alacritty_terminal",
  "base64",
  "fontdue",
