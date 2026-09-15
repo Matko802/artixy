@@ -284,6 +284,121 @@ async fn fetch_url_text(url: &str) -> Option<String> {
     Some(text)
 }
 
+pub(crate) fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(v) = u8::from_str_radix(hex, 16) {
+                    out.push(v);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        if bytes[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn extract_ddg_results(html: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while out.len() < 5 {
+        let a_start = match html[pos..].find("result__a") {
+            Some(k) => pos + k,
+            None => break,
+        };
+        let href_key = match html[a_start..].find("href=\"") {
+            Some(k) => a_start + k + 6,
+            None => {
+                pos = a_start + 10;
+                continue;
+            }
+        };
+        let href_end = match html[href_key..].find('"') {
+            Some(k) => href_key + k,
+            None => break,
+        };
+        let mut link = html[href_key..href_end].to_string();
+        if let Some(u) = link.find("uddg=") {
+            let enc = &link[u + 5..];
+            let enc = enc.split('&').next().unwrap_or(enc);
+            link = percent_decode(enc);
+        }
+        let tag_end = match html[href_end..].find('>') {
+            Some(k) => href_end + k + 1,
+            None => break,
+        };
+        let title_end = match html[tag_end..].find("</a>") {
+            Some(k) => tag_end + k,
+            None => break,
+        };
+        let title = strip_html(&html[tag_end..title_end]);
+        let snip = match html[title_end..].find("result__snippet") {
+            Some(k) => {
+                let s = title_end + k;
+                let body = match html[s..].find('>') {
+                    Some(b) => s + b + 1,
+                    None => s,
+                };
+                match html[body..].find("</") {
+                    Some(e) => strip_html(&html[body..body + e]),
+                    None => String::new(),
+                }
+            }
+            None => String::new(),
+        };
+        pos = title_end + 4;
+        if !title.trim().is_empty() && (link.starts_with("http://") || link.starts_with("https://")) {
+            out.push((title.trim().to_string(), link.trim().to_string(), snip.trim().to_string()));
+        }
+        if pos >= html.len() {
+            break;
+        }
+    }
+    out
+}
+
+async fn ddg_html_search(query: &str) -> Vec<(String, String, String)> {
+    let url = format!(
+        "https://html.duckduckgo.com/html/?q={}",
+        percent_encode(query)
+    );
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(12),
+        client()
+            .get(&url)
+            .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+            .send(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok());
+    let resp = match resp {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+    let body = tokio::time::timeout(std::time::Duration::from_secs(12), resp.text())
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    match body {
+        Some(h) => extract_ddg_results(&h),
+        None => Vec::new(),
+    }
+}
+
 async fn ddg_search(query: &str) -> Option<String> {
     let url = format!(
         "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
@@ -368,7 +483,26 @@ async fn web_context(prompt: &str) -> String {
     if !q.is_empty() && q.chars().count() <= 300 && (needs_search(q) || blocks.is_empty() && q.chars().count() > 2) {
         let query: String = q.chars().take(200).collect();
         if needs_search(q) {
-            if let Some(r) = ddg_search(&query).await {
+            let fresh = ddg_html_search(&query).await;
+            if !fresh.is_empty() {
+                let mut lines = Vec::new();
+                for (title, link, snip) in fresh.iter().take(5) {
+                    if snip.is_empty() {
+                        lines.push(format!("{title} ({link})"));
+                    } else {
+                        lines.push(format!("{title} ({link}): {snip}"));
+                    }
+                }
+                blocks.push(format!("Fresh web results for {query}:\n- {}", lines.join("\n- ")));
+                for (_, link, _) in fresh.iter().take(2) {
+                    if let Some(text) = fetch_url_text(link).await {
+                        blocks.push(format!("Page {link}:\n{text}"));
+                    }
+                    if blocks.join("\n").len() > 3500 {
+                        break;
+                    }
+                }
+            } else if let Some(r) = ddg_search(&query).await {
                 blocks.push(format!("Web search for {query}:\n- {r}"));
             } else if let Some(r) = wiki_search(&query).await {
                 blocks.push(format!("Wikipedia search for {query}:\n- {r}"));
