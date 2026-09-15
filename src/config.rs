@@ -67,6 +67,7 @@ pub(crate) struct Allowed {
     pub(crate) users: Vec<u64>,
     pub(crate) linux: std::collections::HashMap<String, String>,
     pub(crate) blocked: Vec<u64>,
+    pub(crate) admins: Vec<u64>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
@@ -89,6 +90,8 @@ pub(crate) struct FileConfig {
     pub(crate) notify_channel: Option<u64>,
     #[serde(default)]
     pub(crate) managers: Vec<u64>,
+    #[serde(default)]
+    pub(crate) admin_ids: Vec<u64>,
     #[serde(default)]
     pub(crate) linux: std::collections::HashMap<String, String>,
     #[serde(default)]
@@ -129,6 +132,7 @@ pub(crate) async fn persist_runtime(data: &Data) -> Result<(), Error> {
         let a = data.allowed.read().await;
         cfg.managers = a.users.clone();
         cfg.linux = a.linux.clone();
+        cfg.admin_ids = a.admins.clone();
     }
     {
         let s = data.settings.read().await;
@@ -153,6 +157,10 @@ pub(crate) async fn persist_runtime(data: &Data) -> Result<(), Error> {
 
 pub(crate) fn access_allowed(owner: u64, users: &[u64], blocked: &[u64], id: u64) -> bool {
     !blocked.contains(&id) && (id == owner || users.contains(&id))
+}
+
+pub(crate) fn elevated_allowed(owner: u64, admins: &[u64], id: u64) -> bool {
+    id == owner || admins.contains(&id)
 }
 
 pub(crate) fn config_file_path() -> PathBuf {
@@ -224,7 +232,7 @@ pub(crate) fn ensure_config_template() {
     lock_config_private();
 }
 
-const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwebhook_urls = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nollama_api_key = \"\"\nmanagers = []\n\n[linux]\n\n[shells]\n";
+const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwebhook_urls = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nollama_api_key = \"\"\nmanagers = []\nadmin_ids = []\n\n[linux]\n\n[shells]\n";
 
 pub(crate) async fn save_json(path: &str, data: String) -> Result<(), Error> {
     let tmp = format!("{}.{}.tmp", path, random_suffix());
@@ -317,6 +325,14 @@ mod tests {
     }
 
     #[test]
+    fn elevated_allowed_matrix() {
+        assert!(elevated_allowed(1, &[2], 1));
+        assert!(elevated_allowed(1, &[2], 2));
+        assert!(!elevated_allowed(1, &[2], 3));
+        assert!(!elevated_allowed(1, &[], 4));
+    }
+
+    #[test]
     fn war_mode_defaults_off() {
         assert!(!BotSettings::default().war_mode);
         let c = parse("notify_channel = 5\n");
@@ -379,6 +395,7 @@ mod tests {
             ollama_api_key: "okey".to_string(),
             notify_channel: Some(4),
             managers: vec![5],
+            admin_ids: vec![6],
             linux: [("5".to_string(), "sam".to_string())].into_iter().collect(),
             shells: [("5".to_string(), "fish".to_string())].into_iter().collect(),
         };

@@ -20,6 +20,12 @@ pub(crate) async fn is_owner(ctx: Context<'_>) -> bool {
     ctx.author().id.get() == ctx.data().allowed.read().await.owner
 }
 
+pub(crate) async fn is_elevated(ctx: Context<'_>) -> bool {
+    let id = ctx.author().id.get();
+    let a = ctx.data().allowed.read().await;
+    crate::config::elevated_allowed(a.owner, &a.admins, id)
+}
+
 pub(crate) async fn need_auth(ctx: Context<'_>) -> Result<bool, Error> {
     if is_authed(ctx).await {
         return Ok(true);
@@ -71,8 +77,8 @@ async fn require_vm(ctx: Context<'_>) -> Option<String> {
 pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. VM commands need owner + added users, but AI chat (`@artixy`), `/ai` view/forget and `/websearch` work for everyone except blocked users. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
-\n**Who can use me**\n`/user` — one command: `/user list` shows owner + managers, `/user add @user` (owner only) links them and creates their Linux account in Artix, `/user remove @user` (owner only) revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner only (`/ai true model:llama3.1` for local Ollama, `/ai true model:duck:gpt-4o-mini` for free Duck.ai chat), view is for all users. When enabled, ping me (`@artixy <question>` or `artixy <question>`) and I answer with the configured model.\n`/websearch <query>` — Ollama hosted web search, simple list of answers (needs `ollama_api_key`).\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
-\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to] [file] [file2] [file3]` — owner only: `no args` toggles auto say-as-artix mode, `message` and/or attached files send as artix (reply_to = message ID/link). Files attached to the slash command (or to the `;sayas` prefix message) are re-uploaded as artix. Output is ephemeral (only you see it).\n\
+\n**Who can use me**\nOwner does everything. Admins (`admin_ids` in config) do everything except `/user add/remove`, which stay owner-only. Managers run VM commands + AI. Everyone except blocked users gets AI chat and `/websearch`.\n`/user` — one command: `/user list` shows owner + admins + managers, `/user add @user` (owner only) links them and creates their Linux account in Artix, `/user remove @user` (owner only) revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner/admin: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner/admin: delete their replies to my messages here\n`/warmode <true|false>` — owner/admin: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner/admin (`/ai true model:llama3.1` for local Ollama, `/ai true model:duck:gpt-4o-mini` for free Duck.ai chat), view is for all users. When enabled, ping me (`@artixy <question>` or `artixy <question>`) and I answer with the configured model.\n`/websearch <query>` — Ollama hosted web search, simple list of answers (needs `ollama_api_key`).\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
+\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to] [file] [file2] [file3]` — owner/admin: `no args` toggles auto say-as-artix mode, `message` and/or attached files send as artix (reply_to = message ID/link). Files attached to the slash command (or to the `;sayas` prefix message) are re-uploaded as artix. Output is ephemeral (only you see it).\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
 #[poise::command(
@@ -492,13 +498,13 @@ pub(crate) async fn sayas(
     #[description = "Extra file to send as artix"] file2: Option<serenity::Attachment>,
     #[description = "Extra file to send as artix"] file3: Option<serenity::Attachment>,
 ) -> Result<(), Error> {
-    if !is_owner(ctx).await {
+    if !is_elevated(ctx).await {
         if matches!(ctx, poise::Context::Application(_)) {
             let _ = ctx
-                .send(poise::CreateReply::default().content("Owner only.").ephemeral(true))
+                .send(poise::CreateReply::default().content("Owner or admin only.").ephemeral(true))
                 .await;
         } else {
-            post_denied(ctx, "Owner only.").await?;
+            post_denied(ctx, "Owner or admin only.").await?;
         }
         return Ok(());
     }
@@ -890,8 +896,8 @@ pub(crate) async fn notify(
     ctx: Context<'_>,
     #[description = "channel ID for boot messages, or off"] what: Option<String>,
 ) -> Result<(), Error> {
-    if !is_owner(ctx).await {
-        post_denied(ctx, "Owner only.").await?;
+    if !is_elevated(ctx).await {
+        post_denied(ctx, "Owner or admin only.").await?;
         return Ok(());
     }
     match what.as_deref().map(str::trim) {
@@ -946,8 +952,8 @@ pub(crate) async fn ai(
         return Ok(());
     }
     let changing = enabled.is_some() || model.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some();
-    if changing && !is_owner(ctx).await {
-        post_denied(ctx, "Owner only.").await?;
+    if changing && !is_elevated(ctx).await {
+        post_denied(ctx, "Owner or admin only.").await?;
         return Ok(());
     }
     if !need_public(ctx).await? {
@@ -1066,8 +1072,8 @@ pub(crate) async fn warmode(
     ctx: Context<'_>,
     #[description = "true to arm protections, false to stand down"] enabled: bool,
 ) -> Result<(), Error> {
-    if !is_owner(ctx).await {
-        post_denied(ctx, "Owner only.").await?;
+    if !is_elevated(ctx).await {
+        post_denied(ctx, "Owner or admin only.").await?;
         return Ok(());
     }
     ctx.data().settings.write().await.war_mode = enabled;
@@ -1109,8 +1115,8 @@ pub(crate) async fn purge_replies(
     #[description = "User/bot ID whose replies to my messages get deleted"] target: String,
     #[description = "How many recent messages to scan (default 50, max 100)"] limit: Option<u8>,
 ) -> Result<(), Error> {
-    if !is_owner(ctx).await {
-        post_denied(ctx, "Owner only.").await?;
+    if !is_elevated(ctx).await {
+        post_denied(ctx, "Owner or admin only.").await?;
         return Ok(());
     }
     let Some(target_id) = parse_target_id(&target) else {
@@ -1238,19 +1244,27 @@ pub(crate) async fn do_users(ctx: Context<'_>) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
     }
-    let (owner, pairs): (u64, Vec<(u64, Option<String>)>) = {
+    let (owner, admins, pairs): (u64, Vec<u64>, Vec<(u64, Option<String>)>) = {
         let a = ctx.data().allowed.read().await;
         let pairs = a
             .users
             .iter()
             .map(|u| (*u, a.linux.get(&u.to_string()).cloned()))
             .collect();
-        (a.owner, pairs)
+        (a.owner, a.admins.clone(), pairs)
     };
     let mut msg = format!(
-        "Owner: `{}`\nManagers (discord → linux):",
+        "Owner: `{}`\nAdmins:",
         uname(ctx.http(), owner).await
     );
+    if admins.is_empty() {
+        msg.push_str(" none yet — set `admin_ids` in config");
+    } else {
+        for u in admins {
+            msg.push_str(&format!("\n`{}`", uname(ctx.http(), u).await));
+        }
+    }
+    msg.push_str("\nManagers (discord → linux):");
     if pairs.is_empty() {
         msg.push_str(" none yet — owner runs `/user add @user`");
     } else {

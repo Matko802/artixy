@@ -879,6 +879,7 @@ async fn main() {
             users: file_config.managers.clone(),
             linux: file_config.linux.clone(),
             blocked: file_config.blocked_ids.clone(),
+            admins: file_config.admin_ids.clone(),
         }),
         vm,
         live: Default::default(),

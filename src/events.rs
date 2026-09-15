@@ -60,7 +60,11 @@ pub(crate) async fn event_handler(
     let (owner, blocked, war) = {
         let a = data.allowed.read().await;
         let s = data.settings.read().await;
-        (id == a.owner, a.blocked.contains(&id), s.war_mode)
+        (
+            id == a.owner || a.admins.contains(&id),
+            a.blocked.contains(&id),
+            s.war_mode,
+        )
     };
     if blocked && war {
         let me = match ctx.http.get_current_user().await {
