@@ -67,6 +67,7 @@ dependencies = [
  "fontdue",
  "miniz_oxide 0.8.9",
  "poise",
+ "reqwest",
  "serde",
  "serde_json",
  "serenity",

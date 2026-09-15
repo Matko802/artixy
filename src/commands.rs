@@ -56,7 +56,7 @@ async fn require_vm(ctx: Context<'_>) -> Option<String> {
 pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. Only the owner + added users can use me. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
-\n**Who can use me**\n`/user` — one command: `/user list` shows owner + managers, `/user add @user` (owner only) links them and creates their Linux account in Artix, `/user remove @user` (owner only) revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
+\n**Who can use me**\n`/user` — one command: `/user list` shows owner + managers, `/user add @user` (owner only) links them and creates their Linux account in Artix, `/user remove @user` (owner only) revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner only: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner only: delete their replies to my messages here\n`/warmode <true|false>` — owner only: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner only (`/ai true model:llama3.1`), view is for all users: Ollama chat. When enabled, ping me (`@artixy <question>`) and I answer with the configured model.\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
 \n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/shot` — screenshot of the host screen, uploaded here\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to] [file] [file2] [file3]` — owner only: `no args` toggles auto say-as-artix mode, `message` and/or attached files send as artix (reply_to = message ID/link). Files attached to the slash command (or to the `;sayas` prefix message) are re-uploaded as artix. Output is ephemeral (only you see it).\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
@@ -957,6 +957,78 @@ pub(crate) async fn notify(
             }
         },
     }
+    Ok(())
+}
+
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
+pub(crate) async fn ai(
+    ctx: Context<'_>,
+    #[description = "true to enable AI chat, false to disable (empty shows status)"] enabled: Option<bool>,
+    #[description = "Ollama model, e.g. llama3.1 or qwen2.5-coder:7b"] model: Option<String>,
+) -> Result<(), Error> {
+    let changing = enabled.is_some() || model.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some();
+    if changing && !is_owner(ctx).await {
+        post_denied(ctx, "Owner only.").await?;
+        return Ok(());
+    }
+    if !need_auth(ctx).await? {
+        return Ok(());
+    }
+    if !changing {
+        let s = ctx.data().settings.read().await;
+        let state = if s.ai_enabled { "enabled" } else { "disabled" };
+        post_text(ctx, format!(
+            "AI chat is **{state}** — model `{}` on `{}`.\nOwner: `/ai true model:llama3.1` to enable (or `/ai false` to disable). Then just ping me `@artixy <question>`.",
+            s.ai_model,
+            crate::ai::resolve_host(&s.ollama_host),
+        ))
+        .await?;
+        return Ok(());
+    }
+    let mut notice: String;
+    let model_touched = model.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some();
+    {
+        let mut s = ctx.data().settings.write().await;
+        if let Some(on) = enabled {
+            s.ai_enabled = on;
+        }
+        if let Some(m) = model {
+            let m = m.trim().to_string();
+            if !m.is_empty() {
+                if !crate::ai::valid_model_name(&m) {
+                    post_text(ctx, "Bad model name — use letters, numbers and `._-:/` only (e.g. `llama3.1`, `qwen2.5-coder:7b`), max 128 chars.").await?;
+                    return Ok(());
+                }
+                s.ai_model = m;
+            }
+        }
+        notice = format!(
+            "AI chat is **{}** — model `{}` on `{}`.",
+            if s.ai_enabled { "enabled" } else { "disabled" },
+            s.ai_model,
+            crate::ai::resolve_host(&s.ollama_host),
+        );
+    }
+    persist_runtime(ctx.data()).await?;
+    // Best-effort: warn when the model isn't pulled locally yet.
+    if enabled == Some(true) || model_touched {
+        let (host, m) = {
+            let s = ctx.data().settings.read().await;
+            (crate::ai::resolve_host(&s.ollama_host), s.ai_model.clone())
+        };
+        match crate::ai::model_present(&host, &m).await {
+            Some(false) => {
+                notice.push_str(&format!("\nWarning: `{m}` isn't in `ollama list` on {host} — run `ollama pull {m}` there."));
+            }
+            _ => {}
+        }
+    }
+    post_text(ctx, notice).await?;
     Ok(())
 }
 

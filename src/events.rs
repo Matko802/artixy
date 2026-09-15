@@ -107,6 +107,72 @@ pub(crate) async fn event_handler(
     if new_message.author.bot {
         return Ok(());
     }
+    // --- Ollama AI chat when the bot is pinged (@artixy <question>) ---
+    let me_id: u64 = ctx.cache.current_user().id.get();
+    let mentioned = new_message.mentions.iter().any(|u| u.id.get() == me_id)
+        || new_message.content.contains(&format!("<@{me_id}>"))
+        || new_message.content.contains(&format!("<@!{me_id}>"));
+    if mentioned {
+        let prompt0 = crate::ai::strip_mention(&new_message.content, me_id);
+        // Let real commands through: `@artixy /run x` / `@artixy ;shell` etc.
+        let is_command = prompt0.starts_with('/') || prompt0.starts_with(';');
+        if !is_command {
+            let authed = {
+                let a = data.allowed.read().await;
+                access_allowed(a.owner, &a.users, &a.blocked, id)
+            };
+            if !authed {
+                return Ok(());
+            }
+            let (ai_on, ai_model, ai_host) = {
+                let s = data.settings.read().await;
+                (s.ai_enabled, s.ai_model.clone(), crate::ai::resolve_host(&s.ollama_host))
+            };
+            if !ai_on {
+                let _ = new_message
+                    .reply(&ctx.http, "AI is off — the owner runs `/ai true model:<name>` to enable me.")
+                    .await;
+                return Ok(());
+            }
+            let mut prompt = prompt0.clone();
+            if prompt.trim().is_empty() {
+                if let Some(r) = new_message.referenced_message.as_ref() {
+                    prompt = r.content.trim().to_string();
+                }
+            }
+            if prompt.trim().is_empty() {
+                let _ = new_message
+                    .reply(&ctx.http, format!("Ping me with a question — `@artixy <question>` (model `{ai_model}`)."))
+                    .await;
+                return Ok(());
+            }
+            if prompt.chars().count() > 4000 {
+                prompt = prompt.chars().take(4000).collect();
+            }
+            let _ = new_message.channel_id.broadcast_typing(&ctx.http).await;
+            match crate::ai::ollama_chat(&ai_host, &ai_model, &prompt).await {
+                Ok(text) => {
+                    let chunks = crate::ai::chunk_reply(&text);
+                    let mut first = true;
+                    for c in chunks {
+                        if first {
+                            let _ = new_message.reply(&ctx.http, &c).await;
+                            first = false;
+                        } else if post_message(&ctx.http, new_message.channel_id, c, Vec::new()).await.is_none() {
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("ai chat failed (model {ai_model} on {ai_host}): {e}");
+                    let _ = new_message
+                        .reply(&ctx.http, format!("Ollama chat failed (`{ai_model}` on `{ai_host}`): {e}"))
+                        .await;
+                }
+            }
+            return Ok(());
+        }
+    }
     if new_message.attachments.is_empty() && !new_message.content.trim().is_empty() {
         let refd_id = new_message
             .referenced_message

@@ -15,9 +15,19 @@ pub(crate) struct BotSettings {
     pub(crate) war_mode: bool,
     #[serde(default = "sayas_default_off")]
     pub(crate) sayas_enabled: bool,
+    #[serde(default = "ai_default_off")]
+    pub(crate) ai_enabled: bool,
+    #[serde(default = "crate::ai::default_model")]
+    pub(crate) ai_model: String,
+    #[serde(default = "crate::ai::default_host")]
+    pub(crate) ollama_host: String,
 }
 
 fn sayas_default_off() -> bool {
+    false
+}
+
+fn ai_default_off() -> bool {
     false
 }
 
@@ -27,6 +37,9 @@ impl Default for BotSettings {
             notify_channel: None,
             war_mode: war_default_off(),
             sayas_enabled: sayas_default_off(),
+            ai_enabled: ai_default_off(),
+            ai_model: crate::ai::default_model(),
+            ollama_host: crate::ai::default_host(),
         }
     }
 }
@@ -77,6 +90,12 @@ pub(crate) struct FileConfig {
     pub(crate) linux: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub(crate) shells: std::collections::HashMap<String, String>,
+    #[serde(default = "ai_default_off")]
+    pub(crate) ai_enabled: bool,
+    #[serde(default = "crate::ai::default_model")]
+    pub(crate) ai_model: String,
+    #[serde(default = "crate::ai::default_host")]
+    pub(crate) ollama_host: String,
 }
 
 pub(crate) fn apply_legacy_import(
@@ -111,6 +130,9 @@ pub(crate) async fn persist_runtime(data: &Data) -> Result<(), Error> {
         cfg.notify_channel = s.notify_channel;
         cfg.war_mode = s.war_mode;
         cfg.sayas_enabled = s.sayas_enabled;
+        cfg.ai_enabled = s.ai_enabled;
+        cfg.ai_model = s.ai_model.clone();
+        cfg.ollama_host = s.ollama_host.clone();
     }
     {
         let m = data.shells.read().await;
@@ -145,6 +167,17 @@ fn normalize_file_config(mut cfg: FileConfig) -> FileConfig {
     if cfg.owner_id == Some(0) {
         cfg.owner_id = None;
     }
+    if !crate::ai::valid_model_name(&cfg.ai_model) {
+        cfg.ai_model = crate::ai::default_model();
+    } else {
+        cfg.ai_model = cfg.ai_model.trim().to_string();
+    }
+    let host = cfg.ollama_host.trim().trim_end_matches('/').to_string();
+    cfg.ollama_host = if host.is_empty() {
+        crate::ai::default_host()
+    } else {
+        host
+    };
     cfg
 }
 
@@ -184,7 +217,7 @@ pub(crate) fn ensure_config_template() {
     lock_config_private();
 }
 
-const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwebhook_urls = []\nwar_mode = false\nmanagers = []\n\n[linux]\n\n[shells]\n";
+const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwebhook_urls = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nmanagers = []\n\n[linux]\n\n[shells]\n";
 
 pub(crate) async fn save_json(path: &str, data: String) -> Result<(), Error> {
     let tmp = format!("{}.{}.tmp", path, random_suffix());
@@ -333,6 +366,9 @@ mod tests {
             vm_name: Some("artix".to_string()),
             war_mode: true,
             sayas_enabled: true,
+            ai_enabled: true,
+            ai_model: "qwen2.5-coder:7b".to_string(),
+            ollama_host: "http://127.0.0.1:11434".to_string(),
             notify_channel: Some(4),
             managers: vec![5],
             linux: [("5".to_string(), "sam".to_string())].into_iter().collect(),

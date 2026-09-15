@@ -1,3 +1,4 @@
+mod ai;
 mod commands;
 mod config;
 mod events;
@@ -13,7 +14,7 @@ mod webhook;
 use poise::serenity_prelude as serenity;
 
 use crate::commands::{
-    botrestart, help, info, notify, ps, purge_replies, restart, run, sayas, send, shell, shot,
+    ai, botrestart, help, info, notify, ps, purge_replies, restart, run, sayas, send, shell, shot,
     start, status, stop, upload, user, warmode,
 };
 use crate::commands::BOOT_ART;
@@ -48,8 +49,9 @@ mod tests {
             purge_replies(),
             warmode(),
             upload(),
+            ai(),
         ];
-        assert_eq!(cmds.len(), 18, "test must mirror the framework command list");
+        assert_eq!(cmds.len(), 19, "test must mirror the framework command list");
         for cmd in &cmds {
             let builder = cmd
                 .create_as_slash_command()
@@ -884,6 +886,17 @@ async fn main() {
             notify_channel: file_config.notify_channel,
             war_mode: file_config.war_mode,
             sayas_enabled: file_config.sayas_enabled,
+            ai_enabled: file_config.ai_enabled,
+            ai_model: if crate::ai::valid_model_name(&file_config.ai_model) {
+                file_config.ai_model.clone()
+            } else {
+                crate::ai::default_model()
+            },
+            ollama_host: if file_config.ollama_host.trim().is_empty() {
+                crate::ai::default_host()
+            } else {
+                file_config.ollama_host.clone()
+            },
         }),
         shells: tokio::sync::RwLock::new(file_config.shells.clone()),
     };
@@ -909,6 +922,7 @@ async fn main() {
                 purge_replies(),
                 warmode(),
                 upload(),
+                ai(),
             ],
             on_error: |error| {
                 Box::pin(async move {

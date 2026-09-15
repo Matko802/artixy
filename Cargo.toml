@@ -18,6 +18,7 @@ alacritty_terminal = "0.26"
 fontdue = "0.9"
 miniz_oxide = "0.8"
 adler2 = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [profile.dev]
 # Fast iteration: no debuginfo to write/link, max parallelism, incremental.
