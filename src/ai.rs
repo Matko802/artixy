@@ -374,20 +374,6 @@ struct TagEntry {
     name: String,
 }
 
-pub(crate) fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-            out.push(b as char);
-        } else if b == b' ' {
-            out.push_str("%20");
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 pub(crate) fn find_urls(s: &str) -> Vec<String> {
     s.split_whitespace()
         .filter_map(|w| {
@@ -543,31 +529,6 @@ pub(crate) async fn fetch_url_text(url: &str) -> Option<String> {
     Some(text)
 }
 
-#[allow(dead_code)]
-pub(crate) fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
-                if let Ok(v) = u8::from_str_radix(hex, 16) {
-                    out.push(v);
-                    i += 3;
-                    continue;
-                }
-            }
-        }
-        if bytes[i] == b'+' {
-            out.push(b' ');
-        } else {
-            out.push(bytes[i]);
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 async fn linked_pages(prompt: &str) -> String {
     let mut blocks = Vec::new();
     for url in find_urls(prompt) {
@@ -709,112 +670,112 @@ pub(crate) async fn duck_chat_once(model_id: &str, messages: &[serde_json::Value
     Ok(text)
 }
 
-async fn fetch_search_page(url: &str) -> Option<String> {
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(12), web_get(url).send())
-        .await
-        .ok()?
-        .ok()?;
-    store_cookies(url, &resp);
-    let status = resp.status();
-    if !status.is_success() {
-        eprintln!("search_page: status={status}");
-        return None;
+pub(crate) fn resolve_ollama_key(configured: &str) -> String {
+    if let Ok(v) = std::env::var("OLLAMA_API_KEY") {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return v;
+        }
     }
-    let body = tokio::time::timeout(std::time::Duration::from_secs(12), resp.text())
-        .await
-        .ok()?
-        .ok()?;
-    eprintln!("search_page: status={status} bytes={}", body.len());
-    if body.len() < 2000 {
-        return None;
-    }
-    Some(body)
+    configured.trim().to_string()
 }
 
-fn extract_ddg_results(html: &str) -> Vec<(String, String, String)> {
-    let mut out = Vec::new();
-    let mut pos = 0;
-    while out.len() < 5 {
-        let a_start = match html[pos..].find("result__a") {
-            Some(k) => pos + k,
-            None => break,
-        };
-        let href_key = match html[a_start..].find("href=\"") {
-            Some(k) => a_start + k + 6,
-            None => {
-                pos = a_start + 10;
-                continue;
-            }
-        };
-        let href_end = match html[href_key..].find('"') {
-            Some(k) => href_key + k,
-            None => break,
-        };
-        let mut link = html[href_key..href_end].to_string();
-        if let Some(u) = link.find("uddg=") {
-            let enc = &link[u + 5..];
-            let enc = enc.split('&').next().unwrap_or(enc);
-            link = percent_decode(enc);
-        } else if let Some(rest) = link.strip_prefix("//") {
-            link = format!("https://{rest}");
-        }
-        let tag_end = match html[href_end..].find('>') {
-            Some(k) => href_end + k + 1,
-            None => break,
-        };
-        let title_end = match html[tag_end..].find("</a>") {
-            Some(k) => tag_end + k,
-            None => break,
-        };
-        let title = strip_html(&html[tag_end..title_end]);
-        let snip = match html[title_end..].find("result__snippet") {
-            Some(k) => {
-                let s = title_end + k;
-                let body = match html[s..].find('>') {
-                    Some(b) => s + b + 1,
-                    None => s,
-                };
-                match html[body..].find("</") {
-                    Some(e) => strip_html(&html[body..body + e]),
-                    None => String::new(),
-                }
-            }
-            None => String::new(),
-        };
-        pos = title_end + 4;
-        if !title.trim().is_empty() && (link.starts_with("http://") || link.starts_with("https://")) {
-            out.push((title.trim().to_string(), link.trim().to_string(), snip.trim().to_string()));
-        }
-        if pos >= html.len() {
-            break;
-        }
+#[derive(Deserialize, Default)]
+struct HostedSearchResponse {
+    #[serde(default)]
+    results: Vec<HostedResult>,
+}
+
+#[derive(Deserialize, Default)]
+struct HostedResult {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    content: String,
+}
+
+#[derive(Deserialize, Default)]
+struct HostedFetchResponse {
+    #[serde(default)]
+    content: String,
+}
+
+pub(crate) async fn hosted_search(key: &str, query: &str) -> Vec<(String, String, String)> {
+    let req = serde_json::json!({"query": query, "max_results": 5});
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client()
+            .post("https://ollama.com/api/web_search")
+            .header("Authorization", format!("Bearer {key}"))
+            .json(&req)
+            .send(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok());
+    let resp = match resp {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+    if !resp.status().is_success() {
+        eprintln!("hosted_search: status={}", resp.status());
+        return Vec::new();
     }
+    let data: HostedSearchResponse = tokio::time::timeout(std::time::Duration::from_secs(15), resp.json())
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+    let out: Vec<(String, String, String)> = data
+        .results
+        .into_iter()
+        .filter(|i| !i.title.trim().is_empty() && !i.url.trim().is_empty())
+        .take(5)
+        .map(|i| (i.title.trim().to_string(), i.url.trim().to_string(), i.content.trim().to_string()))
+        .collect();
+    eprintln!("hosted_search: results={}", out.len());
     out
 }
 
-pub(crate) async fn ddg_html_search(query: &str) -> Vec<(String, String, String)> {
-    let url = format!(
-        "https://html.duckduckgo.com/html/?q={}",
-        percent_encode(query)
-    );
-    let body = fetch_search_page(&url).await;
-    match body {
-        Some(h) => {
-            let r = extract_ddg_results(&h);
-            eprintln!("ddg_html: results={}", r.len());
-            r
-        }
-        None => Vec::new(),
+pub(crate) async fn hosted_fetch(key: &str, url: &str) -> Option<String> {
+    let req = serde_json::json!({"url": url});
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client()
+            .post("https://ollama.com/api/web_fetch")
+            .header("Authorization", format!("Bearer {key}"))
+            .json(&req)
+            .send(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !resp.status().is_success() {
+        return None;
     }
+    let data: HostedFetchResponse = tokio::time::timeout(std::time::Duration::from_secs(15), resp.json())
+        .await
+        .ok()?
+        .ok()?;
+    let text = data.content.trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.chars().take(3000).collect())
 }
 
-pub(crate) async fn run_websearch(query: &str) -> String {
+pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
     let t0 = std::time::Instant::now();
     let query: String = query.chars().take(200).collect();
+    if key.trim().is_empty() {
+        return "Web search is not configured: set ollama_api_key in config or OLLAMA_API_KEY env.".to_string();
+    }
     let mut blocks = Vec::new();
-    let fresh = ddg_html_search(&query).await;
+    let fresh = hosted_search(key, &query).await;
     if !fresh.is_empty() {
-        eprintln!("run_websearch: src=ddg results={}", fresh.len());
+        eprintln!("run_websearch: src=ollama results={}", fresh.len());
         let mut lines = Vec::new();
         for (title, link, snip) in fresh.iter().take(5) {
             if snip.is_empty() {
@@ -825,7 +786,7 @@ pub(crate) async fn run_websearch(query: &str) -> String {
         }
         blocks.push(format!("Fresh web results for {query}:\n- {}", lines.join("\n- ")));
         for (_, link, _) in fresh.iter().take(2) {
-            if let Some(text) = fetch_url_text(link).await {
+            if let Some(text) = hosted_fetch(key, link).await {
                 blocks.push(format!("Page {link}:\n{text}"));
             }
             if blocks.join("\n").len() > 3500 {
@@ -845,15 +806,17 @@ pub(crate) async fn run_websearch(query: &str) -> String {
     out
 }
 
-pub(crate) async fn web_status() -> String {
-    let t0 = std::time::Instant::now();
-    let token_ok = duck_status_token().await.is_some();
-    let n = ddg_html_search("latest gpu").await.len();
-    let ms = t0.elapsed().as_millis();
-    if !token_ok && n == 0 {
-        return format!("web: FAIL duck.ai status and ddg search both failed ms={ms}");
+pub(crate) async fn web_status(key: &str) -> String {
+    if key.trim().is_empty() {
+        return "web: FAIL no ollama_api_key in config or OLLAMA_API_KEY env".to_string();
     }
-    format!("web: ok duck_status={token_ok} ddg_results={n} ms={ms}")
+    let t0 = std::time::Instant::now();
+    let n = hosted_search(key, "latest gpu").await.len();
+    let ms = t0.elapsed().as_millis();
+    if n == 0 {
+        return format!("web: FAIL ollama hosted search returned nothing ms={ms}");
+    }
+    format!("web: ok src=ollama results={n} ms={ms}")
 }
 
 const SYSTEM_PROMPT: &str = "You are artixy, a friendly furry artix linux. Talk like a normal neko human, casual and a bit silly and simple messages. \
@@ -900,7 +863,7 @@ async fn chat_once(
     Err("ollama returned an empty reply".into())
 }
 
-pub(crate) async fn duck_chat(model: &str, channel: u64, speaker: &str, prompt: &str) -> Result<String, Error> {
+pub(crate) async fn duck_chat(model: &str, okey: &str, channel: u64, speaker: &str, prompt: &str) -> Result<String, Error> {
     let model_id = duck_model_id(model);
     let tagged = format!("[{}]: {}", speaker_tag(speaker), prompt);
     let pages = linked_pages(prompt).await;
@@ -951,7 +914,7 @@ pub(crate) async fn duck_chat(model: &str, channel: u64, speaker: &str, prompt: 
                 return Ok(text);
             }
         };
-        let tool_result = run_websearch(&q).await;
+        let tool_result = run_websearch(okey, &q).await;
         let tool_result = if tool_result.trim().is_empty() {
             "Web search returned no results.".to_string()
         } else {
@@ -972,9 +935,9 @@ pub(crate) async fn duck_chat(model: &str, channel: u64, speaker: &str, prompt: 
     }
 }
 
-pub(crate) async fn ollama_chat(host: &str, model: &str, channel: u64, speaker: &str, prompt: &str) -> Result<String, Error> {
+pub(crate) async fn ollama_chat(host: &str, model: &str, okey: &str, channel: u64, speaker: &str, prompt: &str) -> Result<String, Error> {
     if is_duck_model(model) {
-        return duck_chat(model, channel, speaker, prompt).await;
+        return duck_chat(model, okey, channel, speaker, prompt).await;
     }
     let host = host.trim_end_matches('/');
     let url = format!("{host}/api/chat");
@@ -1060,7 +1023,7 @@ pub(crate) async fn ollama_chat(host: &str, model: &str, channel: u64, speaker: 
         if query.trim().is_empty() {
             return Err("ollama returned an empty reply".into());
         }
-        let tool_result = run_websearch(&query).await;
+        let tool_result = run_websearch(okey, &query).await;
         let tool_result = if tool_result.trim().is_empty() {
             "Web search returned no results.".to_string()
         } else {
@@ -1349,6 +1312,24 @@ mod tests {
     fn cookie_host_strips_scheme_and_path() {
         assert_eq!(cookie_host("https://duckduckgo.com/duckchat/v1/status"), "duckduckgo.com");
         assert_eq!(cookie_host("http://example.com/a/b"), "example.com");
+    }
+
+    #[test]
+    fn hosted_search_response_parses_results() {
+        let body = r#"{"results": [{"title": "GeForce RTX 50 series", "url": "https://en.wikipedia.org/wiki/GeForce_RTX_50_series", "content": "RTX 5090 in January 2025"}]}"#;
+        let data: HostedSearchResponse = serde_json::from_str(body).expect("parses");
+        assert_eq!(data.results.len(), 1);
+        assert!(data.results[0].content.contains("5090"));
+    }
+
+    #[test]
+    fn ollama_key_prefers_env_then_config() {
+        std::env::remove_var("OLLAMA_API_KEY");
+        assert_eq!(resolve_ollama_key(""), "");
+        assert_eq!(resolve_ollama_key("  cfgkey  "), "cfgkey");
+        std::env::set_var("OLLAMA_API_KEY", "  envkey  ");
+        assert_eq!(resolve_ollama_key("cfgkey"), "envkey");
+        std::env::remove_var("OLLAMA_API_KEY");
     }
 
     #[test]

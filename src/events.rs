@@ -123,9 +123,14 @@ pub(crate) async fn event_handler(
             if !authed {
                 return Ok(());
             }
-            let (ai_on, ai_model, ai_host) = {
+            let (ai_on, ai_model, ai_host, ai_key) = {
                 let s = data.settings.read().await;
-                (s.ai_enabled, s.ai_model.clone(), crate::ai::resolve_host(&s.ollama_host))
+                (
+                    s.ai_enabled,
+                    s.ai_model.clone(),
+                    crate::ai::resolve_host(&s.ollama_host),
+                    crate::ai::resolve_ollama_key(&s.ollama_api_key),
+                )
             };
             if !ai_on {
                 let _ = new_message
@@ -171,7 +176,7 @@ pub(crate) async fn event_handler(
                 prompt = prompt.chars().take(4000).collect();
             }
             let _ = new_message.channel_id.broadcast_typing(&ctx.http).await;
-            match crate::ai::ollama_chat(&ai_host, &ai_model, new_message.channel_id.get(), &speaker, &prompt).await {
+            match crate::ai::ollama_chat(&ai_host, &ai_model, &ai_key, new_message.channel_id.get(), &speaker, &prompt).await {
                 Ok(text) => {
                     let chunks = crate::ai::chunk_reply(&text);
                     let mut first = true;

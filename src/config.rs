@@ -21,6 +21,8 @@ pub(crate) struct BotSettings {
     pub(crate) ai_model: String,
     #[serde(default = "crate::ai::default_host")]
     pub(crate) ollama_host: String,
+    #[serde(default)]
+    pub(crate) ollama_api_key: String,
 }
 
 fn sayas_default_off() -> bool {
@@ -40,6 +42,7 @@ impl Default for BotSettings {
             ai_enabled: ai_default_off(),
             ai_model: crate::ai::default_model(),
             ollama_host: crate::ai::default_host(),
+            ollama_api_key: String::new(),
         }
     }
 }
@@ -96,6 +99,8 @@ pub(crate) struct FileConfig {
     pub(crate) ai_model: String,
     #[serde(default = "crate::ai::default_host")]
     pub(crate) ollama_host: String,
+    #[serde(default)]
+    pub(crate) ollama_api_key: String,
 }
 
 pub(crate) fn apply_legacy_import(
@@ -133,6 +138,7 @@ pub(crate) async fn persist_runtime(data: &Data) -> Result<(), Error> {
         cfg.ai_enabled = s.ai_enabled;
         cfg.ai_model = s.ai_model.clone();
         cfg.ollama_host = s.ollama_host.clone();
+        cfg.ollama_api_key = s.ollama_api_key.clone();
     }
     {
         let m = data.shells.read().await;
@@ -178,6 +184,7 @@ fn normalize_file_config(mut cfg: FileConfig) -> FileConfig {
     } else {
         host
     };
+    cfg.ollama_api_key = cfg.ollama_api_key.trim().to_string();
     cfg
 }
 
@@ -217,7 +224,7 @@ pub(crate) fn ensure_config_template() {
     lock_config_private();
 }
 
-const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwebhook_urls = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nmanagers = []\n\n[linux]\n\n[shells]\n";
+const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwebhook_urls = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nollama_api_key = \"\"\nmanagers = []\n\n[linux]\n\n[shells]\n";
 
 pub(crate) async fn save_json(path: &str, data: String) -> Result<(), Error> {
     let tmp = format!("{}.{}.tmp", path, random_suffix());
@@ -369,6 +376,7 @@ mod tests {
             ai_enabled: true,
             ai_model: "qwen2.5-coder:7b".to_string(),
             ollama_host: "http://127.0.0.1:11434".to_string(),
+            ollama_api_key: "okey".to_string(),
             notify_channel: Some(4),
             managers: vec![5],
             linux: [("5".to_string(), "sam".to_string())].into_iter().collect(),
