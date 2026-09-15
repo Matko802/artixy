@@ -195,9 +195,8 @@ pub(crate) async fn event_handler(
                 }
                 Err(e) => {
                     eprintln!("ai chat failed (model {ai_model} on {ai_host}): {e}");
-                    let _ = new_message
-                        .reply(&ctx.http, format!("Ollama chat failed (`{ai_model}` on `{ai_host}`): {e}"))
-                        .await;
+                    let text = crate::ai::glitch_text(&ai_host, &ai_model).await;
+                    let _ = new_message.reply(&ctx.http, &text).await;
                 }
             }
             return Ok(());

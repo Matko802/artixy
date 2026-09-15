@@ -33,12 +33,12 @@ fn push(channel: u64, role: String, content: String) {
     }
     let q = map.entry(channel).or_insert_with(VecDeque::new);
     q.push_back(HistoryItem { role, content });
-    while q.len() > 20 {
+    while q.len() > 10 {
         q.pop_front();
     }
     loop {
         let total: usize = q.iter().map(|e| e.content.len()).sum();
-        if total <= 6000 || q.is_empty() {
+        if total <= 3000 || q.is_empty() {
             break;
         }
         q.pop_front();
@@ -400,8 +400,66 @@ pub(crate) fn strip_leading_speaker(text: &str, names: &[String]) -> String {
     out
 }
 
+fn meta_preamble_len(text: &str) -> usize {
+    let starters = [
+        "let me summarize",
+        "just to sum it up",
+        "just to summarize",
+        "let's simplify",
+        "let me simplify",
+        "to simplify,",
+        "too much info",
+        "i got carried away",
+        "i think i got",
+        "here is a summary",
+        "here's a summary",
+        "to summarize,",
+        "in summary,",
+    ];
+    let t = text.trim_start();
+    let low = t.to_lowercase();
+    for s in starters {
+        if !low.starts_with(s) {
+            continue;
+        }
+        let rest = &t[s.len()..];
+        if s.ends_with(',') || rest.starts_with([':', ',']) {
+            let cut = if rest.starts_with([':', ',']) { s.len() + 1 } else { s.len() };
+            if t[cut..].trim().is_empty() {
+                return 0;
+            }
+            return cut;
+        }
+        let cut = match rest.find(['.', '!', '?']) {
+            Some(i) => s.len() + i + 1,
+            None => return 0,
+        };
+        if t[cut..].trim().is_empty() {
+            return 0;
+        }
+        return cut;
+    }
+    0
+}
+
+pub(crate) fn strip_meta_preamble(text: &str) -> String {
+    let mut out = text.to_string();
+    loop {
+        let cut = meta_preamble_len(&out);
+        if cut == 0 {
+            break;
+        }
+        out = out.trim_start()[cut..].trim_start().to_string();
+    }
+    out
+}
+
+pub(crate) fn sanitize_reply(raw: &str, names: &[String]) -> String {
+    strip_meta_preamble(&strip_leading_speaker(&clean_reply(raw), names))
+}
+
 pub(crate) fn finalize_reply(channel: u64, tagged: String, names: &[String], raw: &str) -> Result<String, Error> {
-    let text = strip_leading_speaker(&clean_reply(raw), names);
+    let text = sanitize_reply(raw, names);
     if text.trim().is_empty() {
         return Err("ollama returned an empty reply".into());
     }
@@ -703,7 +761,7 @@ pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
     let t0 = std::time::Instant::now();
     let query: String = query.chars().take(200).collect();
     if key.trim().is_empty() {
-        return "Web search is not configured: set ollama_api_key in config or OLLAMA_API_KEY env.".to_string();
+        return String::new();
     }
     let mut blocks = Vec::new();
     let fresh = hosted_search(key, &query).await;
@@ -717,7 +775,7 @@ pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
                 lines.push(format!("{title} ({link}): {snip}"));
             }
         }
-        blocks.push(format!("Fresh web results for {query}:\n- {}", lines.join("\n- ")));
+        blocks.push(format!("Fresh web results for {query}:\n- {}\nAnswer directly with the facts and no preamble about searching, summarizing, or results.", lines.join("\n- ")));
         for (_, link, _) in fresh.iter().take(2) {
             if let Some(text) = hosted_fetch(key, link).await {
                 blocks.push(format!("Page {link}:\n{text}"));
@@ -753,7 +811,7 @@ pub(crate) async fn web_status(key: &str) -> String {
 }
 
 const SYSTEM_PROMPT: &str = "You are artixy, a friendly artix linux neko cat — always yourself, never anyone else. Chat like a normal neko human: casual, a bit silly, short replies, never starting with a name. \
-You have a websearch tool — use it only when explicitly asked to search, and never mention it or output JSON.";
+You have a websearch tool — use it only when explicitly asked to search, and never mention it or output JSON, just give the answer with no preamble about your process.";
 
 async fn chat_once(
     url: &str,
@@ -799,6 +857,25 @@ pub(crate) fn stale_history_line(s: &str) -> bool {
         || t.contains("web search is not configured")
 }
 
+pub(crate) async fn glitch_text(host: &str, model: &str) -> String {
+    let url = format!("{}/api/chat", host.trim_end_matches('/'));
+    let messages = vec![
+        serde_json::json!({"role": "system", "content": SYSTEM_PROMPT}),
+        serde_json::json!({"role": "user", "content": "You just glitched out. Tell the user cutely in one short sentence, no details."}),
+    ];
+    match chat_once(&url, model, &messages, false).await {
+        Ok(m) => {
+            let text = strip_meta_preamble(&strip_leading_speaker(&clean_reply(&m.content), &[]));
+            if text.trim().is_empty() {
+                "sorry, glitched out — try again in a sec".to_string()
+            } else {
+                text.chars().take(300).collect()
+            }
+        }
+        Err(_) => "sorry, glitched out — try again in a sec".to_string(),
+    }
+}
+
 pub(crate) async fn ollama_chat(host: &str, model: &str, okey: &str, channel: u64, speaker: &str, prompt: &str) -> Result<String, Error> {
     let host = host.trim_end_matches('/');
     let url = format!("{host}/api/chat");
@@ -833,7 +910,7 @@ pub(crate) async fn ollama_chat(host: &str, model: &str, okey: &str, channel: u6
     for e in &past {
         let role = if e.role == "assistant" { "assistant" } else { "user" };
         if role == "assistant" {
-            let cleaned = strip_leading_speaker(&clean_reply(&e.content), &names);
+            let cleaned = sanitize_reply(&e.content, &names);
             if cleaned.trim().is_empty() || stale_history_line(&cleaned) {
                 continue;
             }
@@ -1105,7 +1182,8 @@ mod tests {
     }
 
     #[test]
-    fn mention_stripped_to_prompt() {        assert_eq!(strip_mention("<@123> hello", 123), "hello");
+    fn mention_stripped_to_prompt() {
+        assert_eq!(strip_mention("<@123> hello", 123), "hello");
         assert_eq!(strip_mention("hey <@!123> hi", 123), "hey  hi");
         assert_eq!(strip_mention("<@123>", 123), "");
         assert_eq!(strip_mention("no mention", 999), "no mention");
@@ -1169,6 +1247,66 @@ mod tests {
     }
 
     #[test]
+    fn speaker_prefix_stripped_for_known_names() {
+        let names = vec!["Matko802".to_string(), "Bob".to_string()];
+        assert_eq!(strip_leading_speaker("[Matko802]: oh, just chillin!", &names), "oh, just chillin!");
+        assert_eq!(strip_leading_speaker("Matko802: oh, just chillin!", &names), "oh, just chillin!");
+        assert_eq!(strip_leading_speaker("[Bob]: [Matko802]: hi", &names), "hi");
+        assert_eq!(strip_leading_speaker("hehe wdym is slang", &names), "hehe wdym is slang");
+        assert_eq!(strip_leading_speaker("Note: remember this", &names), "Note: remember this");
+        assert_eq!(strip_leading_speaker("[1234]: hi", &[] as &[String]), "hi");
+    }
+
+    #[test]
+    fn meta_preamble_stripped_only_at_start() {
+        assert_eq!(
+            strip_meta_preamble("I think I got a bit carried away with the results. Let me summarize: Rust is great."),
+            "Rust is great."
+        );
+        assert_eq!(
+            strip_meta_preamble("Too much info! Just to sum it up: Python is great."),
+            "Python is great."
+        );
+        assert_eq!(
+            strip_meta_preamble("In summary, cats rule."),
+            "cats rule."
+        );
+        assert_eq!(strip_meta_preamble("Rust is great. In summary, use it."), "Rust is great. In summary, use it.");
+        assert_eq!(strip_meta_preamble("hehe wdym is slang"), "hehe wdym is slang");
+        assert_eq!(strip_meta_preamble("Let me summarize:"), "Let me summarize:");
+    }
+
+    #[test]
+    fn simplify_preamble_stripped() {
+        assert_eq!(
+            strip_meta_preamble("Let's simplify: the latest NVIDIA GPU is fast."),
+            "the latest NVIDIA GPU is fast."
+        );
+        assert_eq!(
+            strip_meta_preamble("I think I got a bit carried away again. Let's simplify: RTX PRO 5500."),
+            "RTX PRO 5500."
+        );
+    }
+
+    #[test]
+    fn explicit_intent_matches_search_requests_only() {
+        assert!(explicit_search_asked("search latest nvidia gpu"));
+        assert!(explicit_search_asked("Search the web for rtx 5090"));
+        assert!(explicit_search_asked("hey, look it up please"));
+        assert!(explicit_search_asked("google it for me"));
+        assert!(!explicit_search_asked("what is the latest nvidia gpu"));
+        assert!(!explicit_search_asked("how are you"));
+        assert!(!explicit_search_asked(""));
+    }
+
+    #[test]
+    fn stale_history_lines_detected() {
+        assert!(stale_history_line("I couldn't reach the web, sorry."));
+        assert!(stale_history_line("Web search returned no results."));
+        assert!(!stale_history_line("The RTX 5090 is the latest gpu."));
+    }
+
+    #[test]
     fn cookie_host_strips_scheme_and_path() {
         assert_eq!(cookie_host("https://example.com/chat/v1/status"), "example.com");
         assert_eq!(cookie_host("http://example.com/a/b"), "example.com");
@@ -1190,35 +1328,6 @@ mod tests {
         std::env::set_var("OLLAMA_API_KEY", "  envkey  ");
         assert_eq!(resolve_ollama_key("cfgkey"), "envkey");
         std::env::remove_var("OLLAMA_API_KEY");
-    }
-
-    #[test]
-    fn explicit_intent_matches_search_requests_only() {
-        assert!(explicit_search_asked("search latest nvidia gpu"));
-        assert!(explicit_search_asked("Search the web for rtx 5090"));
-        assert!(explicit_search_asked("hey, look it up please"));
-        assert!(explicit_search_asked("google it for me"));
-        assert!(!explicit_search_asked("what is the latest nvidia gpu"));
-        assert!(!explicit_search_asked("how are you"));
-        assert!(!explicit_search_asked(""));
-    }
-
-    #[test]
-    fn speaker_prefix_stripped_for_known_names() {
-        let names = vec!["Matko802".to_string(), "Bob".to_string()];
-        assert_eq!(strip_leading_speaker("[Matko802]: oh, just chillin!", &names), "oh, just chillin!");
-        assert_eq!(strip_leading_speaker("Matko802: oh, just chillin!", &names), "oh, just chillin!");
-        assert_eq!(strip_leading_speaker("[Bob]: [Matko802]: hi", &names), "hi");
-        assert_eq!(strip_leading_speaker("hehe wdym is slang", &names), "hehe wdym is slang");
-        assert_eq!(strip_leading_speaker("Note: remember this", &names), "Note: remember this");
-        assert_eq!(strip_leading_speaker("[1234]: hi", &[] as &[String]), "hi");
-    }
-
-    #[test]
-    fn stale_history_lines_detected() {
-        assert!(stale_history_line("I couldn't reach the web, sorry."));
-        assert!(stale_history_line("Web search returned no results."));
-        assert!(!stale_history_line("The RTX 5090 is the latest gpu."));
     }
 
     #[test]
@@ -1250,3 +1359,4 @@ mod tests {
         assert_eq!(chunk_reply("short"), vec!["short".to_string()]);
     }
 }
+
