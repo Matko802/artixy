@@ -116,11 +116,11 @@ pub(crate) async fn event_handler(
         let prompt0 = crate::ai::strip_name(&crate::ai::strip_mention(&new_message.content, me_id));
         let is_command = prompt0.starts_with('/') || prompt0.starts_with(';');
         if !is_command {
-            let authed = {
+            let blocked = {
                 let a = data.allowed.read().await;
-                access_allowed(a.owner, &a.users, &a.blocked, id)
+                a.blocked.contains(&id)
             };
-            if !authed {
+            if blocked {
                 return Ok(());
             }
             let (ai_on, ai_model, ai_host, ai_key) = {
