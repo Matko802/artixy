@@ -962,7 +962,16 @@ pub(crate) async fn ai(
     ctx: Context<'_>,
     #[description = "true to enable AI chat, false to disable (empty shows status)"] enabled: Option<bool>,
     #[description = "Ollama model, e.g. llama3.1 or qwen2.5-coder:7b"] model: Option<String>,
+    #[description = "true to forget conversation memory in this channel"] forget: Option<bool>,
 ) -> Result<(), Error> {
+    if forget == Some(true) {
+        if !need_auth(ctx).await? {
+            return Ok(());
+        }
+        crate::ai::clear_history(ctx.channel_id().get());
+        post_text(ctx, "Forgot the conversation here.").await?;
+        return Ok(());
+    }
     let changing = enabled.is_some() || model.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some();
     if changing && !is_owner(ctx).await {
         post_denied(ctx, "Owner only.").await?;
