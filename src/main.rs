@@ -169,6 +169,9 @@ async fn main() {
         shells: std::sync::Arc::new(tokio::sync::RwLock::new(file_config.shells.clone())),
     };
     tokio::spawn(crate::config::watch_config(data.clone()));
+    // Heartbeat for the TUI live indicator: without it the TUI only sees
+    // chat traffic, so it flips off during quiet periods while the bot is up.
+    tokio::spawn(crate::feed::heartbeat_loop());
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {

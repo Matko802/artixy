@@ -81,6 +81,35 @@ pub(crate) async fn log_typing(author: &str, channel: u64, guild: u64, channel_n
     .await
 }
 
+/// Liveness marker so the TUI's live indicator reflects the bot process
+/// being up, not just recent chat traffic. Parsed like any line (needs
+/// author/channel fields) but never displayed.
+pub(crate) async fn log_beat() -> Result<(), Error> {
+    append(
+        serde_json::json!({
+            "kind": "beat",
+            "author": "artixy-beat",
+            "bot": true,
+            "channel": 0,
+            "guild": 0,
+            "channel_name": "",
+            "text": "",
+            "mid": 0,
+        })
+        .to_string(),
+    )
+    .await
+}
+
+/// Runs on the bot: a beat every 20s keeps the TUI live indicator stable
+/// during quiet periods (well under its 60s offline threshold).
+pub(crate) async fn heartbeat_loop() {
+    loop {
+        let _ = log_beat().await;
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+    }
+}
+
 fn parse_line(line: &str) -> Option<FeedLine> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     Some(FeedLine {

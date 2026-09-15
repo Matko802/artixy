@@ -828,6 +828,19 @@ impl App {
             .filter(|c| c.kind == ChannelKind::Live && c.id != 0 && c.id != u64::MAX)
             .map(|c| (c.id, c.name.clone()))
             .collect();
+        // Always fetch the configured notify channel — otherwise it can sit
+        // empty in the TUI when the guild sweep missed it.
+        let notify_extra: Option<(u64, String)> = crate::config::load_file_config()
+            .notify_channel
+            .filter(|id| *id != 0)
+            .map(|id| {
+                let name = self
+                    .id_to_name
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| id.to_string());
+                (id, name)
+            });
         tokio::spawn(async move {
             let groups = fetch_all_guild_channels(&token).await;
             let _ = tx.send(Job {
@@ -840,6 +853,11 @@ impl App {
                     continue;
                 }
                 flat.push((id, name));
+            }
+            if let Some((id, name)) = notify_extra {
+                if !flat.iter().any(|(eid, _)| *eid == id) {
+                    flat.push((id, name));
+                }
             }
             let (items, failed) = fetch_recent_history(&token, &flat, per).await;
             let _ = tx.send(Job {
@@ -1000,6 +1018,10 @@ impl App {
                 continue;
             }
             self.last_feed = Some(now);
+            if e.kind == "beat" {
+                // Bot heartbeat: proves the process is up, never displayed.
+                continue;
+            }
             self.feed_total += 1;
             let cname = e.channel_name.trim().to_string();
             if !cname.is_empty() {
@@ -1100,10 +1122,6 @@ impl App {
                     let _ = tx.send(Job {
                         channel: reply_to,
                         reply: Reply::Echo { target: id, mid, text },
-                    });
-                    let _ = tx.send(Job {
-                        channel: reply_to,
-                        reply: Reply::Text(vec![format!("sent to {} (msg {})", tag, mid)]),
                     });
                 }
                 Err(e) => {
@@ -1261,8 +1279,25 @@ impl App {
                 }
                 Reply::ChannelHistory(items, failed) => {
                     self.hist_syncing = false;
+                    let mut need_sort = false;
                     for (id, reason) in failed {
                         self.hist_failed.insert(id, reason);
+                        // A channel that failed history (e.g. no permission)
+                        // still gets a visible entry so the reason surfaces
+                        // on navigate instead of staying invisible.
+                        if self.channels.iter().position(|c| c.id == id).is_none() {
+                            self.ensure_live_channel(id);
+                            let g = self.effective_guild();
+                            if let Some(ch) = self.channels.iter_mut().find(|c| c.id == id) {
+                                if ch.guild == 0 {
+                                    ch.guild = g;
+                                }
+                            }
+                            need_sort = true;
+                        }
+                    }
+                    if need_sort {
+                        self.sort_live_channels();
                     }
                     self.apply_history(items);
                 }
@@ -2147,6 +2182,63 @@ async fn fetch_all_guild_channels(token: &str) -> Vec<GuildChans> {
                 cats,
                 channels: chans,
             });
+        }
+    }
+    // The configured notify channel must never stay invisible/empty in the
+    // TUI: make sure it is listed even if the guild sweep missed it.
+    {
+        let want = crate::config::load_file_config()
+            .notify_channel
+            .unwrap_or(0);
+        if want != 0
+            && !out
+                .iter()
+                .flat_map(|g| g.channels.iter())
+                .any(|c| c.id == want)
+        {
+            if let Ok(ch) = serenity::ChannelId::new(want).to_channel(&http).await {
+                if let Some(g) = ch.guild() {
+                    let gid = g.guild_id.get();
+                    let name = g.name.trim().to_string();
+                    if !name.is_empty() {
+                        let fc = FetchedChan {
+                            id: want,
+                            name,
+                            pos: g.position as u32,
+                            parent: g.parent_id.map(|p| p.get()).unwrap_or(0),
+                            voice: false,
+                        };
+                        match out.iter_mut().find(|e| e.id == gid) {
+                            Some(entry) => {
+                                entry.channels.push(fc);
+                                entry.channels.sort_by(|a, b| {
+                                    (a.pos, a.name.to_lowercase(), a.id)
+                                        .cmp(&(b.pos, b.name.to_lowercase(), b.id))
+                                });
+                                entry.channels.dedup_by_key(|c| c.id);
+                            }
+                            None => {
+                                let gname = http
+                                    .get_guild(serenity::GuildId::new(gid))
+                                    .await
+                                    .map(|guild| guild.name.trim().to_string())
+                                    .unwrap_or_default();
+                                let gname = if gname.is_empty() {
+                                    format!("server-{gid}")
+                                } else {
+                                    gname
+                                };
+                                out.push(GuildChans {
+                                    id: gid,
+                                    name: gname,
+                                    cats: Vec::new(),
+                                    channels: vec![fc],
+                                });
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     out.sort_by(|a, b| {
