@@ -53,13 +53,38 @@ pub(crate) async fn event_handler(
         handle_delete(&ctx.http, *deleted_message_id, war).await;
         return Ok(());
     }
+    if let serenity::FullEvent::TypingStart { event } = event {
+        let name = event
+            .member
+            .as_ref()
+            .and_then(|m| m.nick.clone().or_else(|| m.user.global_name.clone()).or_else(|| Some(m.user.name.clone())))
+            .or_else(|| {
+                ctx.cache
+                    .user(event.user_id)
+                    .map(|u| u.global_name.clone().unwrap_or_else(|| u.name.clone()))
+            })
+            .unwrap_or_else(|| event.user_id.get().to_string());
+        let channel_name = ctx
+            .cache
+            .channel(event.channel_id)
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+        let _ = crate::feed::log_typing(&name, event.channel_id.get(), &channel_name).await;
+        return Ok(());
+    }
     let serenity::FullEvent::Message { new_message } = event else {
         return Ok(());
     };
+    let channel_name = ctx
+        .cache
+        .channel(new_message.channel_id)
+        .map(|c| c.name.clone())
+        .unwrap_or_default();
     let _ = crate::feed::log_message(
         &new_message.author.name,
         new_message.author.bot,
         new_message.channel_id.get(),
+        &channel_name,
         &new_message.content,
     )
     .await;
@@ -202,7 +227,11 @@ pub(crate) async fn event_handler(
                 }
                 Err(e) => {
                     eprintln!("ai chat failed (model {ai_model} on {ai_host}): {e}");
-                    let text = crate::ai::glitch_text(&ai_host, &ai_model).await;
+                    let text = if crate::ai::is_api_full_err(&e.to_string()) {
+                        crate::ai::api_full_message()
+                    } else {
+                        crate::ai::glitch_text(&ai_host, &ai_model).await
+                    };
                     let _ = new_message.reply(&ctx.http, &text).await;
                 }
             }

@@ -825,6 +825,41 @@ pub(crate) async fn hosted_fetch(key: &str, url: &str) -> Option<String> {
     Some(text.chars().take(3000).collect())
 }
 
+pub(crate) const RATE_LIMIT_USER_MSG: &str =
+    "Web search is rate limited right now, try again in a couple minutes.";
+
+pub(crate) fn is_rate_limit_err(s: &str) -> bool {
+    let t = s.to_lowercase();
+    t.contains("429")
+        || t.contains("rate limit")
+        || t.contains("rate_limit")
+        || t.contains("rate-limited")
+        || t.contains("too many requests")
+        || t.contains("quota")
+}
+
+pub(crate) fn is_api_full_err(s: &str) -> bool {
+    if is_rate_limit_err(s) {
+        return true;
+    }
+    let t = s.to_lowercase();
+    t.contains("503")
+        || t.contains("529")
+        || t.contains("overload")
+        || t.contains("capacity")
+        || t.contains("server is busy")
+        || t.contains("try again in a bit")
+        || t.contains("api full")
+}
+
+pub(crate) fn api_full_message() -> String {
+    "Sorry, I'm running hot right now (API full/rate limited) nya :3 — I can't reach fresh info, but ask me again in a minute or ask something I can answer from what I already know.".to_string()
+}
+
+fn offline_tool_fallback() -> String {
+    "Web search is currently unavailable (rate limited). Answer from your own knowledge as best you can. Briefly note your knowledge may be outdated. Never mention searching, tools, or rate limits unless asked.".to_string()
+}
+
 pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
     let t0 = std::time::Instant::now();
     let query: String = query.chars().take(200).collect();
@@ -836,8 +871,8 @@ pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
         Ok(r) => r,
         Err(e) => {
             eprintln!("run_websearch: {e}");
-            if e.contains("429") {
-                return "Web search is rate limited right now, try again in a couple minutes.".to_string();
+            if is_rate_limit_err(&e) {
+                return RATE_LIMIT_USER_MSG.to_string();
             }
             Vec::new()
         }
@@ -940,9 +975,13 @@ pub(crate) fn stale_history_line(s: &str) -> bool {
         || t.contains("could not reach the web")
         || t == "web search returned no results."
         || t.contains("web search is not configured")
+        || t.contains("web search is rate limited")
+        || t.contains("running hot right now")
 }
 
 pub(crate) async fn glitch_text(host: &str, model: &str) -> String {
+    // Don't hammer a full API with another call — return a helpful static fallback.
+    // Callers that already know the error was api-full should prefer api_full_message().
     let url = format!("{}/api/chat", host.trim_end_matches('/'));
     let messages = vec![
         serde_json::json!({"role": "system", "content": SYSTEM_PROMPT}),
@@ -953,10 +992,13 @@ pub(crate) async fn glitch_text(host: &str, model: &str) -> String {
             let text = strip_meta_preamble(&strip_leading_speaker(&clean_reply(&m.content), &[]));
             if text.trim().is_empty() {
                 "sorry, glitched out — try again in a sec".to_string()
+            } else if is_api_full_err(&text) {
+                api_full_message()
             } else {
                 text.chars().take(300).collect()
             }
         }
+        Err(e) if is_api_full_err(&e.to_string()) => api_full_message(),
         Err(_) => "sorry, glitched out — try again in a sec".to_string(),
     }
 }
@@ -1022,7 +1064,24 @@ pub(crate) async fn ollama_chat(
         Err(e) if e.to_string().contains("does not support tools") => {
             eprintln!("ollama_chat: model lacks tool support, retry without tools");
             used_tools = false;
-            chat_once(&url, model, &messages, false).await?
+            match chat_once(&url, model, &messages, false).await {
+                Ok(m) => m,
+                Err(e2) if is_api_full_err(&e2.to_string()) => {
+                    // Alternative approach: don't be unhelpful — answer from memory.
+                    let fb = api_full_message();
+                    push(channel, tagged.clone(), tagged.clone());
+                    push(channel, "assistant".to_string(), fb.clone());
+                    return Ok(fb);
+                }
+                Err(e2) => return Err(e2),
+            }
+        }
+        Err(e) if is_api_full_err(&e.to_string()) => {
+            eprintln!("ollama_chat: api full on first call, offline fallback");
+            let fb = api_full_message();
+            push(channel, tagged.clone(), tagged.clone());
+            push(channel, "assistant".to_string(), fb.clone());
+            return Ok(fb);
         }
         Err(e) => return Err(e),
     };
@@ -1072,15 +1131,31 @@ pub(crate) async fn ollama_chat(
         if !clean_reply(&first.content).trim().is_empty() {
             return finalize_reply(channel, tagged, &names, &first.content);
         }
-        let retry = chat_once(&url, model, &messages, false).await?;
-        return finalize_reply(channel, tagged, &names, &retry.content);
+        match chat_once(&url, model, &messages, false).await {
+            Ok(retry) => return finalize_reply(channel, tagged, &names, &retry.content),
+            Err(e) if is_api_full_err(&e.to_string()) => {
+                let fb = api_full_message();
+                push(channel, tagged.clone(), tagged.clone());
+                push(channel, "assistant".to_string(), fb.clone());
+                return Ok(fb);
+            }
+            Err(e) => return Err(e),
+        }
     }
     if calls.is_empty() {
         if !looks_like_search_placeholder(&first.content) {
             return finalize_reply(channel, tagged, &names, &first.content);
         }
-        let retry = chat_once(&url, model, &messages, false).await?;
-        return finalize_reply(channel, tagged, &names, &retry.content);
+        match chat_once(&url, model, &messages, false).await {
+            Ok(retry) => return finalize_reply(channel, tagged, &names, &retry.content),
+            Err(e) if is_api_full_err(&e.to_string()) => {
+                let fb = api_full_message();
+                push(channel, tagged.clone(), tagged.clone());
+                push(channel, "assistant".to_string(), fb.clone());
+                return Ok(fb);
+            }
+            Err(e) => return Err(e),
+        }
     }
     let mut rounds = 0;
     let mut pending: Option<String> = calls.into_iter().next().map(|(_, q)| q);
@@ -1089,14 +1164,27 @@ pub(crate) async fn ollama_chat(
         if query.trim().is_empty() {
             return Err("ollama returned an empty reply".into());
         }
-        let tool_result = run_websearch(okey, &query).await;
-        let tool_result = if tool_result.trim().is_empty() {
+        // Alternative approach when the web API is full: answer from knowledge
+        // instead of parroting "rate limited" to the user.
+        let raw_result = run_websearch(okey, &query).await;
+        let tool_result = if raw_result.trim().is_empty() {
             "No web results found. Answer briefly from your own knowledge and never mention searching or the web.".to_string()
+        } else if is_rate_limit_err(&raw_result) || rate_limited() {
+            offline_tool_fallback()
         } else {
-            tool_result
+            raw_result
         };
         messages.push(serde_json::json!({"role": "tool", "content": tool_result}));
-        let second = chat_once(&url, model, &messages, false).await?;
+        let second = match chat_once(&url, model, &messages, false).await {
+            Ok(m) => m,
+            Err(e) if is_api_full_err(&e.to_string()) => {
+                let fb = api_full_message();
+                push(channel, tagged.clone(), tagged.clone());
+                push(channel, "assistant".to_string(), fb.clone());
+                return Ok(fb);
+            }
+            Err(e) => return Err(e),
+        };
         let mut next: Option<String> = None;
         if let Some(list) = second.tool_calls.clone() {
             for c in list {
@@ -1247,5 +1335,32 @@ pub(crate) fn chunk_reply(s: &str) -> Vec<String> {
         vec![s.chars().take(MAX).collect()]
     } else {
         chunks
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limit_detects_429_and_quota() {
+        assert!(is_rate_limit_err("ollama 429: too many requests"));
+        assert!(is_rate_limit_err("Rate limit exceeded, try again"));
+        assert!(is_rate_limit_err("quota exceeded"));
+        assert!(!is_rate_limit_err("No web results found"));
+    }
+
+    #[test]
+    fn api_full_covers_overload_and_503() {
+        assert!(is_api_full_err("ollama 503: overloaded"));
+        assert!(is_api_full_err("server is busy, try again in a bit"));
+        assert!(is_api_full_err(RATE_LIMIT_USER_MSG));
+        assert!(!is_api_full_err("connection refused"));
+    }
+
+    #[test]
+    fn stale_history_skips_rate_limit_lines() {
+        assert!(stale_history_line("Web search is rate limited right now, try again"));
+        assert!(stale_history_line(&api_full_message()));
     }
 }

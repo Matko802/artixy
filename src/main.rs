@@ -40,6 +40,11 @@ async fn main() {
     if args.get(1).map(|s| s.as_str()) == Some("tui") {
         ensure_config_template();
         let file_config = load_file_config();
+        let token = file_config
+            .discord_token
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| std::env::var("DISCORD_TOKEN").ok().filter(|s| !s.trim().is_empty()));
         let settings = crate::tui::local_settings(
             file_config.ai_enabled,
             if crate::ai::valid_model_name(&file_config.ai_model) {
@@ -53,6 +58,7 @@ async fn main() {
                 file_config.ollama_host.clone()
             },
             &file_config.ollama_api_key,
+            token,
         );
         if let Err(e) = crate::tui::run_tui(settings).await {
             eprintln!("tui error: {e}");
@@ -229,8 +235,10 @@ async fn main() {
         })
         .build();
 
-    let intents =
-        serenity::GatewayIntents::non_privileged() | serenity::GatewayIntents::MESSAGE_CONTENT;
+    let intents = serenity::GatewayIntents::non_privileged()
+        | serenity::GatewayIntents::MESSAGE_CONTENT
+        | serenity::GatewayIntents::GUILD_MESSAGE_TYPING
+        | serenity::GatewayIntents::DIRECT_MESSAGE_TYPING;
     let mut client = serenity::ClientBuilder::new(token, intents)
         .framework(framework)
         .await
