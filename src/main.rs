@@ -7,6 +7,7 @@ mod live;
 mod pngencode;
 mod scrub;
 mod termrender;
+mod tui;
 mod util;
 mod vm;
 mod webhook;
@@ -27,6 +28,36 @@ pub(crate) type Context<'a> = poise::Context<'a, Data, Error>;
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("help")
+        || args.get(1).map(|s| s.as_str()) == Some("--help")
+        || args.get(1).map(|s| s.as_str()) == Some("-h")
+    {
+        println!("artixy — run with no args to start the Discord bot, or `artixy tui` for the local fake-discord terminal UI.");
+        return;
+    }
+    if args.get(1).map(|s| s.as_str()) == Some("tui") {
+        ensure_config_template();
+        let file_config = load_file_config();
+        let settings = crate::tui::local_settings(
+            file_config.ai_enabled,
+            if crate::ai::valid_model_name(&file_config.ai_model) {
+                file_config.ai_model.clone()
+            } else {
+                crate::ai::default_model()
+            },
+            if file_config.ollama_host.trim().is_empty() {
+                crate::ai::default_host()
+            } else {
+                file_config.ollama_host.clone()
+            },
+            &file_config.ollama_api_key,
+        );
+        if let Err(e) = crate::tui::run_tui(settings).await {
+            eprintln!("tui error: {e}");
+        }
+        return;
+    }
     let fresh_config = !config_file_path().exists();
     ensure_config_template();
     let mut file_config = load_file_config();
