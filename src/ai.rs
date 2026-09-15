@@ -1071,37 +1071,19 @@ pub(crate) fn strip_mention(content: &str, bot_id: u64) -> String {
 }
 
 pub(crate) fn mentions_name(content: &str) -> bool {
-    content
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|w| w.eq_ignore_ascii_case("artixy"))
+    content.to_lowercase().contains("artix")
 }
 
 pub(crate) fn strip_name(content: &str) -> String {
-    let mut out = String::with_capacity(content.len());
-    let mut word = String::new();
-    for c in content.chars() {
-        if c.is_alphanumeric() {
-            word.push(c);
-        } else {
-            if !word.eq_ignore_ascii_case("artixy") {
-                out.push_str(&word);
-            }
-            word.clear();
-            out.push(c);
-        }
-    }
-    if !word.eq_ignore_ascii_case("artixy") {
-        out.push_str(&word);
-    }
-    let cleaned = out
+    content
         .split_whitespace()
+        .filter(|w| !w.to_lowercase().contains("artix"))
         .collect::<Vec<_>>()
         .join(" ")
         .trim()
         .trim_start_matches(|c| matches!(c, ',' | ':' | '-' | '!'))
         .trim()
-        .to_string();
-    cleaned
+        .to_string()
 }
 
 pub(crate) fn chunk_reply(s: &str) -> Vec<String> {
@@ -1202,15 +1184,13 @@ mod tests {
     }
 
     #[test]
-    fn name_trigger_matches_whole_word_only() {
+    fn name_trigger_matches_anything_with_artix() {
         assert!(mentions_name("artixy hello"));
-        assert!(mentions_name("hey ARTIXY what is latest gpu"));
-        assert!(mentions_name("artixy, help"));
+        assert!(mentions_name("hey ARTIXY help"));
+        assert!(mentions_name("artix linux question"));
         assert!(!mentions_name("hello there"));
-        assert!(!mentions_name("artixyz"));
-        assert!(!mentions_name("myartixybot"));
         assert_eq!(strip_name("artixy what is latest gpu"), "what is latest gpu");
-        assert_eq!(strip_name("hey artixy, help me"), "hey , help me");
+        assert_eq!(strip_name("hey artixy, help me"), "hey help me");
         assert_eq!(strip_name("ARTIXY"), "");
     }
 
