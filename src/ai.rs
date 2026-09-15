@@ -729,7 +729,29 @@ struct HostedFetchResponse {
     content: String,
 }
 
+fn search_backoff() -> &'static Mutex<Option<std::time::Instant>> {
+    static BACKOFF: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+    BACKOFF.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn rate_limited() -> bool {
+    search_backoff()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|until| std::time::Instant::now() < until)
+        .unwrap_or(false)
+}
+
+fn cool_down() {
+    if let Ok(mut b) = search_backoff().lock() {
+        *b = Some(std::time::Instant::now() + std::time::Duration::from_secs(120));
+    }
+}
+
 pub(crate) async fn hosted_search(key: &str, query: &str) -> Result<Vec<(String, String, String)>, String> {
+    if rate_limited() {
+        return Err("ollama 429: backing off after rate limit".into());
+    }
     let req = serde_json::json!({"query": query});
     let resp = tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -747,6 +769,10 @@ pub(crate) async fn hosted_search(key: &str, query: &str) -> Result<Vec<(String,
         let body = resp.text().await.unwrap_or_default();
         let body: String = body.chars().take(200).collect();
         eprintln!("hosted_search: status={status} body={body}");
+        if status.as_u16() == 429 {
+            cool_down();
+            return Err("ollama 429: web search rate limited, try again in a couple minutes".into());
+        }
         return Err(format!("ollama {status}: {body}"));
     }
     let data: HostedSearchResponse =
@@ -810,6 +836,9 @@ pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
         Ok(r) => r,
         Err(e) => {
             eprintln!("run_websearch: {e}");
+            if e.contains("429") {
+                return "Web search is rate limited right now, try again in a couple minutes.".to_string();
+            }
             Vec::new()
         }
     };
