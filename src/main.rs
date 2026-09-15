@@ -898,7 +898,6 @@ async fn main() {
             } else {
                 file_config.ollama_host.clone()
             },
-            gemini_api_key: file_config.gemini_api_key.trim().to_string(),
         }),
         shells: tokio::sync::RwLock::new(file_config.shells.clone()),
     };
