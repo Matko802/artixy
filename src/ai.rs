@@ -338,12 +338,31 @@ pub(crate) fn schema_tool_call(text: &str) -> Option<(String, String)> {
     None
 }
 
+fn is_tool_json(obj: &str) -> bool {
+    let v: serde_json::Value = match serde_json::from_str(obj) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    if v.get("tool").is_some() {
+        return true;
+    }
+    if v.get("name").and_then(|n| n.as_str()).is_some()
+        && (v.get("parameters").is_some() || v.get("arguments").is_some() || v.get("query").is_some())
+    {
+        return true;
+    }
+    if let Some(f) = v.get("function") {
+        return f.get("name").and_then(|n| n.as_str()).is_some();
+    }
+    false
+}
+
 fn is_tool_json_line(line: &str) -> bool {
     let t = line.trim().trim_matches('`').trim();
     if !(t.starts_with('{') && t.ends_with('}')) {
         return false;
     }
-    parse_tool_json(t).is_some()
+    is_tool_json(t)
 }
 
 pub(crate) fn clean_reply(text: &str) -> String {
@@ -1010,6 +1029,22 @@ pub(crate) async fn ollama_chat(
                 calls.push(("websearch".to_string(), auto_q));
             }
         }
+    }
+    let has_unknown_tools = first
+        .tool_calls
+        .as_ref()
+        .map(|v| {
+            !v.is_empty()
+                && v.iter()
+                    .all(|c| !c.function.name.eq_ignore_ascii_case("websearch"))
+        })
+        .unwrap_or(false);
+    if calls.is_empty() && has_unknown_tools {
+        if !clean_reply(&first.content).trim().is_empty() {
+            return finalize_reply(channel, tagged, &names, &first.content);
+        }
+        let retry = chat_once(&url, model, &messages, false).await?;
+        return finalize_reply(channel, tagged, &names, &retry.content);
     }
     if calls.is_empty() {
         if !looks_like_search_placeholder(&first.content) {

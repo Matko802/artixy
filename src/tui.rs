@@ -108,8 +108,20 @@ impl App {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = Self {
             channels: vec![
-                Channel { name: "general", id: 1, messages: Vec::new(), scroll: 0, follow: true },
-                Channel { name: "bot-commands", id: 2, messages: Vec::new(), scroll: 0, follow: true },
+                Channel {
+                    name: "general",
+                    id: 1,
+                    messages: Vec::new(),
+                    scroll: 0,
+                    follow: true,
+                },
+                Channel {
+                    name: "bot-commands",
+                    id: 2,
+                    messages: Vec::new(),
+                    scroll: 0,
+                    follow: true,
+                },
             ],
             active: 0,
             input: String::new(),
@@ -165,9 +177,12 @@ impl App {
         tokio::spawn(async move {
             let reply = match ollama_chat(&host, &model, &key, chan, "you", &prompt).await {
                 Ok(text) => Reply::Text(chunk_reply(&text)),
-                Err(e) => Reply::Text(vec![format!("error: {e}")]),
+                Err(_) => Reply::Text(vec![crate::ai::glitch_text(&host, &model).await]),
             };
-            let _ = tx.send(Job { channel: chan, reply });
+            let _ = tx.send(Job {
+                channel: chan,
+                reply,
+            });
         });
     }
 
@@ -185,7 +200,10 @@ impl App {
             } else {
                 answer.chars().take(1500).collect()
             };
-            let _ = tx.send(Job { channel: chan, reply: Reply::Text(vec![text]) });
+            let _ = tx.send(Job {
+                channel: chan,
+                reply: Reply::Text(vec![text]),
+            });
         });
     }
 
@@ -199,7 +217,10 @@ impl App {
         tokio::spawn(async move {
             let web = web_status(&key).await;
             let text = format!("model `{model}` on `{host}`\n{web}");
-            let _ = tx.send(Job { channel: chan, reply: Reply::Text(vec![text]) });
+            let _ = tx.send(Job {
+                channel: chan,
+                reply: Reply::Text(vec![text]),
+            });
         });
     }
 
@@ -267,7 +288,11 @@ impl App {
         if mentions_name(&text) {
             let prompt = strip_name(&text);
             if prompt.trim().is_empty() {
-                self.say_active("artixy", Color::Magenta, "ping me with a question — `artixy <question>`");
+                self.say_active(
+                    "artixy",
+                    Color::Magenta,
+                    "ping me with a question — `artixy <question>`",
+                );
             } else {
                 self.spawn_ai(prompt);
             }
@@ -347,7 +372,11 @@ fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.size();
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(3)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(3),
+        ])
         .split(area);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -355,8 +384,11 @@ fn render(frame: &mut Frame, app: &mut App) {
         .split(rows[1]);
 
     let title = Line::from(vec![
-        Span::styled(" artixy ", Style::default().fg(Color::Black).bg(Color::Magenta)),
-        Span::raw(" local fake-discord  |  tab: channel  pgup/pgdn: scroll  /quit: leave "),
+        Span::styled(
+            " artixy ",
+            Style::default().fg(Color::Black).bg(Color::Magenta),
+        ),
+        Span::raw(" local chat  |  tab: channel  pgup/pgdn: scroll  /quit: leave "),
     ]);
     frame.render_widget(Paragraph::new(title), rows[0]);
 
@@ -411,14 +443,23 @@ fn render(frame: &mut Frame, app: &mut App) {
     let at = app.cursor.min(chars.len());
     let before: String = chars[..at].iter().collect();
     let under = chars.get(at).copied().unwrap_or(' ');
-    let after: String = chars[at + (chars.get(at).is_some() as usize)..].iter().collect();
+    let after: String = chars[at + (chars.get(at).is_some() as usize)..]
+        .iter()
+        .collect();
     let input_line = Line::from(vec![
         Span::raw(before),
-        Span::styled(under.to_string(), Style::default().fg(Color::Black).bg(Color::White)),
+        Span::styled(
+            under.to_string(),
+            Style::default().fg(Color::Black).bg(Color::White),
+        ),
         Span::raw(after),
     ]);
     let pending: usize = app.pending.values().sum();
-    let status = if pending > 0 { "artixy is typing…" } else { "message" };
+    let status = if pending > 0 {
+        "artixy is typing…"
+    } else {
+        "message"
+    };
     let input = Paragraph::new(input_line).block(Block::bordered().title(status));
     frame.render_widget(input, rows[2]);
 }
@@ -445,7 +486,10 @@ pub(crate) async fn run_tui(settings: TuiSettings) -> Result<(), Error> {
     }
 
     crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen)?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
