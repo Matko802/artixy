@@ -1071,19 +1071,20 @@ pub(crate) fn strip_mention(content: &str, bot_id: u64) -> String {
 }
 
 pub(crate) fn mentions_name(content: &str) -> bool {
-    content.to_lowercase().contains("artix")
+    content
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| w.eq_ignore_ascii_case("artixy"))
 }
 
 pub(crate) fn strip_name(content: &str) -> String {
     content
         .split_whitespace()
-        .filter(|w| !w.to_lowercase().contains("artix"))
+        .filter(|w| {
+            let t = w.trim_matches(|c: char| !c.is_alphanumeric());
+            !t.eq_ignore_ascii_case("artixy")
+        })
         .collect::<Vec<_>>()
         .join(" ")
-        .trim()
-        .trim_start_matches(|c| matches!(c, ',' | ':' | '-' | '!'))
-        .trim()
-        .to_string()
 }
 
 pub(crate) fn chunk_reply(s: &str) -> Vec<String> {
@@ -1184,13 +1185,12 @@ mod tests {
     }
 
     #[test]
-    fn name_trigger_matches_anything_with_artix() {
+    fn name_trigger_matches_just_artixy() {
         assert!(mentions_name("artixy hello"));
         assert!(mentions_name("hey ARTIXY help"));
-        assert!(mentions_name("artix linux question"));
         assert!(!mentions_name("hello there"));
+        assert!(!mentions_name("artixyz"));
         assert_eq!(strip_name("artixy what is latest gpu"), "what is latest gpu");
-        assert_eq!(strip_name("hey artixy, help me"), "hey help me");
         assert_eq!(strip_name("ARTIXY"), "");
     }
 
