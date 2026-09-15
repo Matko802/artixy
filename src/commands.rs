@@ -669,6 +669,7 @@ pub(crate) async fn sayas(
         Ok(())
     }
     .await;
+    let sent_ok = send_res.is_ok();
     if is_slash {
         let mut confirm = format!("Sent as artix in <#{}>.", channel.get());
         if !files.is_empty() {
@@ -686,6 +687,9 @@ pub(crate) async fn sayas(
             let _ = post_text(ctx, problems.join("\n")).await;
         }
         send_res?;
+    }
+    if sent_ok {
+        crate::ai::record_artixy(channel.get(), &body);
     }
     Ok(())
 }

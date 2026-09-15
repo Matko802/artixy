@@ -62,6 +62,7 @@ struct HistMsg {
     channel: u64,
     author: String,
     bot: bool,
+    mine: bool,
     text: String,
 }
 
@@ -626,6 +627,11 @@ impl App {
             };
             let color = if h.bot { BOT_MSG } else { USER_MSG };
             self.push_hist(pi, &h.author, color, "", &h.text);
+            if h.mine {
+                crate::ai::record_artixy(h.channel, &h.text);
+            } else {
+                crate::ai::record_user(h.channel, &h.author, &h.text);
+            }
             loaded += 1;
             if let Some(si) = spy_idx {
                 if si != pi {
@@ -751,6 +757,7 @@ impl App {
             self.say_active("system", DIM, "", "usage: /say #<id|name> <text>");
             return;
         }
+        crate::ai::record_artixy(id, &text);
         let tx = self.tx.clone();
         let reply_to = self.chan();
         *self.pending.entry(reply_to).or_insert(0) += 1;
@@ -1564,6 +1571,7 @@ async fn fetch_recent_history(
 ) -> Vec<HistMsg> {
     use serenity::builder::GetMessages;
     let http = serenity::Http::new(token);
+    let own = http.get_current_user().await.map(|u| u.id).ok();
     let mut out: Vec<HistMsg> = Vec::new();
     for (id, _) in channels {
         let msgs = serenity::ChannelId::new(*id)
@@ -1584,6 +1592,7 @@ async fn fetch_recent_history(
                 channel: *id,
                 author,
                 bot: m.author.bot,
+                mine: own.map(|o| o == m.author.id).unwrap_or(false),
                 text,
             });
         }

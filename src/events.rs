@@ -341,6 +341,7 @@ pub(crate) async fn event_handler(
                 return Ok(());
             }
             let _ = new_message.delete(&ctx.http).await;
+            crate::ai::record_artixy(new_message.channel_id.get(), &body);
             if body.chars().count() <= 2000 && !body.is_empty() && files.is_empty() {
                 match &new_message.referenced_message {
                     Some(target) => {
@@ -403,8 +404,7 @@ pub(crate) async fn event_handler(
     }
     let (mut ar_files, _) = download_sayas_files(&new_message.attachments).await;
     let mut ar_body = text.clone();
-    if ar_body.chars().count() > 2000 {
-        ar_files.insert(
+    if ar_body.chars().count() > 2000 {        ar_files.insert(
             0,
             (
                 attach_name(&ar_body),
@@ -413,6 +413,7 @@ pub(crate) async fn event_handler(
         );
         ar_body = String::new();
     }
+    crate::ai::record_artixy(new_message.channel_id.get(), &ar_body);
     if ar_body.chars().count() <= 2000 && !ar_body.is_empty() && ar_files.is_empty() {
         match &new_message.referenced_message {
             Some(target) => {

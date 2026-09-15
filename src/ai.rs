@@ -1322,6 +1322,28 @@ pub(crate) fn clear_history(channel: u64) {
     }
 }
 
+pub(crate) fn record_artixy(channel: u64, text: &str) {
+    let t = text.trim();
+    if t.is_empty() {
+        return;
+    }
+    let kept: String = t.chars().take(1500).collect();
+    push(channel, "assistant".to_string(), kept);
+}
+
+pub(crate) fn record_user(channel: u64, speaker: &str, text: &str) {
+    let t = text.trim();
+    if t.is_empty() {
+        return;
+    }
+    let kept: String = t.chars().take(1500).collect();
+    push(
+        channel,
+        "user".to_string(),
+        format!("[{}]: {}", speaker_tag(speaker), kept),
+    );
+}
+
 pub(crate) async fn model_present(host: &str, model: &str) -> Option<bool> {
     let url = format!("{}/api/tags", host.trim_end_matches('/'));
     let resp = client().get(&url).send().await.ok()?;
