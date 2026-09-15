@@ -47,12 +47,128 @@ impl Default for BotSettings {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Data {
-    pub(crate) allowed: tokio::sync::RwLock<Allowed>,
-    pub(crate) vm: String,
+    pub(crate) allowed: std::sync::Arc<tokio::sync::RwLock<Allowed>>,
+    pub(crate) vm: std::sync::Arc<tokio::sync::RwLock<String>>,
     pub(crate) live: LiveMap,
-    pub(crate) settings: tokio::sync::RwLock<BotSettings>,
-    pub(crate) shells: tokio::sync::RwLock<std::collections::HashMap<String, String>>,
+    pub(crate) settings: std::sync::Arc<tokio::sync::RwLock<BotSettings>>,
+    pub(crate) shells: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
+}
+
+pub(crate) fn config_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(config_file_path())
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+pub(crate) async fn apply_file_config(data: &Data, cfg: &FileConfig) -> Vec<String> {
+    let mut changed = Vec::new();
+    {
+        let mut a = data.allowed.write().await;
+        if let Some(owner) = cfg.owner_id {
+            if owner != 0 && owner != a.owner {
+                a.owner = owner;
+                changed.push("owner".to_string());
+            }
+        }
+        if a.users != cfg.managers {
+            a.users = cfg.managers.clone();
+            changed.push("managers".to_string());
+        }
+        if a.linux != cfg.linux {
+            a.linux = cfg.linux.clone();
+            changed.push("linux".to_string());
+        }
+        if a.blocked != cfg.blocked_ids {
+            a.blocked = cfg.blocked_ids.clone();
+            changed.push("blocked_ids".to_string());
+        }
+        if a.admins != cfg.admin_ids {
+            a.admins = cfg.admin_ids.clone();
+            changed.push("admin_ids".to_string());
+        }
+    }
+    {
+        let mut s = data.settings.write().await;
+        if s.notify_channel != cfg.notify_channel {
+            s.notify_channel = cfg.notify_channel;
+            changed.push("notify_channel".to_string());
+        }
+        if s.war_mode != cfg.war_mode {
+            s.war_mode = cfg.war_mode;
+            changed.push("war_mode".to_string());
+        }
+        if s.sayas_enabled != cfg.sayas_enabled {
+            s.sayas_enabled = cfg.sayas_enabled;
+            changed.push("sayas_enabled".to_string());
+        }
+        if s.ai_enabled != cfg.ai_enabled {
+            s.ai_enabled = cfg.ai_enabled;
+            changed.push("ai_enabled".to_string());
+        }
+        if s.ai_model != cfg.ai_model {
+            s.ai_model = cfg.ai_model.clone();
+            changed.push("ai_model".to_string());
+        }
+        if s.ollama_host != cfg.ollama_host {
+            s.ollama_host = cfg.ollama_host.clone();
+            changed.push("ollama_host".to_string());
+        }
+        if s.ollama_api_key != cfg.ollama_api_key {
+            s.ollama_api_key = cfg.ollama_api_key.clone();
+            changed.push("ollama_api_key".to_string());
+        }
+    }
+    {
+        let mut m = data.shells.write().await;
+        if *m != cfg.shells {
+            *m = cfg.shells.clone();
+            changed.push("shells".to_string());
+        }
+    }
+    {
+        let vm_name = cfg
+            .vm_name
+            .clone()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_default();
+        let mut vm = data.vm.write().await;
+        if *vm != vm_name {
+            *vm = vm_name;
+            changed.push("vm_name".to_string());
+        }
+    }
+    if crate::webhook::current_webhook_urls() != cfg.webhook_urls {
+        crate::webhook::set_webhook_urls(cfg.webhook_urls.clone());
+        changed.push("webhook_urls".to_string());
+    }
+    changed
+}
+
+pub(crate) async fn watch_config(data: Data) {
+    let mut last = config_mtime();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let cur = config_mtime();
+        if cur == last {
+            continue;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let stable = config_mtime();
+        last = stable;
+        if stable.is_none() {
+            eprintln!("config: file missing, keeping runtime settings");
+            continue;
+        }
+        let cfg = load_file_config();
+        let changed = apply_file_config(&data, &cfg).await;
+        if changed.is_empty() {
+            eprintln!("config: file changed, no effective updates");
+        } else {
+            eprintln!("config: hot-applied {}", changed.join(", "));
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -269,6 +385,54 @@ mod tests {
         assert_eq!(c.discord_token.as_deref(), Some("tok123"));
         assert_eq!(c.vm_name.as_deref(), Some("artix"));
         assert_eq!(c.owner_id, None);
+    }
+
+    fn test_data() -> Data {
+        Data {
+            allowed: std::sync::Arc::new(tokio::sync::RwLock::new(Allowed {
+                owner: 1,
+                users: Vec::new(),
+                linux: Default::default(),
+                blocked: Vec::new(),
+                admins: Vec::new(),
+            })),
+            vm: std::sync::Arc::new(tokio::sync::RwLock::new("oldvm".to_string())),
+            live: Default::default(),
+            settings: std::sync::Arc::new(tokio::sync::RwLock::new(BotSettings::default())),
+            shells: std::sync::Arc::new(tokio::sync::RwLock::new(Default::default())),
+        }
+    }
+
+    #[tokio::test]
+    async fn hot_apply_updates_runtime_and_reports() {
+        let data = test_data();
+        let mut cfg = FileConfig::default();
+        cfg.owner_id = Some(9);
+        cfg.managers = vec![2];
+        cfg.admin_ids = vec![3];
+        cfg.blocked_ids = vec![4];
+        cfg.vm_name = Some("newvm".to_string());
+        cfg.war_mode = true;
+        cfg.ai_model = "qwen3:4b".to_string();
+        let cfg = normalize_file_config(cfg);
+        let changed = apply_file_config(&data, &cfg).await;
+        for k in ["owner", "managers", "admin_ids", "blocked_ids", "vm_name", "war_mode", "ai_model"] {
+            assert!(changed.contains(&k.to_string()), "missing {k} in {changed:?}");
+        }
+        assert_eq!(data.allowed.read().await.owner, 9);
+        assert_eq!(data.vm.read().await.as_str(), "newvm");
+        assert!(data.settings.read().await.war_mode);
+        let again = apply_file_config(&data, &cfg).await;
+        assert!(again.is_empty(), "second apply must be a no-op, got {again:?}");
+    }
+
+    #[tokio::test]
+    async fn hot_apply_keeps_owner_when_unset() {
+        let data = test_data();
+        let cfg = normalize_file_config(FileConfig::default());
+        let changed = apply_file_config(&data, &cfg).await;
+        assert!(!changed.contains(&"owner".to_string()), "got {changed:?}");
+        assert_eq!(data.allowed.read().await.owner, 1);
     }
 
     #[test]

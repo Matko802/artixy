@@ -256,8 +256,9 @@ pub(crate) async fn event_handler(
                 }
                 let payload = crate::live::expand_typed_input(trimmed);
                 let runas = linked_user(data, id).await;
+                let vm = data.vm.read().await.clone();
                 let ok =
-                    crate::live::forward_terminal_input(&data.vm, &fifo, runas.as_deref(), &payload).await;
+                    crate::live::forward_terminal_input(&vm, &fifo, runas.as_deref(), &payload).await;
                 let _ = new_message.delete(&ctx.http).await;
                 if !ok {
                     if let Ok(dm) = new_message.author.create_dm_channel(&ctx.http).await {

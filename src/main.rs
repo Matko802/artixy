@@ -802,6 +802,7 @@ mod tests {
 #[tokio::main]
 async fn main() {
     let fresh_config = !config_file_path().exists();
+    ensure_config_template();
     let mut file_config = load_file_config();
     let token: String = match file_config.discord_token.clone() {
         Some(t) => t,
@@ -829,7 +830,6 @@ async fn main() {
                 std::process::exit(1);
             }),
     };
-    ensure_config_template();
     if fresh_config {
         let legacy_users: AllowedFile = tokio::fs::read_to_string("users.json")
             .await
@@ -874,16 +874,16 @@ async fn main() {
             String::new()
         });
     let data = Data {
-        allowed: tokio::sync::RwLock::new(Allowed {
+        allowed: std::sync::Arc::new(tokio::sync::RwLock::new(Allowed {
             owner,
             users: file_config.managers.clone(),
             linux: file_config.linux.clone(),
             blocked: file_config.blocked_ids.clone(),
             admins: file_config.admin_ids.clone(),
-        }),
-        vm,
+        })),
+        vm: std::sync::Arc::new(tokio::sync::RwLock::new(vm)),
         live: Default::default(),
-        settings: tokio::sync::RwLock::new(BotSettings {
+        settings: std::sync::Arc::new(tokio::sync::RwLock::new(BotSettings {
             notify_channel: file_config.notify_channel,
             war_mode: file_config.war_mode,
             sayas_enabled: file_config.sayas_enabled,
@@ -899,9 +899,10 @@ async fn main() {
                 file_config.ollama_host.clone()
             },
             ollama_api_key: file_config.ollama_api_key.trim().to_string(),
-        }),
-        shells: tokio::sync::RwLock::new(file_config.shells.clone()),
+        })),
+        shells: std::sync::Arc::new(tokio::sync::RwLock::new(file_config.shells.clone())),
     };
+    tokio::spawn(crate::config::watch_config(data.clone()));
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -944,7 +945,8 @@ async fn main() {
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                crate::live::cleanup_stale_live_files(&data.vm).await;
+                let stale_vm = data.vm.read().await.clone();
+                crate::live::cleanup_stale_live_files(&stale_vm).await;
                 if let Some(ch) = data.settings.read().await.notify_channel {
                     let _ = crate::webhook::post_message(
                         &ctx.http,

@@ -59,12 +59,12 @@ pub(crate) async fn maybe_defer(ctx: Context<'_>) {
 }
 
 async fn require_vm(ctx: Context<'_>) -> Option<String> {
-    let vm = ctx.data().vm.clone();
+    let vm = ctx.data().vm.read().await.clone();
     if vm.trim().is_empty() {
         let _ = post_text(
             ctx,
             format!(
-                "VM not configured — set `vm_name` in `{}` or `VM_NAME` env, then restart the bot.",
+                "VM not configured — set `vm_name` in `{}` or `VM_NAME` env (config edits hot-apply, no restart needed).",
                 crate::config::config_file_path().display()
             ),
         )
@@ -77,7 +77,7 @@ async fn require_vm(ctx: Context<'_>) -> Option<String> {
 pub(crate) const HELP: &str = "\
 **Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. VM commands need owner + added users, but AI chat (`@artixy`), `/ai` view/forget and `/websearch` work for everyone except blocked users. Slash commands only.\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
-\n**Who can use me**\nOwner does everything. Admins (`admin_ids` in config) do everything except `/user add/remove`, which stay owner-only. Managers run VM commands + AI. Everyone except blocked users gets AI chat and `/websearch`.\n`/user` — one command: `/user list` shows owner + admins + managers, `/user add @user` (owner only) links them and creates their Linux account in Artix, `/user remove @user` (owner only) revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner/admin: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner/admin: delete their replies to my messages here\n`/warmode <true|false>` — owner/admin: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner/admin (`/ai true model:llama3.1` for local Ollama, `/ai true model:duck:gpt-4o-mini` for free Duck.ai chat), view is for all users. When enabled, ping me (`@artixy <question>` or `artixy <question>`) and I answer with the configured model.\n`/websearch <query>` — Ollama hosted web search, simple list of answers (needs `ollama_api_key`).\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
+\n**Who can use me**\nOwner does everything. Admins (`admin_ids` in config) do everything except `/user add/remove`, which stay owner-only. Managers run VM commands + AI. Everyone except blocked users gets AI chat and `/websearch`.\n`/user` — one command: `/user list` shows owner + admins + managers, `/user add @user` (owner only) links them and creates their Linux account in Artix, `/user remove @user` (owner only) revokes bot access and deletes their Linux account in the VM\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner/admin: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner/admin: delete their replies to my messages here\n`/warmode <true|false>` — owner/admin: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner/admin (`/ai true model:llama3.1` or `/ai true model:qwen3:4b` for local Ollama models), view is for all users. When enabled, ping me (`@artixy <question>` or `artixy <question>`) and I answer with the configured model.\n`/websearch <query>` — Ollama hosted web search, simple list of answers (needs `ollama_api_key`).\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
 \n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to] [file] [file2] [file3]` — owner/admin: `no args` toggles auto say-as-artix mode, `message` and/or attached files send as artix (reply_to = message ID/link). Files attached to the slash command (or to the `;sayas` prefix message) are re-uploaded as artix. Output is ephemeral (only you see it).\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
@@ -940,7 +940,7 @@ pub(crate) async fn notify(
 pub(crate) async fn ai(
     ctx: Context<'_>,
     #[description = "true to enable AI chat, false to disable (empty shows status)"] enabled: Option<bool>,
-    #[description = "Ollama model e.g. llama3.1, or duck:gpt-4o-mini for Duck.ai"] model: Option<String>,
+    #[description = "Ollama model e.g. llama3.1 or qwen3:4b"] model: Option<String>,
     #[description = "true to forget conversation memory in this channel"] forget: Option<bool>,
 ) -> Result<(), Error> {
     if forget == Some(true) {
@@ -969,15 +969,11 @@ pub(crate) async fn ai(
                 crate::ai::resolve_ollama_key(&s.ollama_api_key),
             )
         };
-        let backend = if crate::ai::is_duck_model(&ai_model) {
-            "duck.ai (free, no key)"
-        } else {
-            "ollama + hosted web search"
-        };
+        let backend = "ollama";
         let key_state = if ai_key.is_empty() { "missing" } else { "set" };
         let web = crate::ai::web_status(&ai_key).await;
         post_text(ctx, format!(
-            "AI chat is **{state}** — model `{ai_model}` via {backend} (`{ai_host}`).\nSearch key: {key_state} (`ollama_api_key` in config or OLLAMA_API_KEY env, free at ollama.com/settings/keys).\n{web}\nOwner: `/ai true model:qwen3:4b` for local search agent, `/ai true model:duck:gpt-4o-mini` for Duck.ai. Then just ping me `@artixy <question>` or `artixy <question>`.",
+            "AI chat is **{state}** — model `{ai_model}` via {backend} (`{ai_host}`).\nSearch key: {key_state} (`ollama_api_key` in config or OLLAMA_API_KEY env, free at ollama.com/settings/keys).\n{web}\nOwner: `/ai true model:llama3.1` or `/ai true model:qwen3:4b`. Then just ping me `@artixy <question>` or `artixy <question>`.",
         ))
         .await?;
         return Ok(());

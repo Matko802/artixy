@@ -59,7 +59,7 @@ pub(crate) enum Poster {
     },
 }
 
-static WEBHOOK_URLS: OnceLock<Vec<String>> = OnceLock::new();
+static WEBHOOK_URLS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static RESOLVED: OnceLock<Mutex<HashMap<serenity::ChannelId, Vec<(serenity::WebhookId, String)>>>> =
     OnceLock::new();
 static POSTED: OnceLock<Mutex<PostedRegistry>> = OnceLock::new();
@@ -89,8 +89,21 @@ fn last_repost() -> &'static Mutex<Option<std::time::Instant>> {
     LAST_REPOST.get_or_init(|| Mutex::new(None))
 }
 
+fn webhook_urls_map() -> &'static Mutex<Vec<String>> {
+    WEBHOOK_URLS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 pub(crate) fn init_webhook_urls(urls: Vec<String>) {
-    let _ = WEBHOOK_URLS.set(urls);
+    *webhook_urls_map().lock().unwrap_or_else(|e| e.into_inner()) = urls;
+}
+
+pub(crate) fn set_webhook_urls(urls: Vec<String>) {
+    *webhook_urls_map().lock().unwrap_or_else(|e| e.into_inner()) = urls;
+    resolved_map().lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+pub(crate) fn current_webhook_urls() -> Vec<String> {
+    webhook_urls_map().lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 pub(crate) fn parse_webhook_url(s: &str) -> Option<(serenity::WebhookId, String)> {
@@ -193,18 +206,17 @@ async fn resolve_pool(
         }
     }
     let mut pool = Vec::new();
-    if let Some(urls) = WEBHOOK_URLS.get() {
-        for u in urls {
-            if pool.len() >= POOL_SIZE {
-                break;
-            }
-            let Some((id, token)) = parse_webhook_url(u) else {
-                continue;
-            };
-            match serenity::model::webhook::Webhook::from_url(http, &hook_url(id, &token)).await {
-                Ok(wh) if wh.channel_id == Some(channel) => pool.push((id, token)),
-                _ => {}
-            }
+    let urls = current_webhook_urls();
+    for u in &urls {
+        if pool.len() >= POOL_SIZE {
+            break;
+        }
+        let Some((id, token)) = parse_webhook_url(u) else {
+            continue;
+        };
+        match serenity::model::webhook::Webhook::from_url(http, &hook_url(id, &token)).await {
+            Ok(wh) if wh.channel_id == Some(channel) => pool.push((id, token)),
+            _ => {}
         }
     }
     if !pool.is_empty() {
