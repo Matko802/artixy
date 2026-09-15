@@ -14,7 +14,7 @@ mod webhook;
 use poise::serenity_prelude as serenity;
 
 use crate::commands::{
-    ai, botrestart, help, info, notify, ps, purge_replies, restart, run, sayas, send, shell, shot,
+    ai, botrestart, help, info, notify, ps, purge_replies, restart, run, sayas, send, shell,
     start, status, stop, upload, user, warmode, websearch,
 };
 use crate::commands::BOOT_ART;
@@ -43,7 +43,6 @@ mod tests {
             botrestart(),
             run(),
             sayas(),
-            shot(),
             send(),
             notify(),
             purge_replies(),
@@ -52,7 +51,7 @@ mod tests {
             ai(),
             websearch(),
         ];
-        assert_eq!(cmds.len(), 20, "test must mirror the framework command list");
+        assert_eq!(cmds.len(), 19, "test must mirror the framework command list");
         for cmd in &cmds {
             let builder = cmd
                 .create_as_slash_command()
@@ -918,7 +917,6 @@ async fn main() {
                 botrestart(),
                 run(),
                 sayas(),
-                shot(),
                 send(),
                 notify(),
                 purge_replies(),
