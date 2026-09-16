@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::Error;
 
@@ -66,17 +66,6 @@ pub(crate) fn default_model() -> String {
     "llama3.1".to_string()
 }
 
-pub(crate) fn explicit_search_asked(prompt: &str) -> bool {
-    let l = prompt.trim().to_lowercase();
-    l.starts_with("search ")
-        || l.starts_with("google ")
-        || l.starts_with("look up ")
-        || l.starts_with("lookup ")
-        || l.contains("search the web")
-        || l.contains("look it up")
-        || l.contains("google it")
-}
-
 pub(crate) fn default_host() -> String {
     "http://127.0.0.1:11434".to_string()
 }
@@ -113,21 +102,6 @@ pub(crate) fn valid_model_name(s: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/'))
 }
 
-#[derive(Serialize)]
-#[allow(dead_code)]
-struct ChatMessage<'a> {
-    role: &'a str,
-    content: &'a str,
-}
-
-#[derive(Serialize)]
-#[allow(dead_code)]
-struct ChatRequest<'a> {
-    model: &'a str,
-    messages: Vec<ChatMessage<'a>>,
-    stream: bool,
-}
-
 #[derive(Deserialize)]
 struct ChatResponse {
     #[serde(default)]
@@ -140,248 +114,12 @@ struct ChatResponse {
 struct ChatMessageOwned {
     #[serde(default)]
     content: String,
-    #[serde(default)]
-    tool_calls: Option<Vec<ToolCall>>,
-}
-
-#[derive(Deserialize, Serialize, Clone)]
-struct ToolCall {
-    #[serde(default)]
-    function: ToolFunc,
-}
-
-#[derive(Deserialize, Serialize, Clone, Default)]
-struct ToolFunc {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    arguments: serde_json::Value,
-}
-
-#[derive(Deserialize)]
-struct SchemaOutput {
-    #[serde(default)]
-    content: String,
-    #[serde(default)]
-    tool: Option<SchemaTool>,
-}
-
-#[derive(Deserialize, Clone)]
-struct SchemaTool {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    query: String,
-    #[serde(default)]
-    url: String,
-}
-
-fn tool_defs() -> serde_json::Value {
-    serde_json::json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "websearch",
-                "description": "Search the live web for fresh info. Returns titles, links and snippets plus fetched page text.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query, e.g. current events"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
-        }
-    ])
-}
-
-pub(crate) fn tool_query(args: &serde_json::Value) -> String {
-    if let Some(s) = args.as_str() {
-        return s.chars().take(200).collect();
-    }
-    if let Some(q) = args.get("query").and_then(|v| v.as_str()) {
-        return q.chars().take(200).collect();
-    }
-    if let Some(obj) = args.as_object() {
-        for (_, v) in obj {
-            if let Some(s) = v.as_str() {
-                if !s.trim().is_empty() {
-                    return s.chars().take(200).collect();
-                }
-            }
-        }
-    }
-    String::new()
-}
-
-fn json_candidates(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '{' {
-            let mut depth = 0;
-            let mut in_str = false;
-            let mut esc = false;
-            let mut j = i;
-            while j < chars.len() {
-                let c = chars[j];
-                if in_str {
-                    if esc {
-                        esc = false;
-                    } else if c == '\\' {
-                        esc = true;
-                    } else if c == '"' {
-                        in_str = false;
-                    }
-                } else if c == '"' {
-                    in_str = true;
-                } else if c == '{' {
-                    depth += 1;
-                } else if c == '}' {
-                    depth -= 1;
-                    if depth == 0 {
-                        out.push(chars[i..=j].iter().collect());
-                        break;
-                    }
-                }
-                j += 1;
-            }
-            i = if j < chars.len() { j + 1 } else { chars.len() };
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-fn parse_tool_json(obj: &str) -> Option<(String, String)> {
-    if let Ok(parsed) = serde_json::from_str::<SchemaOutput>(obj) {
-        if let Some(tool) = parsed.tool {
-            if tool.name.eq_ignore_ascii_case("websearch") {
-                let q = if !tool.query.trim().is_empty() {
-                    tool.query
-                } else {
-                    tool.url
-                };
-                if !q.trim().is_empty() {
-                    return Some((parsed.content, q.chars().take(200).collect()));
-                }
-            }
-        } else if !parsed.content.trim().is_empty() {
-            return None;
-        }
-    }
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(obj) {
-        let name = v
-            .get("name")
-            .and_then(|n| n.as_str())
-            .or_else(|| {
-                v.get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|n| n.as_str())
-            })
-            .unwrap_or("");
-        if name.eq_ignore_ascii_case("websearch") {
-            let args = v
-                .get("parameters")
-                .or_else(|| v.get("arguments"))
-                .or_else(|| v.get("query"));
-            let q = match args {
-                Some(a) if a.is_string() => a.as_str().unwrap_or("").to_string(),
-                Some(a) if a.is_object() => tool_query(a),
-                None => v
-                    .get("function")
-                    .and_then(|f| f.get("arguments"))
-                    .map(tool_query)
-                    .unwrap_or_default(),
-                _ => String::new(),
-            };
-            if !q.trim().is_empty() {
-                let content = v
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                return Some((content, q.chars().take(200).collect()));
-            }
-        }
-    }
-    None
-}
-
-pub(crate) fn schema_tool_call(text: &str) -> Option<(String, String)> {
-    let mut t = text.trim().to_string();
-    if t.starts_with("```") {
-        t = t
-            .trim_start_matches('`')
-            .trim_start_matches("json")
-            .trim_start_matches("JSON")
-            .trim()
-            .trim_end_matches('`')
-            .trim()
-            .to_string();
-    }
-    if t.starts_with('{') && t.ends_with('}') {
-        if let Some(hit) = parse_tool_json(&t) {
-            return Some(hit);
-        }
-    }
-    for cand in json_candidates(&t) {
-        if let Some(hit) = parse_tool_json(&cand) {
-            return Some(hit);
-        }
-    }
-    None
-}
-
-fn is_tool_json(obj: &str) -> bool {
-    let v: serde_json::Value = match serde_json::from_str(obj) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    if v.get("tool").is_some() {
-        return true;
-    }
-    if v.get("name").and_then(|n| n.as_str()).is_some()
-        && (v.get("parameters").is_some()
-            || v.get("arguments").is_some()
-            || v.get("query").is_some())
-    {
-        return true;
-    }
-    if let Some(f) = v.get("function") {
-        return f.get("name").and_then(|n| n.as_str()).is_some();
-    }
-    false
-}
-
-fn is_tool_json_line(line: &str) -> bool {
-    let t = line.trim().trim_matches('`').trim();
-    if !(t.starts_with('{') && t.ends_with('}')) {
-        return false;
-    }
-    is_tool_json(t)
 }
 
 pub(crate) fn clean_reply(text: &str) -> String {
-    let lines: Vec<String> = text
-        .lines()
-        .filter(|l| !is_tool_json_line(l))
-        .map(|l| l.to_string())
-        .collect();
-    let mut out = lines.join("\n");
-    if out.trim().is_empty() {
-        if let Some((content, _)) = schema_tool_call(text) {
-            out = content;
-        }
-    }
     let mut collapsed = String::new();
     let mut blanks = 0;
-    for line in out.lines() {
+    for line in text.lines() {
         if line.trim().is_empty() {
             blanks += 1;
             if blanks <= 1 {
@@ -513,18 +251,6 @@ pub(crate) fn finalize_reply(
     Ok(text)
 }
 
-pub(crate) fn looks_like_search_placeholder(text: &str) -> bool {
-    let t = text.trim().to_lowercase();
-    if t.chars().count() > 140 {
-        return false;
-    }
-    t.starts_with("search")
-        || t.starts_with("looking up")
-        || t.contains("searched for")
-        || t.contains("searching for")
-        || t.contains("searching the web")
-}
-
 #[derive(Deserialize)]
 struct TagsResponse {
     #[serde(default)]
@@ -536,360 +262,6 @@ struct TagEntry {
     #[serde(default)]
     name: String,
 }
-
-pub(crate) fn find_urls(s: &str) -> Vec<String> {
-    s.split_whitespace()
-        .filter_map(|w| {
-            let t = w
-                .trim_matches(|c| matches!(c, '<' | '>' | '"' | '\'' | '(' | ')'))
-                .to_string();
-            let t = t
-                .trim_end_matches(|c| matches!(c, '.' | ',' | ';' | '!' | '?' | ':'))
-                .to_string();
-            if t.starts_with("http://") || t.starts_with("https://") {
-                if t.len() <= 500 {
-                    return Some(t);
-                }
-            }
-            None
-        })
-        .take(2)
-        .collect()
-}
-
-pub(crate) fn strip_html(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    let mut in_script = false;
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if !in_tag && s[i..].starts_with("<script") {
-            in_script = true;
-        }
-        if in_script && s[i..].starts_with("</script") {
-            in_script = false;
-        }
-        let c = bytes[i] as char;
-        if c == '<' {
-            in_tag = true;
-            if !out.ends_with(' ') && !out.is_empty() {
-                out.push(' ');
-            }
-            i += 1;
-            continue;
-        }
-        if c == '>' {
-            in_tag = false;
-            i += 1;
-            continue;
-        }
-        if !in_tag && !in_script {
-            out.push(c);
-        }
-        i += 1;
-    }
-    let out = out
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&nbsp;", " ");
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn cookie_host(url: &str) -> String {
-    let s = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    s.split('/').next().unwrap_or(s).to_lowercase()
-}
-
-fn cookie_jar() -> &'static Mutex<HashMap<String, HashMap<String, String>>> {
-    static JAR: OnceLock<Mutex<HashMap<String, HashMap<String, String>>>> = OnceLock::new();
-    JAR.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn cookie_header(url: &str) -> Option<String> {
-    let host = cookie_host(url);
-    let jar = cookie_jar().lock().unwrap_or_else(|e| e.into_inner());
-    let short = host.strip_prefix("www.").unwrap_or(&host);
-    let mut pairs = Vec::new();
-    for (h, cookies) in jar.iter() {
-        if *h == host || *h == *short || host.ends_with(h.as_str()) {
-            for (k, v) in cookies {
-                pairs.push(format!("{k}={v}"));
-            }
-        }
-    }
-    if pairs.is_empty() {
-        None
-    } else {
-        Some(pairs.join("; "))
-    }
-}
-
-fn store_cookies(url: &str, resp: &reqwest::Response) {
-    let host = cookie_host(url);
-    let mut jar = cookie_jar().lock().unwrap_or_else(|e| e.into_inner());
-    let entry = jar.entry(host).or_insert_with(HashMap::new);
-    for value in resp.headers().get_all("set-cookie").iter() {
-        if let Ok(s) = value.to_str() {
-            let pair = s.split(';').next().unwrap_or("").trim();
-            if let Some((k, v)) = pair.split_once('=') {
-                let k = k.trim().to_string();
-                let v = v.trim().to_string();
-                if !k.is_empty() {
-                    entry.insert(k, v);
-                }
-            }
-        }
-    }
-}
-
-fn web_get(url: &str) -> reqwest::RequestBuilder {
-    let mut req = client()
-        .get(url)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-        )
-        .header("Accept", "text/html,application/xhtml+xml")
-        .header("Accept-Language", "en-US,en;q=0.9");
-    if let Some(c) = cookie_header(url) {
-        req = req.header("Cookie", c);
-    }
-    req
-}
-
-pub(crate) async fn fetch_url_text(url: &str) -> Option<String> {
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(12), web_get(url).send())
-        .await
-        .ok()?
-        .ok()?;
-    store_cookies(url, &resp);
-    if !resp.status().is_success() {
-        return None;
-    }
-    let body = tokio::time::timeout(std::time::Duration::from_secs(12), resp.text())
-        .await
-        .ok()?
-        .ok()?;
-    let text = strip_html(&body);
-    let text: String = text.chars().take(3000).collect();
-    if text.trim().is_empty() {
-        return None;
-    }
-    Some(text)
-}
-
-async fn linked_pages(prompt: &str) -> String {
-    let mut blocks = Vec::new();
-    for url in find_urls(prompt) {
-        if let Some(text) = fetch_url_text(&url).await {
-            blocks.push(format!("Page {url}:\n{text}"));
-        }
-        if blocks.join("\n").len() > 3500 {
-            break;
-        }
-    }
-    let joined = blocks.join("\n\n");
-    joined.chars().take(4000).collect()
-}
-
-pub(crate) fn resolve_ollama_key(configured: &str) -> String {
-    if let Ok(v) = std::env::var("OLLAMA_API_KEY") {
-        let v = v.trim().to_string();
-        if !v.is_empty() {
-            return v;
-        }
-    }
-    configured.trim().to_string()
-}
-
-#[derive(Deserialize, Default)]
-struct HostedSearchResponse {
-    #[serde(default)]
-    results: Vec<HostedResult>,
-}
-
-#[derive(Deserialize, Default)]
-struct HostedResult {
-    #[serde(default)]
-    title: String,
-    #[serde(default)]
-    url: String,
-    #[serde(default)]
-    content: String,
-}
-
-#[derive(Deserialize, Default)]
-struct HostedFetchResponse {
-    #[serde(default)]
-    content: String,
-}
-
-fn web_disabled_flag() -> &'static Mutex<bool> {
-    static DISABLED: OnceLock<Mutex<bool>> = OnceLock::new();
-    DISABLED.get_or_init(|| Mutex::new(false))
-}
-
-/// True once the hosted web API reports out-of-credits: web is turned off
-/// and the bot answers from knowledge without mentioning it.
-pub(crate) fn web_search_disabled() -> bool {
-    *web_disabled_flag()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-}
-
-pub(crate) fn disable_web_search() {
-    let mut flag = web_disabled_flag()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if !*flag {
-        *flag = true;
-        eprintln!("web search disabled: out of credits — answering from knowledge");
-    }
-}
-
-pub(crate) fn is_out_of_credits_err(s: &str) -> bool {
-    let t = s.to_lowercase();
-    t.contains("402")
-        || t.contains("payment required")
-        || t.contains("out of credit")
-        || t.contains("out-of-credit")
-        || t.contains("insufficient credit")
-        || t.contains("insufficient balance")
-        || t.contains("insufficient funds")
-        || t.contains("insufficient quota")
-        || t.contains("no credits")
-        || t.contains("credits exhausted")
-        || t.contains("credit exhausted")
-        || t.contains("not enough credit")
-        || t.contains("billing")
-        || t.contains("free limit")
-        || t.contains("free-tier limit")
-        || t.contains("must upgrade")
-        || t.contains("upgrade required")
-        || t.contains("web search disabled")
-}
-
-fn search_backoff() -> &'static Mutex<Option<std::time::Instant>> {
-    static BACKOFF: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
-    BACKOFF.get_or_init(|| Mutex::new(None))
-}
-
-pub(crate) fn rate_limited() -> bool {
-    search_backoff()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .map(|until| std::time::Instant::now() < until)
-        .unwrap_or(false)
-}
-
-fn cool_down() {
-    if let Ok(mut b) = search_backoff().lock() {
-        *b = Some(std::time::Instant::now() + std::time::Duration::from_secs(120));
-    }
-}
-
-pub(crate) async fn hosted_search(
-    key: &str,
-    query: &str,
-) -> Result<Vec<(String, String, String)>, String> {
-    if web_search_disabled() {
-        return Err("web search disabled (out of credits)".into());
-    }
-    if rate_limited() {
-        return Err("ollama 429: backing off after rate limit".into());
-    }
-    let req = serde_json::json!({"query": query});
-    let resp = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        client()
-            .post("https://ollama.com/api/web_search")
-            .header("Authorization", format!("Bearer {key}"))
-            .json(&req)
-            .send(),
-    )
-    .await
-    .map_err(|_| "request timed out".to_string())?
-    .map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let body: String = body.chars().take(200).collect();
-        eprintln!("hosted_search: status={status} body={body}");
-        let msg = format!("ollama {status}: {body}");
-        if status.as_u16() == 402 || is_out_of_credits_err(&msg) {
-            disable_web_search();
-            return Err("web search disabled (out of credits)".into());
-        }
-        if status.as_u16() == 429 {
-            cool_down();
-            return Err(
-                "ollama 429: web search rate limited, try again in a couple minutes".into(),
-            );
-        }
-        return Err(msg);
-    }
-    let data: HostedSearchResponse =
-        tokio::time::timeout(std::time::Duration::from_secs(15), resp.json())
-            .await
-            .map_err(|_| "response read timed out".to_string())?
-            .map_err(|e| e.to_string())?;
-    let out: Vec<(String, String, String)> = data
-        .results
-        .into_iter()
-        .filter(|i| !i.title.trim().is_empty() && !i.url.trim().is_empty())
-        .take(5)
-        .map(|i| {
-            (
-                i.title.trim().to_string(),
-                i.url.trim().to_string(),
-                i.content.trim().to_string(),
-            )
-        })
-        .collect();
-    eprintln!("hosted_search: results={}", out.len());
-    Ok(out)
-}
-
-pub(crate) async fn hosted_fetch(key: &str, url: &str) -> Option<String> {
-    if web_search_disabled() {
-        return None;
-    }
-    let req = serde_json::json!({"url": url});
-    let resp = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        client()
-            .post("https://ollama.com/api/web_fetch")
-            .header("Authorization", format!("Bearer {key}"))
-            .json(&req)
-            .send(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let data: HostedFetchResponse =
-        tokio::time::timeout(std::time::Duration::from_secs(15), resp.json())
-            .await
-            .ok()?
-            .ok()?;
-    let text = data.content.trim().to_string();
-    if text.is_empty() {
-        return None;
-    }
-    Some(text.chars().take(3000).collect())
-}
-
-pub(crate) const RATE_LIMIT_USER_MSG: &str =
-    "Web search is rate limited right now, try again in a couple minutes.";
 
 pub(crate) fn is_rate_limit_err(s: &str) -> bool {
     let t = s.to_lowercase();
@@ -916,95 +288,7 @@ pub(crate) fn is_api_full_err(s: &str) -> bool {
 }
 
 pub(crate) fn api_full_message() -> String {
-    "Sorry, I'm running hot right now (API full/rate limited) nya :3 — I can't reach fresh info, but ask me again in a minute or ask something I can answer from what I already know.".to_string()
-}
-
-fn offline_tool_fallback() -> String {
-    "Web search is currently unavailable (rate limited). Answer from your own knowledge as best you can. Briefly note your knowledge may be outdated. Never mention searching, tools, or rate limits unless asked.".to_string()
-}
-
-pub(crate) async fn run_websearch(key: &str, query: &str) -> String {
-    let t0 = std::time::Instant::now();
-    let query: String = query.chars().take(200).collect();
-    // Silent offline path: no key or web disabled (out of credits) -> empty,
-    // so callers answer from knowledge without ever mentioning the web.
-    if key.trim().is_empty() || web_search_disabled() {
-        return String::new();
-    }
-    let mut blocks = Vec::new();
-    let fresh = match hosted_search(key, &query).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("run_websearch: {e}");
-            if is_out_of_credits_err(&e) {
-                disable_web_search();
-                return String::new();
-            }
-            if is_rate_limit_err(&e) {
-                return RATE_LIMIT_USER_MSG.to_string();
-            }
-            Vec::new()
-        }
-    };
-    if !fresh.is_empty() {
-        eprintln!("run_websearch: src=ollama results={}", fresh.len());
-        let mut lines = Vec::new();
-        for (title, link, snip) in fresh.iter().take(5) {
-            if snip.is_empty() {
-                lines.push(format!("{title} ({link})"));
-            } else {
-                lines.push(format!("{title} ({link}): {snip}"));
-            }
-        }
-        blocks.push(format!("Fresh web results for {query}:\n- {}\nAnswer directly with the facts and no preamble about searching, summarizing, or results.", lines.join("\n- ")));
-        for (_, link, _) in fresh.iter().take(2) {
-            if let Some(text) = hosted_fetch(key, link).await {
-                blocks.push(format!("Page {link}:\n{text}"));
-            }
-            if blocks.join("\n").len() > 3500 {
-                break;
-            }
-        }
-    }
-    let joined = blocks.join("\n\n");
-    let out: String = joined.chars().take(4000).collect();
-    eprintln!(
-        "run_websearch: query_chars={} blocks={} out_chars={} ms={}",
-        query.chars().count(),
-        blocks.len(),
-        out.chars().count(),
-        t0.elapsed().as_millis()
-    );
-    out
-}
-
-pub(crate) async fn web_status(key: &str) -> String {
-    if web_search_disabled() {
-        return "web: off (out of credits — answering from knowledge)".to_string();
-    }
-    if key.trim().is_empty() {
-        return "web: off (no ollama_api_key — answering from knowledge)".to_string();
-    }
-    let t0 = std::time::Instant::now();
-    let ms;
-    let n = match hosted_search(key, "test").await {
-        Ok(r) => {
-            ms = t0.elapsed().as_millis();
-            r.len()
-        }
-        Err(e) => {
-            ms = t0.elapsed().as_millis();
-            if is_out_of_credits_err(&e) {
-                disable_web_search();
-                return "web: off (out of credits — answering from knowledge)".to_string();
-            }
-            return format!("web: FAIL {e} ms={ms}");
-        }
-    };
-    if n == 0 {
-        return format!("web: FAIL ollama hosted search returned nothing ms={ms}");
-    }
-    format!("web: ok src=ollama results={n} ms={ms}")
+    "Sorry, I'm running hot right now (API full/rate limited) nya :3 — ask me again in a minute or ask something I can answer from what I already know.".to_string()
 }
 
 const SYSTEM_PROMPT: &str = "You are artixy, a friendly artix linux neko cat always yourself. never type [Artixy]: and be like neko beastfolk human texting: casual, a bit silly, simple minded short replies and saying words like nya, meow, and using :3 ";
@@ -1013,16 +297,12 @@ async fn chat_once(
     url: &str,
     model: &str,
     messages: &[serde_json::Value],
-    with_tools: bool,
 ) -> Result<ChatMessageOwned, Error> {
-    let mut req = serde_json::json!({
+    let req = serde_json::json!({
         "model": model,
         "messages": messages,
         "stream": false,
     });
-    if with_tools {
-        req["tools"] = tool_defs();
-    }
     let resp = client().post(url).json(&req).send().await?;
     if !resp.status().is_success() {
         let status = resp.status();
@@ -1036,10 +316,7 @@ async fn chat_once(
     }
     if let Some(r) = parsed.response {
         if !r.trim().is_empty() {
-            return Ok(ChatMessageOwned {
-                content: r,
-                tool_calls: None,
-            });
+            return Ok(ChatMessageOwned { content: r });
         }
     }
     Err("ollama returned an empty reply".into())
@@ -1047,15 +324,7 @@ async fn chat_once(
 
 pub(crate) fn stale_history_line(s: &str) -> bool {
     let t = s.trim().to_lowercase();
-    t.contains("couldn't reach the web")
-        || t.contains("could not reach the web")
-        || t.contains("could not access")
-        || t == "web search returned no results."
-        || t.contains("web search is not configured")
-        || t.contains("web search is rate limited")
-        || t.contains("web search disabled")
-        || t.contains("running hot right now")
-        || t.contains("out of credits")
+    t.contains("running hot right now")
 }
 
 pub(crate) async fn glitch_text(host: &str, model: &str) -> String {
@@ -1066,7 +335,7 @@ pub(crate) async fn glitch_text(host: &str, model: &str) -> String {
         serde_json::json!({"role": "system", "content": SYSTEM_PROMPT}),
         serde_json::json!({"role": "user", "content": "You just glitched out. Tell the user cutely in one short sentence, no details."}),
     ];
-    match chat_once(&url, model, &messages, false).await {
+    match chat_once(&url, model, &messages).await {
         Ok(m) => {
             let text = strip_meta_preamble(&strip_leading_speaker(&clean_reply(&m.content), &[]));
             if text.trim().is_empty() {
@@ -1085,30 +354,13 @@ pub(crate) async fn glitch_text(host: &str, model: &str) -> String {
 pub(crate) async fn ollama_chat(
     host: &str,
     model: &str,
-    okey: &str,
     channel: u64,
     speaker: &str,
     prompt: &str,
 ) -> Result<String, Error> {
     let host = host.trim_end_matches('/');
     let url = format!("{host}/api/chat");
-    // When web is disabled (out of credits / no key) the model must answer
-    // from knowledge WITHOUT mentioning search, web, credits or limits.
-    let web_off = web_search_disabled() || okey.trim().is_empty();
-    let search_asked = explicit_search_asked(prompt);
-    let want_web = search_asked && !web_off;
     let tagged = format!("[{}]: {}", speaker_tag(speaker), prompt);
-    let pages = linked_pages(prompt).await;
-    let mut user_text = if pages.trim().is_empty() {
-        tagged.clone()
-    } else {
-        format!("{tagged}\n\n[linked pages below, prefer over training data]\n{pages}")
-    };
-    if web_off && search_asked {
-        user_text.push_str(
-            "\n\n[Answer from your own knowledge. Do not mention web search, browsing, credits, or any limitation.]",
-        );
-    }
     let past = snapshot(channel);
     let mut names: Vec<String> = vec![speaker_tag(speaker)];
     for e in &past {
@@ -1145,25 +397,9 @@ pub(crate) async fn ollama_chat(
             messages.push(serde_json::json!({"role": role, "content": e.content}));
         }
     }
-    messages.push(serde_json::json!({"role": "user", "content": user_text}));
-    let mut used_tools = want_web;
-    let first = match chat_once(&url, model, &messages, want_web).await {
+    messages.push(serde_json::json!({"role": "user", "content": tagged.clone()}));
+    let first = match chat_once(&url, model, &messages).await {
         Ok(m) => m,
-        Err(e) if e.to_string().contains("does not support tools") => {
-            eprintln!("ollama_chat: model lacks tool support, retry without tools");
-            used_tools = false;
-            match chat_once(&url, model, &messages, false).await {
-                Ok(m) => m,
-                Err(e2) if is_api_full_err(&e2.to_string()) => {
-                    // Alternative approach: don't be unhelpful — answer from memory.
-                    let fb = api_full_message();
-                    push(channel, tagged.clone(), tagged.clone());
-                    push(channel, "assistant".to_string(), fb.clone());
-                    return Ok(fb);
-                }
-                Err(e2) => return Err(e2),
-            }
-        }
         Err(e) if is_api_full_err(&e.to_string()) => {
             eprintln!("ollama_chat: api full on first call, offline fallback");
             let fb = api_full_message();
@@ -1173,147 +409,7 @@ pub(crate) async fn ollama_chat(
         }
         Err(e) => return Err(e),
     };
-    let mut calls: Vec<(String, String)> = Vec::new();
-    if want_web {
-        if let Some(list) = first.tool_calls.clone() {
-            for c in list {
-                if c.function.name.eq_ignore_ascii_case("websearch") {
-                    let q = tool_query(&c.function.arguments);
-                    if !q.trim().is_empty() {
-                        calls.push((c.function.name.clone(), q));
-                    }
-                }
-            }
-        }
-        if calls.is_empty() {
-            if let Some((_, q)) = schema_tool_call(&first.content) {
-                calls.push(("websearch".to_string(), q));
-                messages.push(
-                    serde_json::json!({"role": "assistant", "content": first.content.clone()}),
-                );
-            }
-        } else {
-            messages.push(serde_json::json!({
-                "role": "assistant",
-                "content": first.content.clone(),
-                "tool_calls": first.tool_calls.clone().unwrap_or_default().iter().map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>(),
-            }));
-        }
-        if calls.is_empty() && !used_tools && looks_like_search_placeholder(&first.content) {
-            let auto_q: String = prompt.chars().take(200).collect();
-            if !auto_q.trim().is_empty() {
-                calls.push(("websearch".to_string(), auto_q));
-            }
-        }
-    }
-    let has_unknown_tools = first
-        .tool_calls
-        .as_ref()
-        .map(|v| {
-            !v.is_empty()
-                && v.iter()
-                    .all(|c| !c.function.name.eq_ignore_ascii_case("websearch"))
-        })
-        .unwrap_or(false);
-    if calls.is_empty() && has_unknown_tools {
-        if !clean_reply(&first.content).trim().is_empty() {
-            return finalize_reply(channel, tagged, &names, &first.content);
-        }
-        match chat_once(&url, model, &messages, false).await {
-            Ok(retry) => return finalize_reply(channel, tagged, &names, &retry.content),
-            Err(e) if is_api_full_err(&e.to_string()) => {
-                let fb = api_full_message();
-                push(channel, tagged.clone(), tagged.clone());
-                push(channel, "assistant".to_string(), fb.clone());
-                return Ok(fb);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    if calls.is_empty() {
-        if !looks_like_search_placeholder(&first.content) {
-            return finalize_reply(channel, tagged, &names, &first.content);
-        }
-        match chat_once(&url, model, &messages, false).await {
-            Ok(retry) => return finalize_reply(channel, tagged, &names, &retry.content),
-            Err(e) if is_api_full_err(&e.to_string()) => {
-                let fb = api_full_message();
-                push(channel, tagged.clone(), tagged.clone());
-                push(channel, "assistant".to_string(), fb.clone());
-                return Ok(fb);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    let mut rounds = 0;
-    let mut pending: Option<String> = calls.into_iter().next().map(|(_, q)| q);
-    loop {
-        let query = pending.take().unwrap_or_default();
-        if query.trim().is_empty() {
-            return Err("ollama returned an empty reply".into());
-        }
-        // Silent offline path: empty / disabled (out of credits) -> answer
-        // from knowledge without ever mentioning search or the web.
-        // Rate-limited -> model gets a fallback note (never shown to user).
-        let raw_result = run_websearch(okey, &query).await;
-        let tool_result = if raw_result.trim().is_empty()
-            || is_out_of_credits_err(&raw_result)
-            || web_search_disabled()
-        {
-            "No web results found. Answer briefly from your own knowledge and never mention searching or the web.".to_string()
-        } else if is_rate_limit_err(&raw_result) || rate_limited() {
-            offline_tool_fallback()
-        } else {
-            raw_result
-        };
-        messages.push(serde_json::json!({"role": "tool", "content": tool_result}));
-        let second = match chat_once(&url, model, &messages, false).await {
-            Ok(m) => m,
-            Err(e) if is_api_full_err(&e.to_string()) => {
-                let fb = api_full_message();
-                push(channel, tagged.clone(), tagged.clone());
-                push(channel, "assistant".to_string(), fb.clone());
-                return Ok(fb);
-            }
-            Err(e) => return Err(e),
-        };
-        let mut next: Option<String> = None;
-        if let Some(list) = second.tool_calls.clone() {
-            for c in list {
-                if c.function.name.eq_ignore_ascii_case("websearch") {
-                    let q = tool_query(&c.function.arguments);
-                    if !q.trim().is_empty() {
-                        next = Some(q);
-                        break;
-                    }
-                }
-            }
-            if next.is_some() {
-                messages.push(serde_json::json!({
-                    "role": "assistant",
-                    "content": second.content.clone(),
-                    "tool_calls": second.tool_calls.clone().unwrap_or_default().iter().map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>(),
-                }));
-            }
-        }
-        if next.is_none() {
-            if let Some((_, q)) = schema_tool_call(&second.content) {
-                next = Some(q);
-                messages.push(
-                    serde_json::json!({"role": "assistant", "content": second.content.clone()}),
-                );
-            }
-        }
-        rounds += 1;
-        if let Some(q) = next {
-            if rounds >= 2 {
-                return finalize_reply(channel, tagged, &names, &second.content);
-            }
-            pending = Some(q);
-            continue;
-        }
-        return finalize_reply(channel, tagged, &names, &second.content);
-    }
+    finalize_reply(channel, tagged, &names, &first.content)
 }
 
 pub(crate) fn clear_history(channel: u64) {
@@ -1329,19 +425,6 @@ pub(crate) fn record_artixy(channel: u64, text: &str) {
     }
     let kept: String = t.chars().take(1500).collect();
     push(channel, "assistant".to_string(), kept);
-}
-
-pub(crate) fn record_user(channel: u64, speaker: &str, text: &str) {
-    let t = text.trim();
-    if t.is_empty() {
-        return;
-    }
-    let kept: String = t.chars().take(1500).collect();
-    push(
-        channel,
-        "user".to_string(),
-        format!("[{}]: {}", speaker_tag(speaker), kept),
-    );
 }
 
 pub(crate) async fn model_present(host: &str, model: &str) -> Option<bool> {
@@ -1461,40 +544,19 @@ mod tests {
         assert!(is_rate_limit_err("ollama 429: too many requests"));
         assert!(is_rate_limit_err("Rate limit exceeded, try again"));
         assert!(is_rate_limit_err("quota exceeded"));
-        assert!(!is_rate_limit_err("No web results found"));
+        assert!(!is_rate_limit_err("connection refused"));
     }
 
     #[test]
     fn api_full_covers_overload_and_503() {
         assert!(is_api_full_err("ollama 503: overloaded"));
         assert!(is_api_full_err("server is busy, try again in a bit"));
-        assert!(is_api_full_err(RATE_LIMIT_USER_MSG));
+        assert!(is_api_full_err("ollama 429: too many requests"));
         assert!(!is_api_full_err("connection refused"));
     }
 
     #[test]
-    fn stale_history_skips_rate_limit_lines() {
-        assert!(stale_history_line(
-            "Web search is rate limited right now, try again"
-        ));
+    fn stale_history_skips_api_full_lines() {
         assert!(stale_history_line(&api_full_message()));
-    }
-
-    #[test]
-    fn out_of_credits_detected() {
-        assert!(is_out_of_credits_err("ollama 402: Payment Required"));
-        assert!(is_out_of_credits_err("out of credits, please upgrade"));
-        assert!(is_out_of_credits_err("insufficient balance"));
-        assert!(is_out_of_credits_err("billing issue, free limit reached"));
-        assert!(is_out_of_credits_err(
-            "web search disabled (out of credits)"
-        ));
-        assert!(!is_out_of_credits_err("No web results found"));
-    }
-
-    #[test]
-    fn stale_history_skips_credit_lines() {
-        assert!(stale_history_line("web search disabled (out of credits)"));
-        assert!(stale_history_line("could not access the web"));
     }
 }

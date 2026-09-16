@@ -2,15 +2,12 @@ mod ai;
 mod commands;
 mod config;
 mod events;
-mod feed;
 mod kitty;
 mod live;
 mod pk;
 mod pngencode;
 mod scrub;
 mod termrender;
-mod tui;
-mod tuirelay;
 mod util;
 mod vm;
 mod webhook;
@@ -19,7 +16,7 @@ use poise::serenity_prelude as serenity;
 
 use crate::commands::{
     ai, botrestart, help, info, notify, ps, purge_replies, restart, run, sayas, send, shell,
-    admin, start, status, stop, upload, user, warmode, websearch,
+    admin, start, status, stop, upload, user, warmode,
 };
 use crate::config::{Allowed, AllowedFile, BotSettings, Data, apply_legacy_import, config_file_path, ensure_config_template, load_file_config, save_json};
 use crate::util::project_dir;
@@ -35,35 +32,7 @@ async fn main() {
         || args.get(1).map(|s| s.as_str()) == Some("--help")
         || args.get(1).map(|s| s.as_str()) == Some("-h")
     {
-        println!("artixy — run with no args to start the Discord bot, or `artixy tui` for the local fake-discord terminal UI.");
-        return;
-    }
-    if args.get(1).map(|s| s.as_str()) == Some("tui") {
-        ensure_config_template();
-        let file_config = load_file_config();
-        let token = file_config
-            .discord_token
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| std::env::var("DISCORD_TOKEN").ok().filter(|s| !s.trim().is_empty()));
-        let settings = crate::tui::local_settings(
-            file_config.ai_enabled,
-            if crate::ai::valid_model_name(&file_config.ai_model) {
-                file_config.ai_model.clone()
-            } else {
-                crate::ai::default_model()
-            },
-            if file_config.ollama_host.trim().is_empty() {
-                crate::ai::default_host()
-            } else {
-                file_config.ollama_host.clone()
-            },
-            &file_config.ollama_api_key,
-            token,
-        );
-        if let Err(e) = crate::tui::run_tui(settings).await {
-            eprintln!("tui error: {e}");
-        }
+        println!("artixy — run with no args to start the Discord bot.");
         return;
     }
     let fresh_config = !config_file_path().exists();
@@ -163,32 +132,18 @@ async fn main() {
             } else {
                 file_config.ollama_host.clone()
             },
-            ollama_api_key: file_config.ollama_api_key.trim().to_string(),
         })),
         shells: std::sync::Arc::new(tokio::sync::RwLock::new(file_config.shells.clone())),
     };
     tokio::spawn(crate::config::watch_config(data.clone()));
-    // Heartbeat for the TUI live indicator: without it the TUI only sees
-    // chat traffic, so it flips off during quiet periods while the bot is up.
-    tokio::spawn(crate::feed::heartbeat_loop());
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            // Text prefix so commands also work as plain `/cmd` messages —
-            // this is what lets the TUI run real bot commands by posting
-            // them as artixy (gated by command_check + claim file, so only
-            // TUI-relayed self messages execute; everything else bot-authored
-            // is denied silently).
+            // Text prefix so commands also work as plain `/cmd` messages.
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some("/".to_string()),
-                execute_self_messages: true,
-                ignore_bots: false,
                 ..Default::default()
             },
-            // TUI-relayed self messages may run; other bots may not.
-            command_check: Some(|ctx| {
-                Box::pin(async move { crate::commands::tui_relay_check(ctx).await })
-            }),
             commands: vec![
                 help(),
                 ps(),
@@ -209,7 +164,6 @@ async fn main() {
                 warmode(),
                 upload(),
                 ai(),
-                websearch(),
             ],
             on_error: |error| {
                 Box::pin(async move {
@@ -248,9 +202,7 @@ async fn main() {
         .build();
 
     let intents = serenity::GatewayIntents::non_privileged()
-        | serenity::GatewayIntents::MESSAGE_CONTENT
-        | serenity::GatewayIntents::GUILD_MESSAGE_TYPING
-        | serenity::GatewayIntents::DIRECT_MESSAGE_TYPING;
+        | serenity::GatewayIntents::MESSAGE_CONTENT;
     let mut client = serenity::ClientBuilder::new(token, intents)
         .framework(framework)
         .await

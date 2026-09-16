@@ -10,28 +10,6 @@ use crate::{
     Context, Error,
 };
 
-/// True when this is a TUI-relayed self message: bot-authored, exact
-/// message id claimed by the TUI (see tuirelay). The TUI operator holds the
-/// machine + token, so relayed calls run with owner rights.
-pub(crate) fn is_tui_relay(ctx: Context<'_>) -> bool {
-    if let poise::Context::Prefix(pctx) = ctx {
-        return pctx.msg.author.bot && crate::tuirelay::is_claimed(pctx.msg.id.get());
-    }
-    false
-}
-
-/// Global framework check: bot-authored messages only run when the TUI
-/// claimed that exact message id. Humans and slash commands pass through
-/// to the normal per-command auth below.
-pub(crate) async fn tui_relay_check(ctx: Context<'_>) -> Result<bool, Error> {
-    if let poise::Context::Prefix(pctx) = ctx {
-        if pctx.msg.author.bot && pctx.msg.webhook_id.is_none() {
-            return Ok(crate::tuirelay::is_claimed(pctx.msg.id.get()));
-        }
-    }
-    Ok(true)
-}
-
 pub(crate) async fn real_id(ctx: Context<'_>) -> u64 {
     if let poise::Context::Prefix(pctx) = ctx {
         if pctx.msg.webhook_id.is_some() {
@@ -44,34 +22,115 @@ pub(crate) async fn real_id(ctx: Context<'_>) -> u64 {
 }
 
 pub(crate) async fn is_authed(ctx: Context<'_>) -> bool {
-    if is_tui_relay(ctx) {
-        return true;
-    }
     let id = real_id(ctx).await;
     let a = ctx.data().allowed.read().await;
     crate::config::access_allowed(a.owner, &a.users, &a.blocked, id)
 }
 
 pub(crate) async fn is_owner(ctx: Context<'_>) -> bool {
-    if is_tui_relay(ctx) {
-        return true;
-    }
-    real_id(ctx).await == ctx.data().allowed.read().await.owner
+    let id = real_id(ctx).await;
+    let a = ctx.data().allowed.read().await;
+    !a.blocked.contains(&id) && id == a.owner
 }
 
 pub(crate) async fn is_elevated(ctx: Context<'_>) -> bool {
-    if is_tui_relay(ctx) {
-        return true;
-    }
     let id = real_id(ctx).await;
     let a = ctx.data().allowed.read().await;
-    crate::config::elevated_allowed(a.owner, &a.admins, id)
+    crate::config::elevated_allowed(a.owner, &a.admins, &a.blocked, id)
+}
+
+/// Basenames `/send` must never exfiltrate, even for the owner.
+/// Case-insensitive; intentionally broad (secure default).
+pub(crate) fn is_sensitive_send_name(name: &str) -> bool {
+    let n = name.trim().to_lowercase();
+    if n.is_empty() || n.starts_with('.') {
+        return true;
+    }
+    if n == "config.toml" || n == ".env" || n == "token" {
+        return true;
+    }
+    if n.contains(".env") || n.contains("config.toml") {
+        return true;
+    }
+    for suffix in [".pem", ".key", ".p12", ".pfx", ".token"] {
+        if n.ends_with(suffix) {
+            return true;
+        }
+    }
+    for prefix in ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"] {
+        if n.starts_with(prefix) {
+            return true;
+        }
+    }
+    for infix in ["secret", "credential", "private_key", "token", "webhook"] {
+        if n.contains(infix) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when no component of a share-relative path is a dotfile/dotdir.
+pub(crate) fn share_rel_has_dot_component(rel: &std::path::Path) -> bool {
+    rel.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .map(|s| s.starts_with('.'))
+            .unwrap_or(true)
+    })
+}
+
+/// Lexically normalize a guest absolute dir: resolve `.`/`..`/dup slashes
+/// without touching the guest fs. Returns `None` on bad input.
+pub(crate) fn normalize_guest_dir(dir: &str) -> Option<String> {
+    let d = dir.trim();
+    if !d.starts_with('/') || d.contains('\0') || d.len() > 512 {
+        return None;
+    }
+    let mut stack: Vec<&str> = Vec::new();
+    for part in d.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if stack.pop().is_none() {
+                    return None;
+                }
+            }
+            p => stack.push(p),
+        }
+    }
+    if stack.is_empty() {
+        return Some("/".to_string());
+    }
+    for p in &stack {
+        if p.len() > 128 {
+            return None;
+        }
+    }
+    Some(format!("/{}", stack.join("/")))
+}
+
+/// Allowlist for `/upload` destinations. Managers may only write to the
+/// shared staging dir or their own linked home dir — never `/`, `/etc`,
+/// `/root`, or someone else's home.
+pub(crate) fn allowed_upload_dir(normalized: &str, linked: Option<&str>) -> bool {
+    if normalized == "/tmp/artixy-uploads"
+        || normalized.starts_with("/tmp/artixy-uploads/")
+    {
+        return true;
+    }
+    if let Some(u) = linked {
+        if crate::util::valid_runas(u) {
+            let home = format!("/home/{u}");
+            if normalized == home || normalized.starts_with(&format!("{home}/")) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub(crate) async fn need_auth(ctx: Context<'_>) -> Result<bool, Error> {
-    if is_tui_relay(ctx) {
-        return Ok(true);
-    }
     if is_authed(ctx).await {
         return Ok(true);
     }
@@ -88,9 +147,6 @@ pub(crate) async fn is_blocked(ctx: Context<'_>) -> bool {
 }
 
 pub(crate) async fn need_public(ctx: Context<'_>) -> Result<bool, Error> {
-    if is_tui_relay(ctx) {
-        return Ok(true);
-    }
     if !is_blocked(ctx).await {
         return Ok(true);
     }
@@ -123,10 +179,10 @@ async fn require_vm(ctx: Context<'_>) -> Option<String> {
 }
 
 pub(crate) const HELP: &str = "\
-**Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. VM commands need owner + added users, but AI chat (`@artixy`), `/ai` view/forget and `/websearch` work for everyone except blocked users. Slash commands, or the same `/command` as plain text (prefix style).\n\
+**Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. VM commands need owner + added users, but AI chat (`@artixy`) and `/ai` view/forget work for everyone except blocked users. Slash commands, or the same `/command` as plain text (prefix style).\n\
 \n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
-\n**Who can use me**\nOwner does everything. Admins (`admin_ids` in config or `/admin add`) do everything except `/admin add/remove`, which stay owner-only. Managers run VM commands + AI. Everyone except blocked users gets AI chat and `/websearch`.\n`/user` — one command for linux accounts (owner/admin): `/user list` shows owner + admins + managers, `/user add @user` creates their Linux account in Artix and links it, `/user remove @user` deletes their Linux account in the VM (and revokes bot access if they had it)\n`/admin` — one command for bot admins: `/admin list` shows admins (owner/admin), `/admin add @user` (owner only) grants everything except `/admin` mgmt itself, `/admin remove @user` (owner only) revokes them\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner/admin: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner/admin: delete their replies to my messages here\n`/warmode <true|false>` — owner/admin: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner/admin (`/ai true model:llama3.1` or `/ai true model:qwen3:4b` for local Ollama models), view is for all users. When enabled, ping me (`@artixy <question>` or `artixy <question>`) and I answer with the configured model.\n`/websearch <query>` — Ollama hosted web search, simple list of answers (needs `ollama_api_key`).\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
-\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/send <path>` — upload a host file here (absolute path, ~20MB max)\n`/sayas [message] [reply_to] [file] [file2] [file3]` — owner/admin: `no args` toggles auto say-as-artix mode, `message` and/or attached files send as artix (reply_to = message ID/link). Files attached to the slash command (or to the `;sayas` prefix message) are re-uploaded as artix. Output is ephemeral (only you see it).\n\
+\n**Who can use me**\nOwner does everything. Admins (`admin_ids` in config or `/admin add`) do everything except `/admin add/remove`, which stay owner-only. Managers run VM commands + AI. Everyone except blocked users gets AI chat.\n`/user` — one command for linux accounts (owner/admin): `/user list` shows owner + admins + managers, `/user add @user` creates their Linux account in Artix and links it, `/user remove @user` deletes their Linux account in the VM (and revokes bot access if they had it)\n`/admin` — one command for bot admins: `/admin list` shows admins (owner/admin), `/admin add @user` (owner only) grants everything except `/admin` mgmt itself, `/admin remove @user` (owner only) revokes them\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner/admin: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner/admin: delete their replies to my messages here\n`/warmode <true|false>` — owner/admin: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner/admin (`/ai true model:llama3.1` or `/ai true model:qwen3:4b` for local Ollama models), view is for all users. When enabled, ping me (`@artixy <question>` or `artixy <question>`) and I answer with the configured model.\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n
+\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/send <path>` — upload a host file here from the bot's `share/` dir (absolute path, ~20MB max; secrets/keys/config never send)\n`/upload` — attach a file into the VM's `/tmp/artixy-uploads/` or your own `/home/<you>/`\n`/sayas [message] [reply_to] [file] [file2] [file3]` — owner/admin: `no args` toggles auto say-as-artix mode, `message` and/or attached files send as artix (reply_to = message ID/link). Files attached to the slash command (or to the `;sayas` prefix message) are re-uploaded as artix. Output is ephemeral (only you see it).\n\
 \n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
 
 #[poise::command(
@@ -713,7 +769,7 @@ pub(crate) async fn sayas(
 )]
 pub(crate) async fn send(
     ctx: Context<'_>,
-    #[description = "Absolute path of a file inside the bot's project dir (max ~20MB)"] path: String,
+    #[description = "Absolute path of a file inside the bot's share dir (max ~20MB)"] path: String,
 ) -> Result<(), Error> {
     if !need_auth(ctx).await? {
         return Ok(());
@@ -735,15 +791,53 @@ pub(crate) async fn send(
     let target = match tokio::fs::canonicalize(p).await {
         Ok(t) => t,
         Err(_) => {
-            post_text(ctx, "No readable file there (must exist, absolute path, under the project dir, ~20MB max).")
+            post_text(ctx, "No readable file there (must exist, absolute path, under the bot's `share/` dir, ~20MB max).")
                 .await?;
             return Ok(());
         }
     };
-    if !target.starts_with(&root) {
-        post_text(ctx, "That path is outside the bot's project dir — not sending it.")
+    // Deny-by-default: only files under `<project>/share/` may leave the
+    // host. `.env`, `config.toml`, keys and anything outside `share/` is
+    // never sent — not even by the owner.
+    let share = match tokio::fs::canonicalize(root.join("share")).await {
+        Ok(s) => s,
+        Err(_) => {
+            post_text(
+                ctx,
+                "Nothing is sendable yet — create a `share/` dir in the bot's project dir and put files there.",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    if !target.starts_with(&share) {
+        post_text(ctx, "That path is outside the bot's `share/` dir — not sending it.")
             .await?;
         return Ok(());
+    }
+    if let Ok(rel) = target.strip_prefix(&share) {
+        if share_rel_has_dot_component(rel) {
+            post_text(ctx, "Dotfiles and dot-dirs are never sent.").await?;
+            return Ok(());
+        }
+    }
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    if is_sensitive_send_name(&file_name) {
+        eprintln!("send refused (sensitive name): {}", file_name);
+        post_text(ctx, "Refusing to send secrets, keys, tokens or config files.")
+            .await?;
+        return Ok(());
+    }
+    if let Ok(cfg_path) = tokio::fs::canonicalize(crate::config::config_file_path()).await {
+        if target == cfg_path {
+            post_text(ctx, "Refusing to send secrets, keys, tokens or config files.")
+                .await?;
+            return Ok(());
+        }
     }
     match tokio::fs::metadata(&target).await {
         Ok(m) if m.is_file() && m.len() < 20 * 1024 * 1024 => {
@@ -764,7 +858,7 @@ pub(crate) async fn send(
             }
         }
         _ => {
-            post_text(ctx, "No readable file there (absolute path under the project dir, ~20MB max).")
+            post_text(ctx, "No readable file there (absolute path under the bot's `share/` dir, ~20MB max).")
                 .await?;
         }
     }
@@ -799,7 +893,7 @@ async fn guest_mkdir(vm: &str, dir: &str) -> Result<(), Error> {
 pub(crate) async fn upload(
     ctx: Context<'_>,
     #[description = "File to upload into the VM"] file: serenity::Attachment,
-    #[description = "Absolute destination dir in the VM (created if missing)"] dir: String,
+    #[description = "Destination dir in the VM: /tmp/artixy-uploads/... or your own /home/<you>/..."] dir: String,
 ) -> Result<(), Error> {
     use base64::Engine as _;
     if !need_auth(ctx).await? {
@@ -810,11 +904,6 @@ pub(crate) async fn upload(
         post_text(ctx, "That file is over ~20MB — too big to upload.").await?;
         return Ok(());
     }
-    let dir = dir.trim();
-    if !dir.starts_with('/') {
-        post_text(ctx, "Absolute dir only.").await?;
-        return Ok(());
-    }
     let Some(name) = std::path::Path::new(&file.filename)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -823,6 +912,37 @@ pub(crate) async fn upload(
         post_text(ctx, "Bad file name.").await?;
         return Ok(());
     };
+    // Jail: only the shared staging dir or the caller's own linked home
+    // dir. Anything else (/, /etc, /root, someone else's home) is refused
+    // before anything is created in the guest.
+    let Some(normalized) = normalize_guest_dir(dir.trim()) else {
+        post_text(ctx, "Bad destination dir — use `/tmp/artixy-uploads/...` or your own `/home/<you>/...`.").await?;
+        return Ok(());
+    };
+    let linked = linked_user(ctx.data(), ctx.author().id.get())
+        .await
+        .filter(|u| valid_runas(u));
+    if !allowed_upload_dir(&normalized, linked.as_deref()) {
+        eprintln!("upload refused: {} -> {}", ctx.author().id.get(), normalized);
+        match linked.as_deref() {
+            Some(u) => {
+                post_text(
+                    ctx,
+                    format!("That dir is off-limits — use `/tmp/artixy-uploads/` or your own `/home/{u}/`."),
+                )
+                .await?;
+            }
+            None => {
+                post_text(
+                    ctx,
+                    "That dir is off-limits — use `/tmp/artixy-uploads/` (link a linux account with `/user add` for home uploads).",
+                )
+                .await?;
+            }
+        }
+        return Ok(());
+    };
+    let dir = normalized;
     let Some(vm) = require_vm(ctx).await else { return Ok(()); };
     let bytes = match file.download().await {
         Ok(b) => b,
@@ -835,7 +955,7 @@ pub(crate) async fn upload(
         post_text(ctx, "That file is over ~20MB — too big to upload.").await?;
         return Ok(());
     }
-    if let Err(e) = guest_mkdir(&vm, dir).await {
+    if let Err(e) = guest_mkdir(&vm, &dir).await {
         post_text(ctx, codeblock(&format!("mkdir failed: {}", e))).await?;
         return Ok(());
     }
@@ -1012,25 +1132,16 @@ pub(crate) async fn ai(
         return Ok(());
     }
     if !changing {
-        let (state, ai_model, ai_host, ai_key) = {
+        let (state, ai_model, ai_host) = {
             let s = ctx.data().settings.read().await;
             (
                 if s.ai_enabled { "enabled" } else { "disabled" }.to_string(),
                 s.ai_model.clone(),
                 crate::ai::resolve_host(&s.ollama_host),
-                crate::ai::resolve_ollama_key(&s.ollama_api_key),
             )
         };
-        let backend = "ollama";
-        let key_state = if ai_key.is_empty() { "missing" } else { "set" };
-        let mut web = crate::ai::web_status(&ai_key).await;
-        if crate::ai::web_search_disabled() {
-            // Already says "answering from knowledge" — nothing to add.
-        } else if crate::ai::is_rate_limit_err(&web) {
-            web.push_str(" (offline fallback on: chat answers from knowledge)");
-        }
         post_text(ctx, format!(
-            "AI chat is **{state}** — model `{ai_model}` via {backend} (`{ai_host}`).\nSearch key: {key_state} (`ollama_api_key` in config or OLLAMA_API_KEY env, free at ollama.com/settings/keys).\n{web}\nOwner: `/ai true model:llama3.1` or `/ai true model:qwen3:4b`. Then just ping me `@artixy <question>` or `artixy <question>`.",
+            "AI chat is **{state}** — model `{ai_model}` via ollama (`{ai_host}`).\nOwner: `/ai true model:llama3.1` or `/ai true model:qwen3:4b`. Then just ping me `@artixy <question>` or `artixy <question>`.",
         ))
         .await?;
         return Ok(());
@@ -1073,57 +1184,6 @@ pub(crate) async fn ai(
         }
     }
     post_text(ctx, notice).await?;
-    Ok(())
-}
-
-#[poise::command(
-    slash_command,
-    prefix_command,
-    install_context = "Guild|User",
-    interaction_context = "Guild|BotDm|PrivateChannel"
-)]
-pub(crate) async fn websearch(
-    ctx: Context<'_>,
-    #[description = "what to search on the web"] query: String,
-) -> Result<(), Error> {
-    if !need_public(ctx).await? {
-        return Ok(());
-    }
-    let query = query.trim().to_string();
-    if query.is_empty() {
-        post_text(ctx, "Usage: `/websearch <query>`.").await?;
-        return Ok(());
-    }
-    maybe_defer(ctx).await;
-    let short: String = query.chars().take(200).collect();
-    let ai_key = {
-        let s = ctx.data().settings.read().await;
-        crate::ai::resolve_ollama_key(&s.ollama_api_key)
-    };
-    if ai_key.is_empty() {
-        post_text(ctx, "Web search needs `ollama_api_key` in config or OLLAMA_API_KEY env (free at ollama.com/settings/keys).").await?;
-        return Ok(());
-    }
-    if crate::ai::web_search_disabled() {
-        post_text(ctx, format!("Web search is off right now — ping me `@artixy {short}` and I'll answer from what I know.")).await?;
-        return Ok(());
-    }
-    let answer = crate::ai::run_websearch(&ai_key, &short).await;
-    if crate::ai::web_search_disabled() || crate::ai::is_out_of_credits_err(&answer) {
-        post_text(ctx, format!("Web search is off right now — ping me `@artixy {short}` and I'll answer from what I know.")).await?;
-        return Ok(());
-    }
-    if crate::ai::is_rate_limit_err(&answer) {
-        post_text(ctx, format!("Search is rate limited right now — try again in a couple minutes, or ping me `@artixy {short}` and I'll answer from what I already know.")).await?;
-        return Ok(());
-    }
-    if answer.trim().is_empty() {
-        post_text(ctx, format!("No web results for `{short}` — ping me `@artixy {short}` and I'll answer from what I know.")).await?;
-        return Ok(());
-    }
-    let out = format!("Search: `{short}`\n{answer}");
-    let out: String = out.chars().take(1900).collect();
-    post_text(ctx, out).await?;
     Ok(())
 }
 
@@ -1636,4 +1696,68 @@ pub(crate) async fn do_admins(ctx: Context<'_>) -> Result<(), Error> {
     }
     post_text(ctx, msg).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sensitive_send_names_refused() {
+        for n in [
+            ".env",
+            ".env.local",
+            "prod.env",
+            "config.toml",
+            "Config.TOML",
+            "id_rsa",
+            "id_ed25519.pub",
+            "backup.pem",
+            "cert.key",
+            "store.p12",
+            "my_secret_notes.txt",
+            "db_credentials.json",
+            "api_token.txt",
+            "discord_webhook.txt",
+            ".hidden",
+            "",
+        ] {
+            assert!(is_sensitive_send_name(n), "should refuse {n}");
+        }
+        for n in ["report.pdf", "photo.png", "notes.txt", "output.log"] {
+            assert!(!is_sensitive_send_name(n), "should allow {n}");
+        }
+    }
+
+    #[test]
+    fn share_dot_components_detected() {
+        assert!(share_rel_has_dot_component(std::path::Path::new(".env")));
+        assert!(share_rel_has_dot_component(std::path::Path::new("a/../.ssh/x")));
+        assert!(!share_rel_has_dot_component(std::path::Path::new("docs/report.pdf")));
+    }
+
+    #[test]
+    fn guest_dir_normalization() {
+        assert_eq!(normalize_guest_dir("/tmp/artixy-uploads/a").as_deref(), Some("/tmp/artixy-uploads/a"));
+        assert_eq!(normalize_guest_dir("/home/bob//docs/./").as_deref(), Some("/home/bob/docs"));
+        assert_eq!(normalize_guest_dir("/home/bob/../bob/x").as_deref(), Some("/home/bob/x"));
+        assert_eq!(normalize_guest_dir("/").as_deref(), Some("/"));
+        assert!(normalize_guest_dir("tmp/x").is_none());
+        assert!(normalize_guest_dir("/../etc").is_none());
+        assert!(normalize_guest_dir("/etc/../../..").is_none());
+    }
+
+    #[test]
+    fn upload_allowlist() {
+        assert!(allowed_upload_dir("/tmp/artixy-uploads", None));
+        assert!(allowed_upload_dir("/tmp/artixy-uploads/a/b", None));
+        assert!(!allowed_upload_dir("/tmp/other", None));
+        assert!(!allowed_upload_dir("/etc/cron.d", None));
+        assert!(!allowed_upload_dir("/", None));
+        assert!(allowed_upload_dir("/home/bob", Some("bob")));
+        assert!(allowed_upload_dir("/home/bob/docs", Some("bob")));
+        assert!(!allowed_upload_dir("/home/alice/docs", Some("bob")));
+        assert!(!allowed_upload_dir("/home/bob", Some("root")));
+        assert!(!allowed_upload_dir("/home/bob", None));
+    }
 }

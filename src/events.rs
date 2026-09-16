@@ -53,69 +53,12 @@ pub(crate) async fn event_handler(
         handle_delete(&ctx.http, *deleted_message_id, war).await;
         return Ok(());
     }
-    if let serenity::FullEvent::TypingStart { event } = event {
-        let name = event
-            .member
-            .as_ref()
-            .and_then(|m| m.nick.clone().or_else(|| m.user.global_name.clone()).or_else(|| Some(m.user.name.clone())))
-            .or_else(|| {
-                ctx.cache
-                    .user(event.user_id)
-                    .map(|u| u.global_name.clone().unwrap_or_else(|| u.name.clone()))
-            })
-            .unwrap_or_else(|| event.user_id.get().to_string());
-        let channel_name = ctx
-            .cache
-            .channel(event.channel_id)
-            .map(|c| c.name.clone())
-            .unwrap_or_default();
-        let guild_id = event.guild_id.map(|g| g.get()).unwrap_or(0);
-        let _ = crate::feed::log_typing(&name, event.channel_id.get(), guild_id, &channel_name).await;
+    if let serenity::FullEvent::TypingStart { event: _ } = event {
         return Ok(());
     }
     let serenity::FullEvent::Message { new_message } = event else {
         return Ok(());
     };
-    let channel_name = ctx
-        .cache
-        .channel(new_message.channel_id)
-        .map(|c| c.name.clone())
-        .unwrap_or_default();
-    let guild_id = new_message.guild_id.map(|g| g.get()).unwrap_or(0);
-    // Never log an empty body: attachment/embed/sticker-only messages (e.g.
-    // artixy's own image posts) would otherwise vanish from the TUI.
-    let mut feed_text = new_message.content.clone();
-    if feed_text.trim().is_empty() {
-        let mut parts: Vec<String> = Vec::new();
-        for a in &new_message.attachments {
-            let n = a.filename.trim();
-            if n.is_empty() {
-                parts.push("[attachment]".to_string());
-            } else {
-                parts.push(format!("[attachment: {}]", n.chars().take(64).collect::<String>()));
-            }
-        }
-        if !new_message.embeds.is_empty() {
-            parts.push(format!("[{} embed(s)]", new_message.embeds.len()));
-        }
-        if !new_message.sticker_items.is_empty() {
-            parts.push("[sticker]".to_string());
-        }
-        if parts.is_empty() {
-            parts.push("[empty message]".to_string());
-        }
-        feed_text = parts.join(" ");
-    }
-    let _ = crate::feed::log_message(
-        &new_message.author.name,
-        new_message.author.bot,
-        new_message.channel_id.get(),
-        guild_id,
-        &channel_name,
-        &feed_text,
-        new_message.id.get(),
-    )
-    .await;
     let pk = if new_message.webhook_id.is_some() {
         crate::pk::resolve(new_message.id.get()).await
     } else {
@@ -128,9 +71,10 @@ pub(crate) async fn event_handler(
     let (owner, blocked, war) = {
         let a = data.allowed.read().await;
         let s = data.settings.read().await;
+        let blocked = a.blocked.contains(&id);
         (
-            id == a.owner || a.admins.contains(&id),
-            a.blocked.contains(&id),
+            !blocked && (id == a.owner || a.admins.contains(&id)),
+            blocked,
             s.war_mode,
         )
     };
@@ -195,13 +139,12 @@ pub(crate) async fn event_handler(
             if blocked {
                 return Ok(());
             }
-            let (ai_on, ai_model, ai_host, ai_key) = {
+            let (ai_on, ai_model, ai_host) = {
                 let s = data.settings.read().await;
                 (
                     s.ai_enabled,
                     s.ai_model.clone(),
                     crate::ai::resolve_host(&s.ollama_host),
-                    crate::ai::resolve_ollama_key(&s.ollama_api_key),
                 )
             };
             if !ai_on {
@@ -251,7 +194,7 @@ pub(crate) async fn event_handler(
                 prompt = prompt.chars().take(4000).collect();
             }
             let _ = new_message.channel_id.broadcast_typing(&ctx.http).await;
-            match crate::ai::ollama_chat(&ai_host, &ai_model, &ai_key, new_message.channel_id.get(), &speaker, &prompt).await {
+            match crate::ai::ollama_chat(&ai_host, &ai_model, new_message.channel_id.get(), &speaker, &prompt).await {
                 Ok(text) => {
                     let chunks = crate::ai::chunk_reply(&text);
                     let mut first = true;

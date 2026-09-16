@@ -21,8 +21,6 @@ pub(crate) struct BotSettings {
     pub(crate) ai_model: String,
     #[serde(default = "crate::ai::default_host")]
     pub(crate) ollama_host: String,
-    #[serde(default)]
-    pub(crate) ollama_api_key: String,
 }
 
 fn sayas_default_off() -> bool {
@@ -42,7 +40,6 @@ impl Default for BotSettings {
             ai_enabled: ai_default_off(),
             ai_model: crate::ai::default_model(),
             ollama_host: crate::ai::default_host(),
-            ollama_api_key: String::new(),
         }
     }
 }
@@ -114,10 +111,6 @@ pub(crate) async fn apply_file_config(data: &Data, cfg: &FileConfig) -> Vec<Stri
         if s.ollama_host != cfg.ollama_host {
             s.ollama_host = cfg.ollama_host.clone();
             changed.push("ollama_host".to_string());
-        }
-        if s.ollama_api_key != cfg.ollama_api_key {
-            s.ollama_api_key = cfg.ollama_api_key.clone();
-            changed.push("ollama_api_key".to_string());
         }
     }
     {
@@ -218,8 +211,6 @@ pub(crate) struct FileConfig {
     pub(crate) ai_model: String,
     #[serde(default = "crate::ai::default_host")]
     pub(crate) ollama_host: String,
-    #[serde(default)]
-    pub(crate) ollama_api_key: String,
 }
 
 pub(crate) fn apply_legacy_import(
@@ -258,7 +249,6 @@ pub(crate) async fn persist_runtime(data: &Data) -> Result<(), Error> {
         cfg.ai_enabled = s.ai_enabled;
         cfg.ai_model = s.ai_model.clone();
         cfg.ollama_host = s.ollama_host.clone();
-        cfg.ollama_api_key = s.ollama_api_key.clone();
     }
     {
         let m = data.shells.read().await;
@@ -275,8 +265,8 @@ pub(crate) fn access_allowed(owner: u64, users: &[u64], blocked: &[u64], id: u64
     !blocked.contains(&id) && (id == owner || users.contains(&id))
 }
 
-pub(crate) fn elevated_allowed(owner: u64, admins: &[u64], id: u64) -> bool {
-    id == owner || admins.contains(&id)
+pub(crate) fn elevated_allowed(owner: u64, admins: &[u64], blocked: &[u64], id: u64) -> bool {
+    !blocked.contains(&id) && (id == owner || admins.contains(&id))
 }
 
 pub(crate) fn config_file_path() -> PathBuf {
@@ -308,7 +298,6 @@ fn normalize_file_config(mut cfg: FileConfig) -> FileConfig {
     } else {
         host
     };
-    cfg.ollama_api_key = cfg.ollama_api_key.trim().to_string();
     cfg
 }
 
@@ -348,7 +337,7 @@ pub(crate) fn ensure_config_template() {
     lock_config_private();
 }
 
-const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwebhook_urls = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nollama_api_key = \"\"\nmanagers = []\nadmin_ids = []\n\n[linux]\n\n[shells]\n";
+const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwebhook_urls = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nmanagers = []\nadmin_ids = []\n\n[linux]\n\n[shells]\n";
 
 pub(crate) async fn save_json(path: &str, data: String) -> Result<(), Error> {
     let tmp = format!("{}.{}.tmp", path, random_suffix());
@@ -363,3 +352,18 @@ pub(crate) async fn save_json(path: &str, data: String) -> Result<(), Error> {
     Ok(())
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocked_revokes_elevated_and_auth() {
+        assert!(access_allowed(1, &[2], &[], 2));
+        assert!(!access_allowed(1, &[2], &[2], 2));
+        assert!(elevated_allowed(1, &[2], &[], 1));
+        assert!(elevated_allowed(1, &[2], &[], 2));
+        assert!(!elevated_allowed(1, &[2], &[2], 2));
+        assert!(!elevated_allowed(1, &[2], &[1], 1));
+    }
+}
