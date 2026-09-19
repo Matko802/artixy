@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::Error;
 
-struct HistoryItem {
+pub(crate) struct HistoryItem {
     role: String,
     content: String,
 }
@@ -102,12 +102,24 @@ pub(crate) fn valid_model_name(s: &str) -> bool {
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '/'))
 }
 
+pub(crate) fn default_temperature() -> f32 {
+    0.8
+}
+
+pub(crate) fn clamp_temperature(t: f32) -> f32 {
+    if t.is_nan() {
+        0.8
+    } else {
+        t.clamp(0.0, 2.0)
+    }
+}
+
 #[derive(Deserialize)]
-struct ChatResponse {
-    #[serde(default)]
-    message: Option<ChatMessageOwned>,
+struct GenerateResponse {
     #[serde(default)]
     response: Option<String>,
+    #[serde(default)]
+    message: Option<ChatMessageOwned>,
 }
 
 #[derive(Deserialize)]
@@ -291,16 +303,46 @@ pub(crate) fn api_full_message() -> String {
     "Sorry, I'm running hot right now (API full/rate limited) — try again in a minute.".to_string()
 }
 
-async fn chat_once(
+/// Flat transcript for /api/generate: past turns plus the current tagged
+/// message. Instructions live in `system`, runtime data lives here.
+pub(crate) fn build_transcript(past: &[HistoryItem], tagged: &str, names: &[String]) -> String {
+    let mut out = String::new();
+    for e in past {
+        if e.role == "assistant" {
+            let cleaned = sanitize_reply(&e.content, names);
+            if cleaned.trim().is_empty() || stale_history_line(&cleaned) {
+                continue;
+            }
+            out.push_str(&cleaned);
+        } else {
+            out.push_str(&e.content);
+        }
+        out.push('\n');
+    }
+    out.push_str(tagged);
+    out
+}
+
+async fn generate_once(
     url: &str,
     model: &str,
-    messages: &[serde_json::Value],
-) -> Result<ChatMessageOwned, Error> {
-    let req = serde_json::json!({
+    system: &str,
+    prompt: &str,
+    temperature: f32,
+) -> Result<String, Error> {
+    // /api/generate with an explicit `system` field is the dependable
+    // per-request override: unlike /api/chat system messages, it reliably
+    // replaces any persona baked into the model's Modelfile.
+    let mut req = serde_json::json!({
         "model": model,
-        "messages": messages,
+        "prompt": prompt,
         "stream": false,
+        "keep_alive": "10m",
+        "options": { "temperature": clamp_temperature(temperature) },
     });
+    if !system.trim().is_empty() {
+        req["system"] = serde_json::Value::String(system.to_string());
+    }
     let resp = client().post(url).json(&req).send().await?;
     if !resp.status().is_success() {
         let status = resp.status();
@@ -308,13 +350,15 @@ async fn chat_once(
         let body: String = body.chars().take(300).collect();
         return Err(format!("ollama {status}: {body}").into());
     }
-    let parsed: ChatResponse = resp.json().await?;
-    if let Some(m) = parsed.message {
-        return Ok(m);
-    }
+    let parsed: GenerateResponse = resp.json().await?;
     if let Some(r) = parsed.response {
         if !r.trim().is_empty() {
-            return Ok(ChatMessageOwned { content: r });
+            return Ok(r);
+        }
+    }
+    if let Some(m) = parsed.message {
+        if !m.content.trim().is_empty() {
+            return Ok(m.content);
         }
     }
     Err("ollama returned an empty reply".into())
@@ -325,20 +369,25 @@ pub(crate) fn stale_history_line(s: &str) -> bool {
     t.contains("running hot right now")
 }
 
-pub(crate) async fn glitch_text(host: &str, model: &str, system_prompt: &str) -> String {
+pub(crate) async fn glitch_text(
+    host: &str,
+    model: &str,
+    system_prompt: &str,
+    temperature: f32,
+) -> String {
     // Don't hammer a full API with another call — return a helpful static fallback.
     // Callers that already know the error was api-full should prefer api_full_message().
-    let url = format!("{}/api/chat", host.trim_end_matches('/'));
-    let mut messages = Vec::new();
-    if !system_prompt.trim().is_empty() {
-        messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
-    }
-    messages.push(
-        serde_json::json!({"role": "user", "content": "You just glitched out. Tell the user in one short sentence, no details."}),
-    );
-    match chat_once(&url, model, &messages).await {
-        Ok(m) => {
-            let text = strip_meta_preamble(&strip_leading_speaker(&clean_reply(&m.content), &[]));
+    let url = format!("{}/api/generate", host.trim_end_matches('/'));
+    match generate_once(
+        &url,
+        model,
+        system_prompt,
+        "You just glitched out. Tell the user in one short sentence, no details.",
+        temperature,
+    )
+    .await {
+        Ok(raw) => {
+            let text = strip_meta_preamble(&strip_leading_speaker(&clean_reply(&raw), &[]));
             if text.trim().is_empty() {
                 "sorry, glitched out — try again in a sec".to_string()
             } else if is_api_full_err(&text) {
@@ -359,16 +408,18 @@ pub(crate) async fn ollama_chat(
     speaker: &str,
     prompt: &str,
     system_prompt: &str,
+    temperature: f32,
 ) -> Result<String, Error> {
     let host = host.trim_end_matches('/');
-    let url = format!("{host}/api/chat");
+    let url = format!("{host}/api/generate");
     let tagged = format!("[{}]: {}", speaker_tag(speaker), prompt);
     let past = snapshot(channel);
     eprintln!(
-        "ai chat: model={} sys_chars={} hist_msgs={}",
+        "ai chat: model={} sys_chars={} hist_msgs={} temp={}",
         model,
         system_prompt.chars().count(),
-        past.len()
+        past.len(),
+        clamp_temperature(temperature)
     );
     let mut names: Vec<String> = vec![speaker_tag(speaker)];
     for e in &past {
@@ -387,44 +438,19 @@ pub(crate) async fn ollama_chat(
             }
         }
     }
-    let mut messages: Vec<serde_json::Value> = Vec::with_capacity(past.len() + 2);
-    if !system_prompt.trim().is_empty() {
-        messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
-    }
-    for e in &past {
-        let role = if e.role == "assistant" {
-            "assistant"
-        } else {
-            "user"
-        };
-        if role == "assistant" {
-            let cleaned = sanitize_reply(&e.content, &names);
-            if cleaned.trim().is_empty() || stale_history_line(&cleaned) {
-                continue;
-            }
-            messages.push(serde_json::json!({"role": role, "content": cleaned}));
-        } else {
-            messages.push(serde_json::json!({"role": role, "content": e.content}));
-        }
-    }
-    messages.push(serde_json::json!({"role": "user", "content": tagged.clone()}));
-    // Repeat the backstory last so the model follows the current TOML
-    // prompt strictly instead of drifting into old history style.
-    if !system_prompt.trim().is_empty() {
-        messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
-    }
-    let first = match chat_once(&url, model, &messages).await {
-        Ok(m) => m,
+    let transcript = build_transcript(&past, &tagged, &names);
+    let first = match generate_once(&url, model, system_prompt, &transcript, temperature).await {
+        Ok(text) => text,
         Err(e) if is_api_full_err(&e.to_string()) => {
             eprintln!("ollama_chat: api full on first call, offline fallback");
             let fb = api_full_message();
-            push(channel, tagged.clone(), tagged.clone());
+            push(channel, "user".to_string(), tagged.clone());
             push(channel, "assistant".to_string(), fb.clone());
             return Ok(fb);
         }
         Err(e) => return Err(e),
     };
-    finalize_reply(channel, tagged, &names, &first.content)
+    finalize_reply(channel, tagged, &names, &first)
 }
 
 pub(crate) fn clear_history(channel: u64) {
@@ -579,5 +605,27 @@ mod tests {
     #[test]
     fn stale_history_skips_api_full_lines() {
         assert!(stale_history_line(&api_full_message()));
+    }
+
+    #[test]
+    fn transcript_appends_current_and_skips_stale() {
+        let past = vec![
+            HistoryItem { role: "user".to_string(), content: "[bob]: hi".to_string() },
+            HistoryItem { role: "assistant".to_string(), content: api_full_message() },
+            HistoryItem { role: "assistant".to_string(), content: "hello".to_string() },
+        ];
+        let t = build_transcript(&past, "[bob]: yo", &["bob".to_string()]);
+        assert!(t.contains("[bob]: hi"));
+        assert!(t.contains("hello"));
+        assert!(t.ends_with("[bob]: yo"));
+        assert!(!t.contains("running hot"));
+    }
+
+    #[test]
+    fn temperature_clamps() {
+        assert_eq!(clamp_temperature(0.7), 0.7);
+        assert_eq!(clamp_temperature(-1.0), 0.0);
+        assert_eq!(clamp_temperature(9.0), 2.0);
+        assert_eq!(clamp_temperature(f32::NAN), 0.8);
     }
 }

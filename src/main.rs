@@ -132,6 +132,7 @@ async fn main() {
                 file_config.ollama_host.clone()
             },
             ai_prompt: file_config.ai_prompt.clone(),
+            ai_temperature: crate::ai::clamp_temperature(file_config.ai_temperature),
         })),
         shells: std::sync::Arc::new(tokio::sync::RwLock::new(file_config.shells.clone())),
     };

@@ -1162,13 +1162,14 @@ pub(crate) async fn ai(
         return Ok(());
     }
     if !changing {
-        let (state, ai_model, ai_host, ai_prompt) = {
+        let (state, ai_model, ai_host, ai_prompt, ai_temp) = {
             let s = ctx.data().settings.read().await;
             (
                 if s.ai_enabled { "enabled" } else { "disabled" }.to_string(),
                 s.ai_model.clone(),
                 crate::ai::resolve_host(&s.ollama_host),
                 s.ai_prompt.clone(),
+                s.ai_temperature,
             )
         };
         let backstory = if ai_prompt.trim().is_empty() {
@@ -1178,7 +1179,7 @@ pub(crate) async fn ai(
             format!("backstory ({} chars): `{preview}`", ai_prompt.chars().count())
         };
         post_text(ctx, format!(
-            "AI chat is **{state}** — model `{ai_model}` via ollama (`{ai_host}`).\n{backstory}\nOwner: `/ai true model:llama3.1` or `/ai true model:qwen3:4b`. Then just ping me `@artixy <question>` or `artixy <question>`.",
+            "AI chat is **{state}** — model `{ai_model}` via ollama (`{ai_host}`), temp `{ai_temp}`.\n{backstory}\nOwner: `/ai true model:llama3.1` or `/ai true model:qwen3:4b`. Then just ping me `@artixy <question>` or `artixy <question>`.",
         ))
         .await?;
         return Ok(());

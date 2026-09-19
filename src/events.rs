@@ -132,13 +132,14 @@ pub(crate) async fn event_handler(
             if blocked {
                 return Ok(());
             }
-            let (ai_on, ai_model, ai_host, ai_prompt) = {
+            let (ai_on, ai_model, ai_host, ai_prompt, ai_temp) = {
                 let s = data.settings.read().await;
                 (
                     s.ai_enabled,
                     s.ai_model.clone(),
                     crate::ai::resolve_host(&s.ollama_host),
                     s.ai_prompt.clone(),
+                    s.ai_temperature,
                 )
             };
             if !ai_on {
@@ -188,7 +189,7 @@ pub(crate) async fn event_handler(
                 prompt = prompt.chars().take(4000).collect();
             }
             let _ = new_message.channel_id.broadcast_typing(&ctx.http).await;
-            match crate::ai::ollama_chat(&ai_host, &ai_model, new_message.channel_id.get(), &speaker, &prompt, &ai_prompt).await {
+            match crate::ai::ollama_chat(&ai_host, &ai_model, new_message.channel_id.get(), &speaker, &prompt, &ai_prompt, ai_temp).await {
                 Ok(text) => {
                     let chunks = crate::ai::chunk_reply(&text);
                     let mut first = true;
@@ -206,7 +207,7 @@ pub(crate) async fn event_handler(
                     let text = if crate::ai::is_api_full_err(&e.to_string()) {
                         crate::ai::api_full_message()
                     } else {
-                        crate::ai::glitch_text(&ai_host, &ai_model, &ai_prompt).await
+                        crate::ai::glitch_text(&ai_host, &ai_model, &ai_prompt, ai_temp).await
                     };
                     let _ = new_message.reply(&ctx.http, &text).await;
                 }
