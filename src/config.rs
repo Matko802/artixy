@@ -145,7 +145,7 @@ pub(crate) async fn apply_file_config(data: &Data, cfg: &FileConfig) -> Vec<Stri
 pub(crate) async fn watch_config(data: Data) {
     let mut last = config_mtime();
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let cur = config_mtime();
         if cur == last {
             continue;
@@ -154,10 +154,14 @@ pub(crate) async fn watch_config(data: Data) {
         let stable = config_mtime();
         last = stable;
         if stable.is_none() {
-            eprintln!("config: file missing, keeping runtime settings");
+            eprintln!("config: file missing, recreating template");
+            ensure_config_template();
+            last = config_mtime();
             continue;
         }
-        let cfg = load_file_config();
+        let Some(cfg) = try_load_file_config() else {
+            continue;
+        };
         let changed = apply_file_config(&data, &cfg).await;
         if changed.is_empty() {
             eprintln!("config: file changed, no effective updates");
@@ -237,7 +241,14 @@ pub(crate) fn apply_legacy_import(
 }
 
 pub(crate) async fn persist_runtime(data: &Data) -> Result<(), Error> {
-    let mut cfg = load_file_config();
+    let path = config_file_path();
+    if path.exists() && try_load_file_config().is_none() {
+        return Err("config file has a TOML parse error — not overwriting it; fix ai_prompt quoting (multi-line needs \"\"\"...\"\"\")".into());
+    }
+    let mut cfg = try_load_file_config().unwrap_or_default();
+    // Absorb any pending manual edits first so a bot command issued right
+    // after a TOML edit doesn't clobber the edit when writing back.
+    apply_file_config(data, &cfg).await;
     {
         let a = data.allowed.read().await;
         cfg.managers = a.users.clone();
@@ -305,12 +316,22 @@ fn normalize_file_config(mut cfg: FileConfig) -> FileConfig {
     cfg
 }
 
+pub(crate) fn try_load_file_config() -> Option<FileConfig> {
+    let raw = std::fs::read_to_string(config_file_path()).ok()?;
+    match toml::from_str::<FileConfig>(&raw) {
+        Ok(cfg) => Some(normalize_file_config(cfg)),
+        Err(e) => {
+            eprintln!(
+                "config: parse error in {}: {e} — keeping current settings; fix the TOML (a multi-line ai_prompt needs \"\"\"triple quotes\"\"\")",
+                config_file_path().display()
+            );
+            None
+        }
+    }
+}
+
 pub(crate) fn load_file_config() -> FileConfig {
-    let cfg: FileConfig = std::fs::read_to_string(config_file_path())
-        .ok()
-        .and_then(|r| toml::from_str(&r).ok())
-        .unwrap_or_default();
-    let cfg = normalize_file_config(cfg);
+    let cfg = try_load_file_config().unwrap_or_default();
     lock_config_private();
     cfg
 }
@@ -341,7 +362,7 @@ pub(crate) fn ensure_config_template() {
     lock_config_private();
 }
 
-const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nai_prompt = \"\"\nmanagers = []\nadmin_ids = []\n\n[linux]\n\n[shells]\n";
+const CONFIG_TEMPLATE: &str = "# artixy config — edits hot-apply within seconds, no restart needed.\n# File location: ~/.config/artixy/config.toml (NOT the project dir).\n# Multi-line ai_prompt needs triple quotes:\n#   ai_prompt = \"\"\"You are artixy...\n#   second line\"\"\"\nowner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nai_prompt = \"\"\nmanagers = []\nadmin_ids = []\n\n[linux]\n\n[shells]\n";
 
 pub(crate) async fn save_json(path: &str, data: String) -> Result<(), Error> {
     let tmp = format!("{}.{}.tmp", path, random_suffix());

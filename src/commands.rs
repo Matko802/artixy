@@ -179,10 +179,12 @@ async fn require_vm(ctx: Context<'_>) -> Option<String> {
 }
 
 pub(crate) const HELP: &str = "\
-**Who needs help? its ez :3** Everything acts on the one hardcoded VM, no names needed. VM commands need owner + added users, but AI chat (`@artixy`) and `/ai` view/forget work for everyone except blocked users. Slash commands, or the same `/command` as plain text (prefix style).\n\
-\n**VM**\n`/ps` — state of the VM\n`/status` — quick state + agent check\n`/start` — power on + wait for guest agent\n`/stop` — graceful shutdown\n`/restart` — reboot\n`/info` — details + agent status\n\
-\n**Who can use me**\nOwner does everything. Admins (`admin_ids` in config or `/admin add`) do everything except `/admin add/remove`, which stay owner-only. Managers run VM commands + AI. Everyone except blocked users gets AI chat.\n`/user` — one command for linux accounts (owner/admin): `/user list` shows owner + admins + managers, `/user add @user` creates their Linux account in Artix and links it, `/user remove @user` deletes their Linux account in the VM (and revokes bot access if they had it)\n`/admin` — one command for bot admins: `/admin list` shows admins (owner/admin), `/admin add @user` (owner only) grants everything except `/admin` mgmt itself, `/admin remove @user` (owner only) revokes them\n`/shell [fish|bash]` — your shell interpreter (default bash)\n`/notify <channel-id>` or `/notify off` — owner/admin: where I post my boot message, unset means silent\n`/purge_replies <user-id> [limit]` — owner/admin: delete their replies to my messages here\n`/warmode <true|false>` — owner/admin: arm or stand down the protections\n`/ai [enabled] [model]` — change is owner/admin (`/ai true model:llama3.1` or `/ai true model:qwen3:4b` for local Ollama models), view is for all users. When enabled, ping me (`@artixy <question>` or `artixy <question>`) and I answer with the configured model.\n`/run <command>` — run it for real inside the VM, prints the output. Quick commands answer with plain text, long ones switch to a live image feed on their own, updating about every second.\n\n**Run real commands in Artix**\n`/run <command>` — runs it for real inside the VM through the guest agent and prints the output. e.g. `/run sudo pacman -Syu`, `/run ls -la`. Runs as YOUR linked linux account (`whoami` proves it). Reply to its live message to type into the running command (type text, `;return` `;space` `;enter` `;esc` `;up` `;down` `;left` `;right` `;ctrl+w` send keys, add a number like `;right 5` to repeat).\n`/send <path>` — upload a host file here from the bot's `share/` dir (absolute path, ~20MB max; secrets/keys/config never send)\n`/upload` — attach a file into the VM's `/tmp/artixy-uploads/` or your own `/home/<you>/`\n`/sayas [message] [reply_to] [file]` — owner/admin: `no args` toggles auto say-as-artix mode, `message` and/or attached file sends as artix (reply_to = message ID/link). File attached to the slash command (or files attached to the `;sayas` prefix message) are re-uploaded as artix. Output is ephemeral (only you see it).\n\
-\n**Warning:** managers can power this machine on/off. Keep the token secret: it lives only in `.env`, never in git.";
+artixy — type commands as a plain message or as slash. One VM, no names needed.\n\
+\nVM (owner + added users)\n/ps — list VMs\n/status — state + agent\n/start — power on, wait for agent\n/stop — graceful shutdown\n/restart — reboot\n/info — details + agent\n/run <cmd> — run in the VM as your linked user (e.g. /run ls -la)\n  reply to its live message to type into it (;return ;space ;enter ;esc ;up ;down ;left ;right, add a number to repeat)\n/send </abs/path> — send a host file from share/ (~20MB max, no secrets)\n/upload <file> <dir> — attach a file into /tmp/artixy-uploads/ or your /home/<you>/\n\
+\naccounts (owner/admin)\n/user add @u | remove @u | list — linux account + bot access\n/admin add @u | remove @u | list — bot admins (add/remove owner only)\n/shell fish|bash — your shell\n/notify <channel-id> | off — boot message channel\n/purge_replies <user-id> [limit] — delete their replies to my messages\n/warmode true|false — arm or stand down protections\n\
+\nas artix (owner/admin)\n/sayas [message] — post as artix, no args toggles auto mode\n<text>.ar — post that line as artix\n\
+\nai\n@artixy <question> — chat (needs /ai true)\n/ai true|false — on/off\n/ai model:<name> — e.g. model:llama3.1\n/ai prompt:<text> | prompt:clear — backstory (long text goes in ai_prompt in config)\n/ai forget:true — forget this channel\n\
+\nWarning: managers can power the machine on/off. Keep the token secret: `.env` only, never git.";
 
 #[poise::command(
     slash_command,
@@ -671,9 +673,9 @@ pub(crate) async fn sayas(
         }
         return Ok(());
     }
-    if is_slash && is_dm && reply_to.is_none() {
-        // In DMs answer the interaction itself so Discord shows
-        // "user used /sayas" with the text + file directly in the DM,
+    if is_slash && reply_to.is_none() {
+        // Answer the interaction itself so Discord shows
+        // "user used /sayas" with the text + file directly,
         // instead of a separate post plus an ephemeral receipt.
         let mut dm_body = body.clone();
         if !problems.is_empty() {
@@ -761,34 +763,20 @@ pub(crate) async fn sayas(
     .await;
     let sent_ok = send_res.is_ok();
     if is_slash {
-        if is_dm {
-            // Already posted directly in the DM (reply case); just drop
-            // the public ack, surfacing download problems if there were any.
-            if !problems.is_empty() {
-                let _ = ctx
-                    .send(
-                        poise::CreateReply::default()
-                            .content(problems.join("\n"))
-                            .ephemeral(true),
-                    )
-                    .await;
-            } else if let poise::Context::Application(actx) = ctx {
-                let _ = actx.interaction.delete_response(&http).await;
-            }
-            let _ = send_res;
-        } else {
-            let mut confirm = format!("Sent as artix in <#{}>.", channel.get());
-            if !files.is_empty() {
-                confirm.push_str(&format!(" ({} file{})", files.len(), if files.len() == 1 { "" } else { "s" }));
-            }
-            if !problems.is_empty() {
-                confirm.push_str(&format!("\n{}", problems.join("\n")));
-            }
+        // Plain posts answered the interaction directly above; the reply
+        // case already posted in the channel, so just drop the ack.
+        if !problems.is_empty() {
             let _ = ctx
-                .send(poise::CreateReply::default().content(confirm).ephemeral(true))
+                .send(
+                    poise::CreateReply::default()
+                        .content(problems.join("\n"))
+                        .ephemeral(true),
+                )
                 .await;
-            let _ = send_res;
+        } else if let poise::Context::Application(actx) = ctx {
+            let _ = actx.interaction.delete_response(&http).await;
         }
+        let _ = send_res;
     } else {
         if !problems.is_empty() {
             let _ = post_text(ctx, problems.join("\n")).await;
@@ -1153,6 +1141,7 @@ pub(crate) async fn ai(
     ctx: Context<'_>,
     #[description = "true to enable AI chat, false to disable (empty shows status)"] enabled: Option<bool>,
     #[description = "Ollama model e.g. llama3.1 or qwen3:4b"] model: Option<String>,
+    #[description = "Backstory prompt (short; 'clear' removes it; long text goes in ai_prompt in config)"] prompt: Option<String>,
     #[description = "true to forget conversation memory in this channel"] forget: Option<bool>,
 ) -> Result<(), Error> {
     if forget == Some(true) {
@@ -1163,7 +1152,8 @@ pub(crate) async fn ai(
         post_text(ctx, "Forgot the conversation here.").await?;
         return Ok(());
     }
-    let changing = enabled.is_some() || model.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some();
+    let prompt_touched = prompt.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some();
+    let changing = enabled.is_some() || model.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some() || prompt_touched;
     if changing && !is_elevated(ctx).await {
         post_denied(ctx, "Owner or admin only.").await?;
         return Ok(());
@@ -1172,16 +1162,23 @@ pub(crate) async fn ai(
         return Ok(());
     }
     if !changing {
-        let (state, ai_model, ai_host) = {
+        let (state, ai_model, ai_host, ai_prompt) = {
             let s = ctx.data().settings.read().await;
             (
                 if s.ai_enabled { "enabled" } else { "disabled" }.to_string(),
                 s.ai_model.clone(),
                 crate::ai::resolve_host(&s.ollama_host),
+                s.ai_prompt.clone(),
             )
         };
+        let backstory = if ai_prompt.trim().is_empty() {
+            "backstory: none (set with `/ai prompt:...` or `ai_prompt` in config)".to_string()
+        } else {
+            let preview: String = ai_prompt.chars().take(120).collect();
+            format!("backstory ({} chars): `{preview}`", ai_prompt.chars().count())
+        };
         post_text(ctx, format!(
-            "AI chat is **{state}** — model `{ai_model}` via ollama (`{ai_host}`).\nOwner: `/ai true model:llama3.1` or `/ai true model:qwen3:4b`. Then just ping me `@artixy <question>` or `artixy <question>`.",
+            "AI chat is **{state}** — model `{ai_model}` via ollama (`{ai_host}`).\n{backstory}\nOwner: `/ai true model:llama3.1` or `/ai true model:qwen3:4b`. Then just ping me `@artixy <question>` or `artixy <question>`.",
         ))
         .await?;
         return Ok(());
@@ -1203,12 +1200,27 @@ pub(crate) async fn ai(
                 s.ai_model = m;
             }
         }
+        if let Some(p) = prompt {
+            let p = p.trim().to_string();
+            if !p.is_empty() {
+                if p.eq_ignore_ascii_case("clear") {
+                    s.ai_prompt.clear();
+                } else {
+                    s.ai_prompt = p;
+                }
+            }
+        }
         notice = format!(
             "AI chat is **{}** — model `{}` on `{}`.",
             if s.ai_enabled { "enabled" } else { "disabled" },
             s.ai_model,
             crate::ai::resolve_host(&s.ollama_host),
         );
+        if s.ai_prompt.trim().is_empty() {
+            notice.push_str("\nBackstory: none.");
+        } else {
+            notice.push_str(&format!("\nBackstory: {} chars.", s.ai_prompt.chars().count()));
+        }
     }
     persist_runtime(ctx.data()).await?;
     if enabled == Some(true) || model_touched {
