@@ -624,8 +624,13 @@ pub(crate) async fn sayas(
         return sayas_toggle(ctx).await;
     }
     let is_slash = matches!(ctx, poise::Context::Application(_));
+    let is_dm = ctx.guild_id().is_none();
     if is_slash {
-        let _ = ctx.defer_ephemeral().await;
+        if is_dm {
+            let _ = ctx.defer().await;
+        } else {
+            let _ = ctx.defer_ephemeral().await;
+        }
     } else {
         maybe_defer(ctx).await;
     }
@@ -664,6 +669,27 @@ pub(crate) async fn sayas(
         } else {
             post_text(ctx, note).await?;
         }
+        return Ok(());
+    }
+    if is_slash && is_dm && reply_to.is_none() {
+        // In DMs answer the interaction itself so Discord shows
+        // "user used /sayas" with the text + file directly in the DM,
+        // instead of a separate post plus an ephemeral receipt.
+        let mut dm_body = body.clone();
+        if !problems.is_empty() {
+            if !dm_body.is_empty() {
+                dm_body.push('\n');
+            }
+            dm_body.push_str(&problems.join("\n"));
+        }
+        let mut reply = poise::CreateReply::default();
+        if !dm_body.is_empty() {
+            reply = reply.content(dm_body);
+        }
+        for (name, bytes) in &files {
+            reply = reply.attachment(serenity::CreateAttachment::bytes(bytes.clone(), name.clone()));
+        }
+        ctx.send(reply).await?;
         return Ok(());
     }
     let send_res: Result<(), Error> = async {
@@ -735,17 +761,34 @@ pub(crate) async fn sayas(
     .await;
     let sent_ok = send_res.is_ok();
     if is_slash {
-        let mut confirm = format!("Sent as artix in <#{}>.", channel.get());
-        if !files.is_empty() {
-            confirm.push_str(&format!(" ({} file{})", files.len(), if files.len() == 1 { "" } else { "s" }));
+        if is_dm {
+            // Already posted directly in the DM (reply case); just drop
+            // the public ack, surfacing download problems if there were any.
+            if !problems.is_empty() {
+                let _ = ctx
+                    .send(
+                        poise::CreateReply::default()
+                            .content(problems.join("\n"))
+                            .ephemeral(true),
+                    )
+                    .await;
+            } else if let poise::Context::Application(actx) = ctx {
+                let _ = actx.interaction.delete_response(&http).await;
+            }
+            let _ = send_res;
+        } else {
+            let mut confirm = format!("Sent as artix in <#{}>.", channel.get());
+            if !files.is_empty() {
+                confirm.push_str(&format!(" ({} file{})", files.len(), if files.len() == 1 { "" } else { "s" }));
+            }
+            if !problems.is_empty() {
+                confirm.push_str(&format!("\n{}", problems.join("\n")));
+            }
+            let _ = ctx
+                .send(poise::CreateReply::default().content(confirm).ephemeral(true))
+                .await;
+            let _ = send_res;
         }
-        if !problems.is_empty() {
-            confirm.push_str(&format!("\n{}", problems.join("\n")));
-        }
-        let _ = ctx
-            .send(poise::CreateReply::default().content(confirm).ephemeral(true))
-            .await;
-        let _ = send_res;
     } else {
         if !problems.is_empty() {
             let _ = post_text(ctx, problems.join("\n")).await;

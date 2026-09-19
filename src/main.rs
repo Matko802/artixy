@@ -131,6 +131,7 @@ async fn main() {
             } else {
                 file_config.ollama_host.clone()
             },
+            ai_prompt: file_config.ai_prompt.clone(),
         })),
         shells: std::sync::Arc::new(tokio::sync::RwLock::new(file_config.shells.clone())),
     };

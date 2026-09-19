@@ -21,6 +21,8 @@ pub(crate) struct BotSettings {
     pub(crate) ai_model: String,
     #[serde(default = "crate::ai::default_host")]
     pub(crate) ollama_host: String,
+    #[serde(default)]
+    pub(crate) ai_prompt: String,
 }
 
 fn sayas_default_off() -> bool {
@@ -40,6 +42,7 @@ impl Default for BotSettings {
             ai_enabled: ai_default_off(),
             ai_model: crate::ai::default_model(),
             ollama_host: crate::ai::default_host(),
+            ai_prompt: String::new(),
         }
     }
 }
@@ -111,6 +114,10 @@ pub(crate) async fn apply_file_config(data: &Data, cfg: &FileConfig) -> Vec<Stri
         if s.ollama_host != cfg.ollama_host {
             s.ollama_host = cfg.ollama_host.clone();
             changed.push("ollama_host".to_string());
+        }
+        if s.ai_prompt != cfg.ai_prompt {
+            s.ai_prompt = cfg.ai_prompt.clone();
+            changed.push("ai_prompt".to_string());
         }
     }
     {
@@ -205,6 +212,8 @@ pub(crate) struct FileConfig {
     pub(crate) ai_model: String,
     #[serde(default = "crate::ai::default_host")]
     pub(crate) ollama_host: String,
+    #[serde(default)]
+    pub(crate) ai_prompt: String,
 }
 
 pub(crate) fn apply_legacy_import(
@@ -243,6 +252,7 @@ pub(crate) async fn persist_runtime(data: &Data) -> Result<(), Error> {
         cfg.ai_enabled = s.ai_enabled;
         cfg.ai_model = s.ai_model.clone();
         cfg.ollama_host = s.ollama_host.clone();
+        cfg.ai_prompt = s.ai_prompt.clone();
     }
     {
         let m = data.shells.read().await;
@@ -331,7 +341,7 @@ pub(crate) fn ensure_config_template() {
     lock_config_private();
 }
 
-const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nmanagers = []\nadmin_ids = []\n\n[linux]\n\n[shells]\n";
+const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nai_prompt = \"\"\nmanagers = []\nadmin_ids = []\n\n[linux]\n\n[shells]\n";
 
 pub(crate) async fn save_json(path: &str, data: String) -> Result<(), Error> {
     let tmp = format!("{}.{}.tmp", path, random_suffix());

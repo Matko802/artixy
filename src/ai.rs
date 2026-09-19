@@ -291,8 +291,6 @@ pub(crate) fn api_full_message() -> String {
     "Sorry, I'm running hot right now (API full/rate limited) nya :3 — ask me again in a minute or ask something I can answer from what I already know.".to_string()
 }
 
-const SYSTEM_PROMPT: &str = "You are artixy, a friendly artix linux neko cat always yourself. never type [Artixy]: and be like neko beastfolk human texting: casual, a bit silly, simple minded short replies and saying words like nya, meow, and using :3 ";
-
 async fn chat_once(
     url: &str,
     model: &str,
@@ -327,14 +325,17 @@ pub(crate) fn stale_history_line(s: &str) -> bool {
     t.contains("running hot right now")
 }
 
-pub(crate) async fn glitch_text(host: &str, model: &str) -> String {
+pub(crate) async fn glitch_text(host: &str, model: &str, system_prompt: &str) -> String {
     // Don't hammer a full API with another call — return a helpful static fallback.
     // Callers that already know the error was api-full should prefer api_full_message().
     let url = format!("{}/api/chat", host.trim_end_matches('/'));
-    let messages = vec![
-        serde_json::json!({"role": "system", "content": SYSTEM_PROMPT}),
+    let mut messages = Vec::new();
+    if !system_prompt.trim().is_empty() {
+        messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
+    }
+    messages.push(
         serde_json::json!({"role": "user", "content": "You just glitched out. Tell the user cutely in one short sentence, no details."}),
-    ];
+    );
     match chat_once(&url, model, &messages).await {
         Ok(m) => {
             let text = strip_meta_preamble(&strip_leading_speaker(&clean_reply(&m.content), &[]));
@@ -357,6 +358,7 @@ pub(crate) async fn ollama_chat(
     channel: u64,
     speaker: &str,
     prompt: &str,
+    system_prompt: &str,
 ) -> Result<String, Error> {
     let host = host.trim_end_matches('/');
     let url = format!("{host}/api/chat");
@@ -380,7 +382,9 @@ pub(crate) async fn ollama_chat(
         }
     }
     let mut messages: Vec<serde_json::Value> = Vec::with_capacity(past.len() + 2);
-    messages.push(serde_json::json!({"role": "system", "content": SYSTEM_PROMPT}));
+    if !system_prompt.trim().is_empty() {
+        messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
+    }
     for e in &past {
         let role = if e.role == "assistant" {
             "assistant"
