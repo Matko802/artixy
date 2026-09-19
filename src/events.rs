@@ -5,7 +5,7 @@ use crate::{
     config::{access_allowed, Data},
     util::{attach_name, cap_file_body, strip_sgr},
     vm::linked_user,
-    webhook::{handle_delete, is_own_message, is_posted_message, post_message},
+    webhook::{is_own_message, post_message},
     Error,
 };
 
@@ -19,12 +19,11 @@ const TAUNT: &str = "purged your message haha";
 
 fn blocked_reply_action(
     ref_author: Option<u64>,
-    ref_id: Option<serenity::MessageId>,
+    _ref_id: Option<serenity::MessageId>,
     ref_content: &str,
     me: u64,
 ) -> (bool, bool) {
-    let mine = matches!(ref_author, Some(a) if a == me)
-        || ref_id.map(|id| is_posted_message(&id)).unwrap_or(false);
+    let mine = matches!(ref_author, Some(a) if a == me);
     match mine {
         true => (true, ref_content != TAUNT),
         false => (false, false),
@@ -44,13 +43,7 @@ pub(crate) async fn event_handler(
     _framework: poise::FrameworkContext<'_, Data, Error>,
     data: &Data,
 ) -> Result<(), Error> {
-    if let serenity::FullEvent::MessageDelete {
-        deleted_message_id,
-        ..
-    } = event
-    {
-        let war = data.settings.read().await.war_mode;
-        handle_delete(&ctx.http, *deleted_message_id, war).await;
+    if let serenity::FullEvent::MessageDelete { .. } = event {
         return Ok(());
     }
     if let serenity::FullEvent::TypingStart { event: _ } = event {

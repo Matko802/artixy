@@ -5,7 +5,7 @@ use crate::{
     termrender::TermFonts,
     util::{codeblock, plain_tail, random_suffix, valid_runas},
     vm::{guest_exec, guest_launch_raw, guest_status},
-    webhook::{edit_cleared, edit_posted, post_message, resolve_poster, Poster},
+    webhook::{edit_cleared, edit_posted, post_message},
 };
 
 pub(crate) struct LiveEntry {
@@ -305,18 +305,17 @@ fn load_terminal_fonts() -> Option<(Vec<u8>, Vec<u8>)> {
 }
 
 async fn edit_final(
-    poster: &Poster,
     http: &std::sync::Arc<serenity::Http>,
     channel: serenity::ChannelId,
     target: serenity::MessageId,
     content: String,
     files: Vec<(String, Vec<u8>)>,
 ) -> bool {
-    if edit_posted(poster, http, channel, target, content.clone(), files.clone()).await {
+    if edit_posted(http, channel, target, content.clone(), files.clone()).await {
         return true;
     }
     tokio::time::sleep(LIVE_EDIT_MIN_INTERVAL).await;
-    edit_posted(poster, http, channel, target, content, files).await
+    edit_posted(http, channel, target, content, files).await
 }
 
 pub(crate) const LIVE_CLOSED_TEXT: &str = "This live session has been closed.";
@@ -334,11 +333,10 @@ pub(crate) async fn close_live_message(
     channel: serenity::ChannelId,
     target: serenity::MessageId,
 ) {
-    let poster = resolve_poster(http, channel).await;
     let text = live_closed_text();
-    if !edit_cleared(&poster, http, channel, target, text.clone()).await {
+    if !edit_cleared(http, channel, target, text.clone()).await {
         tokio::time::sleep(LIVE_EDIT_MIN_INTERVAL).await;
-        edit_cleared(&poster, http, channel, target, text).await;
+        edit_cleared(http, channel, target, text).await;
     }
 }
 
@@ -428,7 +426,6 @@ pub(crate) async fn begin_run(
         }
     }
     let channel = ack.channel_id;
-    let poster = resolve_poster(&http, channel).await;
     let tag = ack.id.get();
     let ack_id = ack.id;
     let author_user = serenity::UserId::new(author_id);
@@ -471,7 +468,7 @@ pub(crate) async fn begin_run(
     let author_for_run = author_user;
     let handle = tokio::spawn(async move {
         live_run(
-            http, ack, channel, tag, vm2, cmd2, runas2, out_f2, code_f2, in_f2, live_map2, scrub_ip, poster, author_for_run,
+            http, ack, channel, tag, vm2, cmd2, runas2, out_f2, code_f2, in_f2, live_map2, scrub_ip, author_for_run,
         )
         .await;
     })
@@ -506,14 +503,12 @@ pub(crate) async fn live_run(
     in_f: Option<String>,
     live_map: LiveMap,
     scrub_ip: bool,
-    poster: Poster,
     author: serenity::UserId,
 ) {
     use base64::Engine as _;
     if let Some(ref u) = runas {
         if !valid_runas(u) {
             edit_posted(
-                &poster,
                 &http,
                 channel,
                 msg.id,
@@ -548,7 +543,6 @@ pub(crate) async fn live_run(
         Ok(p) => p,
         Err(e) => {
             edit_posted(
-                &poster,
                 &http,
                 channel,
                 msg.id,
@@ -616,9 +610,9 @@ pub(crate) async fn live_run(
                     "; process may still run in guest"
                 }
             ));
-            if !edit_cleared(&poster, &http, channel, msg.id, timeout_text.clone()).await {
+            if !edit_cleared(&http, channel, msg.id, timeout_text.clone()).await {
                 tokio::time::sleep(LIVE_EDIT_MIN_INTERVAL).await;
-                edit_cleared(&poster, &http, channel, msg.id, timeout_text).await;
+                edit_cleared(&http, channel, msg.id, timeout_text).await;
             }
             cleanup_live_files(&vm, &out_f, &code_f, in_f.as_deref()).await;
             break;
@@ -683,9 +677,9 @@ pub(crate) async fn live_run(
                     let posted = if is_long && fonts.is_some() {
                         let (text, files) =
                             live_message(fonts.as_ref(), &cmd, &output, &kfiles, &mut region).await;
-                        edit_final(&poster, &http, channel, msg.id, text, files).await
+                        edit_final(&http, channel, msg.id, text, files).await
                     } else {
-                        edit_final(&poster, &http, channel, msg.id, plain_tail(&combined), Vec::new()).await
+                        edit_final(&http, channel, msg.id, plain_tail(&combined), Vec::new()).await
                     };
                     if !posted {
                         note_stalled_feed(&http, channel, &cmd, "Discord kept rejecting message edits").await;
@@ -696,7 +690,7 @@ pub(crate) async fn live_run(
                     kitty_file_blobs(&vm, &full, &mut kfiles).await;
                     let (text, files) =
                         live_message(fonts.as_ref(), &cmd, &output, &kfiles, &mut region).await;
-                    if !edit_final(&poster, &http, channel, msg.id, text, files).await {
+                    if !edit_final(&http, channel, msg.id, text, files).await {
                         note_stalled_feed(&http, channel, &cmd, "Discord kept rejecting message edits").await;
                     }
                 }
@@ -756,7 +750,7 @@ pub(crate) async fn live_run(
                     live_message(fonts.as_ref(), &cmd, &fetched, &kfiles, &mut region).await;
                 let render_ms = render_start.elapsed().as_millis();
                 let edit_start = std::time::Instant::now();
-                if edit_posted(&poster, &http, channel, msg.id, text, files).await {
+                if edit_posted(&http, channel, msg.id, text, files).await {
                     let edit_ms = edit_start.elapsed().as_millis();
                     if let Some(note) = slow_cycle_note(fetch_ms, render_ms, edit_ms) {
                         eprintln!("live: {} for {}", note, out_f);

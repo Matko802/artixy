@@ -89,7 +89,6 @@ async fn main() {
             let _ = save_json(&ps, text).await;
         }
     }
-    crate::webhook::init_webhook_urls(file_config.webhook_urls);
     let _ = std::env::set_current_dir(project_dir());
     let vm: String = file_config
         .vm_name

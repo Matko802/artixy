@@ -132,10 +132,6 @@ pub(crate) async fn apply_file_config(data: &Data, cfg: &FileConfig) -> Vec<Stri
             changed.push("vm_name".to_string());
         }
     }
-    if crate::webhook::current_webhook_urls() != cfg.webhook_urls {
-        crate::webhook::set_webhook_urls(cfg.webhook_urls.clone());
-        changed.push("webhook_urls".to_string());
-    }
     changed
 }
 
@@ -185,8 +181,6 @@ pub(crate) struct FileConfig {
     pub(crate) owner_id: Option<u64>,
     #[serde(default)]
     pub(crate) blocked_ids: Vec<u64>,
-    #[serde(default)]
-    pub(crate) webhook_urls: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) discord_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -337,7 +331,7 @@ pub(crate) fn ensure_config_template() {
     lock_config_private();
 }
 
-const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwebhook_urls = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nmanagers = []\nadmin_ids = []\n\n[linux]\n\n[shells]\n";
+const CONFIG_TEMPLATE: &str = "owner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nmanagers = []\nadmin_ids = []\n\n[linux]\n\n[shells]\n";
 
 pub(crate) async fn save_json(path: &str, data: String) -> Result<(), Error> {
     let tmp = format!("{}.{}.tmp", path, random_suffix());
