@@ -364,6 +364,12 @@ pub(crate) async fn ollama_chat(
     let url = format!("{host}/api/chat");
     let tagged = format!("[{}]: {}", speaker_tag(speaker), prompt);
     let past = snapshot(channel);
+    eprintln!(
+        "ai chat: model={} sys_chars={} hist_msgs={}",
+        model,
+        system_prompt.chars().count(),
+        past.len()
+    );
     let mut names: Vec<String> = vec![speaker_tag(speaker)];
     for e in &past {
         if e.role == "assistant" {
