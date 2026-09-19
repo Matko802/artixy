@@ -288,7 +288,7 @@ pub(crate) fn is_api_full_err(s: &str) -> bool {
 }
 
 pub(crate) fn api_full_message() -> String {
-    "Sorry, I'm running hot right now (API full/rate limited) nya :3 — ask me again in a minute or ask something I can answer from what I already know.".to_string()
+    "Sorry, I'm running hot right now (API full/rate limited) — try again in a minute.".to_string()
 }
 
 async fn chat_once(
@@ -334,7 +334,7 @@ pub(crate) async fn glitch_text(host: &str, model: &str, system_prompt: &str) ->
         messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
     }
     messages.push(
-        serde_json::json!({"role": "user", "content": "You just glitched out. Tell the user cutely in one short sentence, no details."}),
+        serde_json::json!({"role": "user", "content": "You just glitched out. Tell the user in one short sentence, no details."}),
     );
     match chat_once(&url, model, &messages).await {
         Ok(m) => {
@@ -402,6 +402,11 @@ pub(crate) async fn ollama_chat(
         }
     }
     messages.push(serde_json::json!({"role": "user", "content": tagged.clone()}));
+    // Repeat the backstory last so the model follows the current TOML
+    // prompt strictly instead of drifting into old history style.
+    if !system_prompt.trim().is_empty() {
+        messages.push(serde_json::json!({"role": "system", "content": system_prompt}));
+    }
     let first = match chat_once(&url, model, &messages).await {
         Ok(m) => m,
         Err(e) if is_api_full_err(&e.to_string()) => {
@@ -419,6 +424,12 @@ pub(crate) async fn ollama_chat(
 pub(crate) fn clear_history(channel: u64) {
     if let Ok(mut map) = history_map().lock() {
         map.remove(&channel);
+    }
+}
+
+pub(crate) fn clear_all_history() {
+    if let Ok(mut map) = history_map().lock() {
+        map.clear();
     }
 }
 

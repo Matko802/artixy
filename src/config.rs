@@ -117,6 +117,9 @@ pub(crate) async fn apply_file_config(data: &Data, cfg: &FileConfig) -> Vec<Stri
         }
         if s.ai_prompt != cfg.ai_prompt {
             s.ai_prompt = cfg.ai_prompt.clone();
+            // Old replies were written in the old persona — drop them so the
+            // model follows the new backstory instead of past style.
+            crate::ai::clear_all_history();
             changed.push("ai_prompt".to_string());
         }
     }
