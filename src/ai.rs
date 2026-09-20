@@ -329,6 +329,7 @@ async fn generate_once(
     system: &str,
     prompt: &str,
     temperature: f32,
+    think: bool,
 ) -> Result<String, Error> {
     // /api/generate with an explicit `system` field is the dependable
     // per-request override: unlike /api/chat system messages, it reliably
@@ -337,6 +338,9 @@ async fn generate_once(
         "model": model,
         "prompt": prompt,
         "stream": false,
+        // Thinking models (qwen3.5, deepseek-r1, …) otherwise burn a minute+
+        // on hidden chain-of-thought before replying; off by default.
+        "think": think,
         "keep_alive": "10m",
         "options": { "temperature": clamp_temperature(temperature) },
     });
@@ -374,6 +378,7 @@ pub(crate) async fn glitch_text(
     model: &str,
     system_prompt: &str,
     temperature: f32,
+    think: bool,
 ) -> String {
     // Don't hammer a full API with another call — return a helpful static fallback.
     // Callers that already know the error was api-full should prefer api_full_message().
@@ -384,6 +389,7 @@ pub(crate) async fn glitch_text(
         system_prompt,
         "You just glitched out. Tell the user in one short sentence, no details.",
         temperature,
+        think,
     )
     .await {
         Ok(raw) => {
@@ -409,6 +415,7 @@ pub(crate) async fn ollama_chat(
     prompt: &str,
     system_prompt: &str,
     temperature: f32,
+    think: bool,
 ) -> Result<String, Error> {
     let host = host.trim_end_matches('/');
     let url = format!("{host}/api/generate");
@@ -439,7 +446,7 @@ pub(crate) async fn ollama_chat(
         }
     }
     let transcript = build_transcript(&past, &tagged, &names);
-    let first = match generate_once(&url, model, system_prompt, &transcript, temperature).await {
+    let first = match generate_once(&url, model, system_prompt, &transcript, temperature, think).await {
         Ok(text) => text,
         Err(e) if is_api_full_err(&e.to_string()) => {
             eprintln!("ollama_chat: api full on first call, offline fallback");

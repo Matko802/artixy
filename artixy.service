@@ -5,7 +5,9 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/artixy
-EnvironmentFile=%h/artixy/.env
+# Dash prefix = optional: unit must not fail with 'Result: resources'
+# when the file is absent (token lives in ~/.config/artixy/config.toml).
+EnvironmentFile=-%h/artixy/.env
 ExecStart=%h/artixy/target/release/artixy
 Restart=on-failure
 RestartSec=5

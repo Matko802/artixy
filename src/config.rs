@@ -25,6 +25,12 @@ pub(crate) struct BotSettings {
     pub(crate) ai_prompt: String,
     #[serde(default = "crate::ai::default_temperature")]
     pub(crate) ai_temperature: f32,
+    #[serde(default = "think_default_off")]
+    pub(crate) ai_think: bool,
+}
+
+fn think_default_off() -> bool {
+    false
 }
 
 fn sayas_default_off() -> bool {
@@ -46,6 +52,7 @@ impl Default for BotSettings {
             ollama_host: crate::ai::default_host(),
             ai_prompt: String::new(),
             ai_temperature: crate::ai::default_temperature(),
+            ai_think: think_default_off(),
         }
     }
 }
@@ -128,6 +135,10 @@ pub(crate) async fn apply_file_config(data: &Data, cfg: &FileConfig) -> Vec<Stri
         if s.ai_temperature != cfg.ai_temperature {
             s.ai_temperature = crate::ai::clamp_temperature(cfg.ai_temperature);
             changed.push("ai_temperature".to_string());
+        }
+        if s.ai_think != cfg.ai_think {
+            s.ai_think = cfg.ai_think;
+            changed.push("ai_think".to_string());
         }
     }
     {
@@ -230,6 +241,8 @@ pub(crate) struct FileConfig {
     pub(crate) ai_prompt: String,
     #[serde(default = "crate::ai::default_temperature")]
     pub(crate) ai_temperature: f32,
+    #[serde(default = "think_default_off")]
+    pub(crate) ai_think: bool,
 }
 
 pub(crate) fn apply_legacy_import(
@@ -277,6 +290,7 @@ pub(crate) async fn persist_runtime(data: &Data) -> Result<(), Error> {
         cfg.ollama_host = s.ollama_host.clone();
         cfg.ai_prompt = s.ai_prompt.clone();
         cfg.ai_temperature = s.ai_temperature;
+        cfg.ai_think = s.ai_think;
     }
     {
         let m = data.shells.read().await;
@@ -376,7 +390,7 @@ pub(crate) fn ensure_config_template() {
     lock_config_private();
 }
 
-const CONFIG_TEMPLATE: &str = "# artixy config — edits hot-apply within seconds, no restart needed.\n# File location: ~/.config/artixy/config.toml (NOT the project dir).\n# Multi-line ai_prompt needs triple quotes:\n#   ai_prompt = \"\"\"You are artixy...\n#   second line\"\"\"\nowner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nai_prompt = \"\"\nai_temperature = 0.8\nmanagers = []\nadmin_ids = []\n\n[linux]\n\n[shells]\n";
+const CONFIG_TEMPLATE: &str = "# artixy config — edits hot-apply within seconds, no restart needed.\n# File location: ~/.config/artixy/config.toml (NOT the project dir).\n# Multi-line ai_prompt needs triple quotes:\n#   ai_prompt = \"\"\"You are artixy...\n#   second line\"\"\"\nowner_id = 0\ndiscord_token = \"\"\nvm_name = \"\"\nblocked_ids = []\nwar_mode = false\nai_enabled = false\nai_model = \"llama3.1\"\nollama_host = \"http://127.0.0.1:11434\"\nai_prompt = \"\"\nai_temperature = 0.8\nai_think = false\nmanagers = []\nadmin_ids = []\n\n[linux]\n\n[shells]\n";
 
 pub(crate) async fn save_json(path: &str, data: String) -> Result<(), Error> {
     let tmp = format!("{}.{}.tmp", path, random_suffix());

@@ -133,6 +133,7 @@ async fn main() {
             },
             ai_prompt: file_config.ai_prompt.clone(),
             ai_temperature: crate::ai::clamp_temperature(file_config.ai_temperature),
+            ai_think: file_config.ai_think,
         })),
         shells: std::sync::Arc::new(tokio::sync::RwLock::new(file_config.shells.clone())),
     };
