@@ -14,7 +14,7 @@ mod webhook;
 use poise::serenity_prelude as serenity;
 
 use crate::commands::{
-    ai, botrestart, help, info, notify, ps, purge_replies, restart, run, sayas, send, shell,
+    ai, ask, botrestart, help, info, notify, ps, purge_replies, restart, run, sayas, send, shell,
     admin, start, status, stop, upload, user, warmode,
 };
 use crate::config::{Allowed, AllowedFile, BotSettings, Data, apply_legacy_import, config_file_path, ensure_config_template, load_file_config, save_json};
@@ -164,6 +164,7 @@ async fn main() {
                 warmode(),
                 upload(),
                 ai(),
+                ask(),
             ],
             on_error: |error| {
                 Box::pin(async move {

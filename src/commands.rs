@@ -195,7 +195,7 @@ artixy — type commands as a plain message or as slash. One VM, no names needed
 \nVM (owner + added users)\n/ps — list VMs\n/status — state + agent\n/start — power on, wait for agent\n/stop — graceful shutdown\n/restart — reboot\n/info — details + agent\n/run <cmd> — run in the VM as your linked user (e.g. /run ls -la)\n  reply to its live message to type into it (;return ;space ;enter ;esc ;up ;down ;left ;right, add a number to repeat)\n/send </abs/path> — send a host file from share/ (~20MB max, no secrets)\n/upload <file> <dir> — attach a file into /tmp/artixy-uploads/ or your /home/<you>/\n\
 \naccounts (owner/admin)\n/user add @u | remove @u | list — linux account + bot access\n/admin add @u | remove @u | list — bot admins (add/remove owner only)\n/shell fish|bash — your shell\n/notify <channel-id> | off — boot message channel\n/purge_replies <user-id> [limit] — delete their replies to my messages\n/warmode true|false — arm or stand down protections\n\
 \nas artix (owner/admin)\n/sayas [message] — post as artix, no args toggles auto mode\n<text>.ar — post that line as artix\n\
-\nai\n@artixy <question> — chat (needs /ai true)\n/ai true|false — on/off\n/ai model:<name> — e.g. model:llama3.1\n/ai prompt:<text> | prompt:clear — backstory (long text goes in ai_prompt in config)\n/ai think:true|false — model reasoning, off is fast (default)\n/ai forget:true — forget this channel\n\
+\nai\n@artixy <question> — chat (needs /ai true)\n/ask <question> — ask the AI, answers you directly\n/ai true|false — on/off\n/ai model:<name> — e.g. model:llama3.1\n/ai prompt:<text> | prompt:clear — backstory (long text goes in ai_prompt in config)\n/ai think:true|false — model reasoning, off is fast (default)\n/ai forget:true — forget this channel\n\
 \nWarning: managers can power the machine on/off. Keep the token secret: `.env` only, never git.";
 
 #[poise::command(
@@ -638,13 +638,8 @@ pub(crate) async fn sayas(
         return sayas_toggle(ctx).await;
     }
     let is_slash = matches!(ctx, poise::Context::Application(_));
-    let is_dm = ctx.guild_id().is_none();
     if is_slash {
-        if is_dm {
-            let _ = ctx.defer().await;
-        } else {
-            let _ = ctx.defer_ephemeral().await;
-        }
+        let _ = ctx.defer().await;
     } else {
         maybe_defer(ctx).await;
     }
@@ -685,28 +680,32 @@ pub(crate) async fn sayas(
         }
         return Ok(());
     }
-    if is_slash && reply_to.is_none() {
-        let mut dm_body = body.clone();
-        if !problems.is_empty() {
-            if !dm_body.is_empty() {
-                dm_body.push('\n');
-            }
-            dm_body.push_str(&problems.join("\n"));
-        }
-        let mut reply = poise::CreateReply::default();
-        if !dm_body.is_empty() {
-            reply = reply.content(dm_body);
-        }
-        for (name, bytes) in &files {
-            reply = reply.attachment(serenity::CreateAttachment::bytes(bytes.clone(), name.clone()));
-        }
-        ctx.send(reply).await?;
-        return Ok(());
-    }
-    let send_res: Result<(), Error> = async {
-        if let Some(target) = reply_to {
-            let Some((ch_id, msg_id)) = parse_message_ref(&target, channel.get()) else {
-                if is_slash {
+    if is_slash {
+        let mut content = body.clone();
+        if let Some(target) = reply_to.as_deref() {
+            let quote = match parse_message_ref(target, channel.get()) {
+                Some((ch_id, msg_id)) => {
+                    match serenity::ChannelId::new(ch_id)
+                        .message(&http, serenity::MessageId::new(msg_id))
+                        .await
+                    {
+                        Ok(m) => {
+                            let excerpt: String = m.content.chars().take(200).collect();
+                            Some(format!("> replying to **{}**: {excerpt}\n", m.author.name))
+                        }
+                        Err(_) => {
+                            let _ = ctx
+                                .send(
+                                    poise::CreateReply::default()
+                                        .content("Couldn't fetch that message (wrong channel, or I can't see it).")
+                                        .ephemeral(true),
+                                )
+                                .await;
+                            return Ok(());
+                        }
+                    }
+                }
+                None => {
                     let _ = ctx
                         .send(
                             poise::CreateReply::default()
@@ -714,26 +713,54 @@ pub(crate) async fn sayas(
                                 .ephemeral(true),
                         )
                         .await;
-                } else {
-                    post_text(ctx, "Couldn't read that reply target — give a message ID or a full message link.").await?;
+                    return Ok(());
                 }
+            };
+            if let Some(q) = quote {
+                content = format!("{q}{content}");
+            }
+        }
+        if content.chars().count() > 2000 {
+            files.insert(
+                0,
+                (
+                    attach_name(&content),
+                    cap_file_body(&strip_sgr(&content)).into_bytes(),
+                ),
+            );
+            content = String::new();
+        }
+        if !problems.is_empty() {
+            let _ = ctx
+                .send(
+                    poise::CreateReply::default()
+                        .content(problems.join("\n"))
+                        .ephemeral(true),
+                )
+                .await;
+        }
+        let mut reply = poise::CreateReply::default();
+        if !content.is_empty() {
+            reply = reply.content(content);
+        }
+        for (name, bytes) in &files {
+            reply = reply.attachment(serenity::CreateAttachment::bytes(bytes.clone(), name.clone()));
+        }
+        ctx.send(reply).await?;
+        crate::ai::record_artixy(channel.get(), &body);
+        return Ok(());
+    }
+    let send_res: Result<(), Error> = async {
+        if let Some(target) = reply_to {
+            let Some((ch_id, msg_id)) = parse_message_ref(&target, channel.get()) else {
+                post_text(ctx, "Couldn't read that reply target — give a message ID or a full message link.").await?;
                 return Ok(());
             };
             let ch = serenity::ChannelId::new(ch_id);
             let target_msg = match ch.message(&http, serenity::MessageId::new(msg_id)).await {
                 Ok(m) => m,
                 Err(_) => {
-                    if is_slash {
-                        let _ = ctx
-                            .send(
-                                poise::CreateReply::default()
-                                    .content("Couldn't fetch that message (wrong channel, or I can't see it).")
-                                    .ephemeral(true),
-                            )
-                            .await;
-                    } else {
-                        post_text(ctx, "Couldn't fetch that message (wrong channel, or I can't see it).").await?;
-                    }
+                    post_text(ctx, "Couldn't fetch that message (wrong channel, or I can't see it).").await?;
                     return Ok(());
                 }
             };
@@ -747,17 +774,7 @@ pub(crate) async fn sayas(
                     builder.add_file(serenity::CreateAttachment::bytes(bytes.clone(), name.clone()));
             }
             if ch.send_message(&http, builder).await.is_err() {
-                if is_slash {
-                    let _ = ctx
-                        .send(
-                            poise::CreateReply::default()
-                                .content("Reply failed (missing permission?).")
-                                .ephemeral(true),
-                        )
-                        .await;
-                } else {
-                    post_text(ctx, "Reply failed (missing permission?).").await?;
-                }
+                post_text(ctx, "Reply failed (missing permission?).").await?;
             }
         } else if body.chars().count() <= 2000 {
             let _ = post_message(&http, channel, body.clone(), files.clone()).await;
@@ -770,29 +787,11 @@ pub(crate) async fn sayas(
         Ok(())
     }
     .await;
-    let sent_ok = send_res.is_ok();
-    if is_slash {
-        if !problems.is_empty() {
-            let _ = ctx
-                .send(
-                    poise::CreateReply::default()
-                        .content(problems.join("\n"))
-                        .ephemeral(true),
-                )
-                .await;
-        } else if let poise::Context::Application(actx) = ctx {
-            let _ = actx.interaction.delete_response(&http).await;
-        }
-        let _ = send_res;
-    } else {
-        if !problems.is_empty() {
-            let _ = post_text(ctx, problems.join("\n")).await;
-        }
-        send_res?;
+    if !problems.is_empty() {
+        let _ = post_text(ctx, problems.join("\n")).await;
     }
-    if sent_ok {
-        crate::ai::record_artixy(channel.get(), &body);
-    }
+    send_res?;
+    crate::ai::record_artixy(channel.get(), &body);
     Ok(())
 }
 
@@ -1233,6 +1232,120 @@ pub(crate) async fn ai(
         }
     }
     post_private(ctx, notice).await?;
+    Ok(())
+}
+
+#[poise::command(
+    slash_command,
+    prefix_command,
+    install_context = "Guild|User",
+    interaction_context = "Guild|BotDm|PrivateChannel"
+)]
+pub(crate) async fn ask(
+    ctx: Context<'_>,
+    #[description = "Question for the AI (answers you directly)"] question: String,
+) -> Result<(), Error> {
+    if !need_public(ctx).await? {
+        return Ok(());
+    }
+    let (ai_on, ai_model, ai_host, ai_prompt, ai_temp, ai_think) = {
+        let s = ctx.data().settings.read().await;
+        (
+            s.ai_enabled,
+            s.ai_model.clone(),
+            crate::ai::resolve_host(&s.ollama_host),
+            s.ai_prompt.clone(),
+            s.ai_temperature,
+            s.ai_think,
+        )
+    };
+    let is_slash = matches!(ctx, poise::Context::Application(_));
+    if !ai_on {
+        let msg = "AI is off — the owner runs `/ai true model:<name>` to enable me.";
+        if is_slash {
+            let _ = ctx
+                .send(poise::CreateReply::default().content(msg).ephemeral(true))
+                .await;
+        } else {
+            post_text(ctx, msg).await?;
+        }
+        return Ok(());
+    }
+    let mut prompt = question.trim().to_string();
+    if prompt.is_empty() {
+        let msg = "Ask me something — `/ask <question>`.";
+        if is_slash {
+            let _ = ctx
+                .send(poise::CreateReply::default().content(msg).ephemeral(true))
+                .await;
+        } else {
+            post_text(ctx, msg).await?;
+        }
+        return Ok(());
+    }
+    if prompt.chars().count() > 4000 {
+        prompt = prompt.chars().take(4000).collect();
+    }
+    let speaker = {
+        let a = ctx.author();
+        let nick: Option<String> = if let poise::Context::Prefix(pctx) = ctx {
+            pctx.msg.member.as_ref().and_then(|m| m.nick.clone())
+        } else {
+            None
+        };
+        let display = nick
+            .or_else(|| a.global_name.clone())
+            .unwrap_or_else(|| a.name.clone());
+        if display == a.name {
+            display
+        } else {
+            format!("{display} (@{})", a.name)
+        }
+    };
+    let http = ctx.serenity_context().http.clone();
+    let channel = ctx.channel_id();
+    if is_slash {
+        let _ = ctx.defer().await;
+    } else {
+        let _ = channel.broadcast_typing(&http).await;
+    }
+    let answer = match crate::ai::ollama_chat(
+        &ai_host,
+        &ai_model,
+        channel.get(),
+        &speaker,
+        &prompt,
+        &ai_prompt,
+        ai_temp,
+        ai_think,
+    )
+    .await
+    {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("ask failed (model {ai_model} on {ai_host}): {e}");
+            if crate::ai::is_api_full_err(&e.to_string()) {
+                crate::ai::api_full_message()
+            } else {
+                crate::ai::glitch_text(&ai_host, &ai_model, &ai_prompt, ai_temp, ai_think).await
+            }
+        }
+    };
+    if is_slash {
+        for c in crate::ai::chunk_reply(&answer) {
+            let _ = ctx.send(poise::CreateReply::default().content(c)).await;
+        }
+    } else if let poise::Context::Prefix(pctx) = ctx {
+        let mut first = true;
+        for c in crate::ai::chunk_reply(&answer) {
+            if first {
+                let _ = pctx.msg.reply(&http, &c).await;
+                first = false;
+            } else if post_message(&http, channel, c, Vec::new()).await.is_none() {
+                break;
+            }
+        }
+    }
     Ok(())
 }
 
