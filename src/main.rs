@@ -17,6 +17,7 @@ use crate::commands::{
     ai, ask, botrestart, help, info, notify, ps, purge_replies, restart, run, sayas, send, shell,
     admin, start, status, stop, upload, user, warmode,
 };
+use crate::commands::BOOT_ART;
 use crate::config::{Allowed, AllowedFile, BotSettings, Data, apply_legacy_import, config_file_path, ensure_config_template, load_file_config, save_json};
 use crate::util::project_dir;
 
@@ -195,6 +196,15 @@ async fn main() {
                     })?;
                 let stale_vm = data.vm.read().await.clone();
                 crate::live::cleanup_stale_live_files(&stale_vm).await;
+                if let Some(ch) = data.settings.read().await.notify_channel {
+                    let _ = crate::webhook::post_message(
+                        &ctx.http,
+                        serenity::ChannelId::new(ch),
+                        format!("```\n{BOOT_ART}\n```"),
+                        Vec::new(),
+                    )
+                    .await;
+                }
                 Ok(data)
             })
         })
