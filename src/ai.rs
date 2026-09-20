@@ -303,8 +303,6 @@ pub(crate) fn api_full_message() -> String {
     "Sorry, I'm running hot right now (API full/rate limited) — try again in a minute.".to_string()
 }
 
-/// Flat transcript for /api/generate: past turns plus the current tagged
-/// message. Instructions live in `system`, runtime data lives here.
 pub(crate) fn build_transcript(past: &[HistoryItem], tagged: &str, names: &[String]) -> String {
     let mut out = String::new();
     for e in past {
@@ -331,15 +329,10 @@ async fn generate_once(
     temperature: f32,
     think: bool,
 ) -> Result<String, Error> {
-    // /api/generate with an explicit `system` field is the dependable
-    // per-request override: unlike /api/chat system messages, it reliably
-    // replaces any persona baked into the model's Modelfile.
     let mut req = serde_json::json!({
         "model": model,
         "prompt": prompt,
         "stream": false,
-        // Thinking models (qwen3.5, deepseek-r1, …) otherwise burn a minute+
-        // on hidden chain-of-thought before replying; off by default.
         "think": think,
         "keep_alive": "10m",
         "options": { "temperature": clamp_temperature(temperature) },
@@ -380,8 +373,6 @@ pub(crate) async fn glitch_text(
     temperature: f32,
     think: bool,
 ) -> String {
-    // Don't hammer a full API with another call — return a helpful static fallback.
-    // Callers that already know the error was api-full should prefer api_full_message().
     let url = format!("{}/api/generate", host.trim_end_matches('/'));
     match generate_once(
         &url,

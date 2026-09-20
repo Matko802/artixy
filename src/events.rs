@@ -52,9 +52,6 @@ pub(crate) async fn event_handler(
     let serenity::FullEvent::Message { new_message } = event else {
         return Ok(());
     };
-    // No PluralKit support: webhook messages (PK reposts, other bots) are
-    // ignored entirely. PK deletes each message and reposts it via webhook,
-    // so handling both copies answered everything twice.
     if new_message.webhook_id.is_some() {
         return Ok(());
     }

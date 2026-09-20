@@ -127,8 +127,6 @@ pub(crate) async fn apply_file_config(data: &Data, cfg: &FileConfig) -> Vec<Stri
         }
         if s.ai_prompt != cfg.ai_prompt {
             s.ai_prompt = cfg.ai_prompt.clone();
-            // Old replies were written in the old persona — drop them so the
-            // model follows the new backstory instead of past style.
             crate::ai::clear_all_history();
             changed.push("ai_prompt".to_string());
         }
@@ -271,8 +269,6 @@ pub(crate) async fn persist_runtime(data: &Data) -> Result<(), Error> {
         return Err("config file has a TOML parse error — not overwriting it; fix ai_prompt quoting (multi-line needs \"\"\"...\"\"\")".into());
     }
     let mut cfg = try_load_file_config().unwrap_or_default();
-    // Absorb any pending manual edits first so a bot command issued right
-    // after a TOML edit doesn't clobber the edit when writing back.
     apply_file_config(data, &cfg).await;
     {
         let a = data.allowed.read().await;

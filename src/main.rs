@@ -140,7 +140,6 @@ async fn main() {
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            // Text prefix so commands also work as plain `/cmd` messages.
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some("/".to_string()),
                 ..Default::default()
@@ -195,8 +194,6 @@ async fn main() {
                     })?;
                 let stale_vm = data.vm.read().await.clone();
                 crate::live::cleanup_stale_live_files(&stale_vm).await;
-                // No boot post: the notify channel is only for real
-                // notifications now, not startup art on every restart.
                 Ok(data)
             })
         })

@@ -32,8 +32,6 @@ pub(crate) async fn is_elevated(ctx: Context<'_>) -> bool {
     crate::config::elevated_allowed(a.owner, &a.admins, &a.blocked, id)
 }
 
-/// Basenames `/send` must never exfiltrate, even for the owner.
-/// Case-insensitive; intentionally broad (secure default).
 pub(crate) fn is_sensitive_send_name(name: &str) -> bool {
     let n = name.trim().to_lowercase();
     if n.is_empty() || n.starts_with('.') {
@@ -63,7 +61,6 @@ pub(crate) fn is_sensitive_send_name(name: &str) -> bool {
     false
 }
 
-/// True when no component of a share-relative path is a dotfile/dotdir.
 pub(crate) fn share_rel_has_dot_component(rel: &std::path::Path) -> bool {
     rel.components().any(|c| {
         c.as_os_str()
@@ -73,8 +70,6 @@ pub(crate) fn share_rel_has_dot_component(rel: &std::path::Path) -> bool {
     })
 }
 
-/// Lexically normalize a guest absolute dir: resolve `.`/`..`/dup slashes
-/// without touching the guest fs. Returns `None` on bad input.
 pub(crate) fn normalize_guest_dir(dir: &str) -> Option<String> {
     let d = dir.trim();
     if !d.starts_with('/') || d.contains('\0') || d.len() > 512 {
@@ -103,9 +98,6 @@ pub(crate) fn normalize_guest_dir(dir: &str) -> Option<String> {
     Some(format!("/{}", stack.join("/")))
 }
 
-/// Allowlist for `/upload` destinations. Managers may only write to the
-/// shared staging dir or their own linked home dir — never `/`, `/etc`,
-/// `/root`, or someone else's home.
 pub(crate) fn allowed_upload_dir(normalized: &str, linked: Option<&str>) -> bool {
     if normalized == "/tmp/artixy-uploads"
         || normalized.starts_with("/tmp/artixy-uploads/")
@@ -152,6 +144,33 @@ pub(crate) async fn need_public(ctx: Context<'_>) -> Result<bool, Error> {
 pub(crate) async fn maybe_defer(ctx: Context<'_>) {
     if matches!(ctx, poise::Context::Application(_)) {
         let _ = ctx.defer().await;
+    }
+}
+
+pub(crate) async fn post_private(ctx: Context<'_>, content: String) -> Result<(), Error> {
+    let mut content = content;
+    if content.chars().count() > 1900 {
+        let kept: String = content.chars().take(1900).collect();
+        content = format!("{kept}\n…(truncated)");
+    }
+    if matches!(ctx, poise::Context::Application(_)) {
+        let _ = ctx
+            .send(poise::CreateReply::default().content(content).ephemeral(true))
+            .await;
+        return Ok(());
+    }
+    let http = ctx.serenity_context().http.clone();
+    match ctx.author().create_dm_channel(&http).await {
+        Ok(dm) => {
+            let _ = dm
+                .send_message(&http, serenity::CreateMessage::new().content(content))
+                .await;
+            Ok(())
+        }
+        Err(_) => {
+            post_text(ctx, content).await?;
+            Ok(())
+        }
     }
 }
 
@@ -667,9 +686,6 @@ pub(crate) async fn sayas(
         return Ok(());
     }
     if is_slash && reply_to.is_none() {
-        // Answer the interaction itself so Discord shows
-        // "user used /sayas" with the text + file directly,
-        // instead of a separate post plus an ephemeral receipt.
         let mut dm_body = body.clone();
         if !problems.is_empty() {
             if !dm_body.is_empty() {
@@ -756,8 +772,6 @@ pub(crate) async fn sayas(
     .await;
     let sent_ok = send_res.is_ok();
     if is_slash {
-        // Plain posts answered the interaction directly above; the reply
-        // case already posted in the channel, so just drop the ack.
         if !problems.is_empty() {
             let _ = ctx
                 .send(
@@ -817,9 +831,6 @@ pub(crate) async fn send(
             return Ok(());
         }
     };
-    // Deny-by-default: only files under `<project>/share/` may leave the
-    // host. `.env`, `config.toml`, keys and anything outside `share/` is
-    // never sent — not even by the owner.
     let share = match tokio::fs::canonicalize(root.join("share")).await {
         Ok(s) => s,
         Err(_) => {
@@ -933,9 +944,6 @@ pub(crate) async fn upload(
         post_text(ctx, "Bad file name.").await?;
         return Ok(());
     };
-    // Jail: only the shared staging dir or the caller's own linked home
-    // dir. Anything else (/, /etc, /root, someone else's home) is refused
-    // before anything is created in the guest.
     let Some(normalized) = normalize_guest_dir(dir.trim()) else {
         post_text(ctx, "Bad destination dir — use `/tmp/artixy-uploads/...` or your own `/home/<you>/...`.").await?;
         return Ok(());
@@ -1165,7 +1173,7 @@ pub(crate) async fn ai(
         } else {
             ai_prompt.clone()
         };
-        post_text(ctx, format!("model: {ai_model}\nbackstory: {backstory}")).await?;
+        post_private(ctx, format!("**model:** `{ai_model}`\n**backstory:** {backstory}")).await?;
         return Ok(());
     }
     let mut notice: String;
@@ -1224,7 +1232,7 @@ pub(crate) async fn ai(
             _ => {}
         }
     }
-    post_text(ctx, notice).await?;
+    post_private(ctx, notice).await?;
     Ok(())
 }
 

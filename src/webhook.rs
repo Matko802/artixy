@@ -2,9 +2,6 @@ use poise::serenity_prelude as serenity;
 
 use crate::{Context, Error};
 
-// Direct-send helpers (no Discord webhook impersonation).
-// Previously this module managed webhook URL pools, a posted-message
-// registry, and war-mode reposts. Now everything posts/edits as the bot.
 
 pub(crate) fn is_own_message(
     author: serenity::UserId,
