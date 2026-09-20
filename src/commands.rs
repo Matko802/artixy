@@ -11,13 +11,6 @@ use crate::{
 };
 
 pub(crate) async fn real_id(ctx: Context<'_>) -> u64 {
-    if let poise::Context::Prefix(pctx) = ctx {
-        if pctx.msg.webhook_id.is_some() {
-            if let Some(p) = crate::pk::resolve(pctx.msg.id.get()).await {
-                return p.id;
-            }
-        }
-    }
     ctx.author().id.get()
 }
 
@@ -1163,28 +1156,16 @@ pub(crate) async fn ai(
         return Ok(());
     }
     if !changing {
-        let (state, ai_model, ai_host, ai_prompt, ai_temp, ai_think) = {
+        let (ai_model, ai_prompt) = {
             let s = ctx.data().settings.read().await;
-            (
-                if s.ai_enabled { "enabled" } else { "disabled" }.to_string(),
-                s.ai_model.clone(),
-                crate::ai::resolve_host(&s.ollama_host),
-                s.ai_prompt.clone(),
-                s.ai_temperature,
-                s.ai_think,
-            )
+            (s.ai_model.clone(), s.ai_prompt.clone())
         };
         let backstory = if ai_prompt.trim().is_empty() {
-            "backstory: none (set with `/ai prompt:...` or `ai_prompt` in config)".to_string()
+            "none".to_string()
         } else {
-            let preview: String = ai_prompt.chars().take(120).collect();
-            format!("backstory ({} chars): `{preview}`", ai_prompt.chars().count())
+            ai_prompt.clone()
         };
-        post_text(ctx, format!(
-            "AI chat is **{state}** — model `{ai_model}` via ollama (`{ai_host}`), temp `{ai_temp}`, think `{think}`.\n{backstory}\nOwner: `/ai true model:llama3.1` or `/ai true model:qwen3:4b`. Then just ping me `@artixy <question>` or `artixy <question>`.",
-            think = if ai_think { "on (slow)" } else { "off (fast)" },
-        ))
-        .await?;
+        post_text(ctx, format!("model: {ai_model}\nbackstory: {backstory}")).await?;
         return Ok(());
     }
     let mut notice: String;

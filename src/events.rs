@@ -52,15 +52,13 @@ pub(crate) async fn event_handler(
     let serenity::FullEvent::Message { new_message } = event else {
         return Ok(());
     };
-    let pk = if new_message.webhook_id.is_some() {
-        crate::pk::resolve(new_message.id.get()).await
-    } else {
-        None
-    };
-    let id = pk
-        .as_ref()
-        .map(|p| p.id)
-        .unwrap_or_else(|| new_message.author.id.get());
+    // No PluralKit support: webhook messages (PK reposts, other bots) are
+    // ignored entirely. PK deletes each message and reposts it via webhook,
+    // so handling both copies answered everything twice.
+    if new_message.webhook_id.is_some() {
+        return Ok(());
+    }
+    let id = new_message.author.id.get();
     let (owner, blocked, war) = {
         let a = data.allowed.read().await;
         let s = data.settings.read().await;
@@ -150,15 +148,12 @@ pub(crate) async fn event_handler(
                 return Ok(());
             }
             let mut prompt = prompt0.clone();
-            let display = match &pk {
-                Some(p) => p.name.clone(),
-                None => new_message
-                    .member
-                    .as_ref()
-                    .and_then(|m| m.nick.clone())
-                    .or_else(|| new_message.author.global_name.clone())
-                    .unwrap_or_else(|| new_message.author.name.clone()),
-            };
+            let display = new_message
+                .member
+                .as_ref()
+                .and_then(|m| m.nick.clone())
+                .or_else(|| new_message.author.global_name.clone())
+                .unwrap_or_else(|| new_message.author.name.clone());
             let speaker = if display == new_message.author.name {
                 display
             } else {

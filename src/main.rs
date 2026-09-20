@@ -4,7 +4,6 @@ mod config;
 mod events;
 mod kitty;
 mod live;
-mod pk;
 mod pngencode;
 mod scrub;
 mod termrender;
