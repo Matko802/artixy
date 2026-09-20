@@ -183,7 +183,7 @@ artixy — type commands as a plain message or as slash. One VM, no names needed
 \nVM (owner + added users)\n/ps — list VMs\n/status — state + agent\n/start — power on, wait for agent\n/stop — graceful shutdown\n/restart — reboot\n/info — details + agent\n/run <cmd> — run in the VM as your linked user (e.g. /run ls -la)\n  reply to its live message to type into it (;return ;space ;enter ;esc ;up ;down ;left ;right, add a number to repeat)\n/send </abs/path> — send a host file from share/ (~20MB max, no secrets)\n/upload <file> <dir> — attach a file into /tmp/artixy-uploads/ or your /home/<you>/\n\
 \naccounts (owner/admin)\n/user add @u | remove @u | list — linux account + bot access\n/admin add @u | remove @u | list — bot admins (add/remove owner only)\n/shell fish|bash — your shell\n/notify <channel-id> | off — boot message channel\n/purge_replies <user-id> [limit] — delete their replies to my messages\n/warmode true|false — arm or stand down protections\n\
 \nas artix (owner/admin)\n/sayas [message] — post as artix, no args toggles auto mode\n<text>.ar — post that line as artix\n\
-\nai\n@artixy <question> — chat (needs /ai true)\n/ai true|false — on/off\n/ai model:<name> — e.g. model:llama3.1\n/ai prompt:<text> | prompt:clear — backstory (long text goes in ai_prompt in config)\n/ai forget:true — forget this channel\n\
+\nai\n@artixy <question> — chat (needs /ai true)\n/ai true|false — on/off\n/ai model:<name> — e.g. model:llama3.1\n/ai prompt:<text> | prompt:clear — backstory (long text goes in ai_prompt in config)\n/ai think:true|false — model reasoning, off is fast (default)\n/ai forget:true — forget this channel\n\
 \nWarning: managers can power the machine on/off. Keep the token secret: `.env` only, never git.";
 
 #[poise::command(
@@ -1143,6 +1143,7 @@ pub(crate) async fn ai(
     #[description = "Ollama model e.g. llama3.1 or qwen3:4b"] model: Option<String>,
     #[description = "Backstory prompt (short; 'clear' removes it; long text goes in ai_prompt in config)"] prompt: Option<String>,
     #[description = "true to forget conversation memory in this channel"] forget: Option<bool>,
+    #[description = "true lets the model think before replying (slow), false answers directly (fast)"] think: Option<bool>,
 ) -> Result<(), Error> {
     if forget == Some(true) {
         if !need_public(ctx).await? {
@@ -1153,7 +1154,7 @@ pub(crate) async fn ai(
         return Ok(());
     }
     let prompt_touched = prompt.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some();
-    let changing = enabled.is_some() || model.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some() || prompt_touched;
+    let changing = enabled.is_some() || model.as_deref().map(str::trim).filter(|s| !s.is_empty()).is_some() || prompt_touched || think.is_some();
     if changing && !is_elevated(ctx).await {
         post_denied(ctx, "Owner or admin only.").await?;
         return Ok(());
@@ -1162,7 +1163,7 @@ pub(crate) async fn ai(
         return Ok(());
     }
     if !changing {
-        let (state, ai_model, ai_host, ai_prompt, ai_temp) = {
+        let (state, ai_model, ai_host, ai_prompt, ai_temp, ai_think) = {
             let s = ctx.data().settings.read().await;
             (
                 if s.ai_enabled { "enabled" } else { "disabled" }.to_string(),
@@ -1170,6 +1171,7 @@ pub(crate) async fn ai(
                 crate::ai::resolve_host(&s.ollama_host),
                 s.ai_prompt.clone(),
                 s.ai_temperature,
+                s.ai_think,
             )
         };
         let backstory = if ai_prompt.trim().is_empty() {
@@ -1179,7 +1181,8 @@ pub(crate) async fn ai(
             format!("backstory ({} chars): `{preview}`", ai_prompt.chars().count())
         };
         post_text(ctx, format!(
-            "AI chat is **{state}** — model `{ai_model}` via ollama (`{ai_host}`), temp `{ai_temp}`.\n{backstory}\nOwner: `/ai true model:llama3.1` or `/ai true model:qwen3:4b`. Then just ping me `@artixy <question>` or `artixy <question>`.",
+            "AI chat is **{state}** — model `{ai_model}` via ollama (`{ai_host}`), temp `{ai_temp}`, think `{think}`.\n{backstory}\nOwner: `/ai true model:llama3.1` or `/ai true model:qwen3:4b`. Then just ping me `@artixy <question>` or `artixy <question>`.",
+            think = if ai_think { "on (slow)" } else { "off (fast)" },
         ))
         .await?;
         return Ok(());
@@ -1190,6 +1193,9 @@ pub(crate) async fn ai(
         let mut s = ctx.data().settings.write().await;
         if let Some(on) = enabled {
             s.ai_enabled = on;
+        }
+        if let Some(t) = think {
+            s.ai_think = t;
         }
         if let Some(m) = model {
             let m = m.trim().to_string();
@@ -1212,10 +1218,11 @@ pub(crate) async fn ai(
             }
         }
         notice = format!(
-            "AI chat is **{}** — model `{}` on `{}`.",
+            "AI chat is **{}** — model `{}` on `{}` (think {}).",
             if s.ai_enabled { "enabled" } else { "disabled" },
             s.ai_model,
             crate::ai::resolve_host(&s.ollama_host),
+            if s.ai_think { "on (slow)" } else { "off (fast)" },
         );
         if s.ai_prompt.trim().is_empty() {
             notice.push_str("\nBackstory: none.");
