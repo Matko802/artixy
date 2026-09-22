@@ -156,20 +156,111 @@ pub(crate) async fn event_handler(
             } else {
                 format!("{display} (@{})", new_message.author.name)
             };
-            if prompt.trim().is_empty() {
-                if let Some(r) = new_message.referenced_message.as_ref() {
+            // Resolve the message being replied to, if any — via the inline
+            // referenced message or an API fetch from message_reference.
+            // Always attached so `artixy what is this` (as a reply) sees it.
+            let replied: Option<(String, String)> = match new_message.referenced_message.as_ref() {
+                Some(r) => {
                     let qdisplay = r
                         .author
                         .global_name
                         .clone()
                         .unwrap_or_else(|| r.author.name.clone());
-                    let qtext = r.content.trim().to_string();
-                    if !qtext.is_empty() {
-                        prompt = format!(
-                            "(quoting {}): {qtext}",
-                            crate::ai::speaker_tag(&qdisplay)
-                        );
+                    let mut qtext = r.content.trim().to_string();
+                    if qtext.is_empty() && !r.attachments.is_empty() {
+                        let names: Vec<String> =
+                            r.attachments.iter().map(|a| a.filename.clone()).collect();
+                        qtext = format!("[attachment(s): {}]", names.join(", "));
                     }
+                    if qtext.is_empty() {
+                        None
+                    } else {
+                        Some((qdisplay, qtext))
+                    }
+                }
+                None => match &new_message.message_reference {
+                    Some(mr) => match mr.message_id {
+                        Some(mid) => {
+                            match new_message.channel_id.message(&ctx.http, mid).await {
+                                Ok(orig) => {
+                                    let qdisplay = orig
+                                        .author
+                                        .global_name
+                                        .clone()
+                                        .unwrap_or_else(|| orig.author.name.clone());
+                                    let mut qtext = orig.content.trim().to_string();
+                                    if qtext.is_empty() && !orig.attachments.is_empty() {
+                                        let names: Vec<String> = orig
+                                            .attachments
+                                            .iter()
+                                            .map(|a| a.filename.clone())
+                                            .collect();
+                                        qtext =
+                                            format!("[attachment(s): {}]", names.join(", "));
+                                    }
+                                    if qtext.is_empty() {
+                                        None
+                                    } else {
+                                        Some((qdisplay, qtext))
+                                    }
+                                }
+                                Err(_) => None,
+                            }
+                        }
+                        None => None,
+                    },
+                    None => None,
+                },
+            };
+            if let Some((qdisplay, qtext)) = replied {
+                let qtext: String = qtext.chars().take(1500).collect();
+                if prompt.trim().is_empty() {
+                    prompt = format!(
+                        "(quoting {}): {qtext}",
+                        crate::ai::speaker_tag(&qdisplay)
+                    );
+                } else {
+                    prompt = format!(
+                        "{prompt}\n(replying to {}): {qtext}",
+                        crate::ai::speaker_tag(&qdisplay)
+                    );
+                }
+            }
+            // Give the model visibility into recent channel messages.
+            if let Ok(recent) = new_message
+                .channel_id
+                .messages(&ctx.http, serenity::GetMessages::new().limit(15))
+                .await
+            {
+                let mut ordered = recent;
+                ordered.sort_by_key(|m| m.id);
+                let mut lines: Vec<String> = Vec::new();
+                let mut total = 0usize;
+                for m in ordered.iter().filter(|m| m.id != new_message.id) {
+                    let who = m
+                        .author
+                        .global_name
+                        .clone()
+                        .unwrap_or_else(|| m.author.name.clone());
+                    let mut body = m.content.trim().to_string();
+                    if body.is_empty() && !m.attachments.is_empty() {
+                        let names: Vec<String> =
+                            m.attachments.iter().map(|a| a.filename.clone()).collect();
+                        body = format!("[attachment(s): {}]", names.join(", "));
+                    }
+                    if body.is_empty() {
+                        continue;
+                    }
+                    let body: String = body.chars().take(300).collect();
+                    let line = format!("- {}: {body}", crate::ai::speaker_tag(&who));
+                    total += line.len();
+                    if total > 2500 {
+                        break;
+                    }
+                    lines.push(line);
+                }
+                if !lines.is_empty() {
+                    prompt = format!("{prompt}\n\n[recent messages in channel]:\n{}", lines.join("\n"));
                 }
             }
             if prompt.trim().is_empty() {
@@ -178,8 +269,8 @@ pub(crate) async fn event_handler(
                     .await;
                 return Ok(());
             }
-            if prompt.chars().count() > 4000 {
-                prompt = prompt.chars().take(4000).collect();
+            if prompt.chars().count() > 7000 {
+                prompt = prompt.chars().take(7000).collect();
             }
             let _ = new_message.channel_id.broadcast_typing(&ctx.http).await;
             match crate::ai::ollama_chat(&ai_host, &ai_model, new_message.channel_id.get(), &speaker, &prompt, &ai_prompt, ai_temp, ai_think).await {
