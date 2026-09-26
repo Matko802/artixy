@@ -1,3 +1,7 @@
-/target
+/artixy
+/artixy-go-test
+/artixy-linux-arm64
+/result
 .env
 *.env
+!.env.example

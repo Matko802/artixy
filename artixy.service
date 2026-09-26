@@ -1,14 +1,14 @@
 [Unit]
-Description=artixy - Artix VM Discord bot
+Description=artixy - Artix VM Discord bot (Go)
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=%h/artixy
-# Dash prefix = optional: unit must not fail with 'Result: resources'
-# when the file is absent (token lives in ~/.config/artixy/config.toml).
+# Token lives in ~/.config/artixy/config.toml; .env is optional overrides.
 EnvironmentFile=-%h/artixy/.env
-ExecStart=%h/artixy/target/release/artixy
+ExecStart=%h/artixy/artixy
 Restart=on-failure
 RestartSec=5
 
