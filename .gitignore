@@ -13,6 +13,7 @@ tests/test_live
 tests/test_termrender
 tests/fuzz_jsonc
 tests/fuzz_scrub
+artixy.log
 .env
 *.env
 !.env.example

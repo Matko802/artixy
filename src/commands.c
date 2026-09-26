@@ -307,7 +307,11 @@ void handle_prefix(discord_client_t *c, bot_state_t *st,
 void handle_interaction(discord_client_t *c, bot_state_t *st,
                         const disc_interaction_t *in) {
     /* Defer-first (Discord 3s rule), then follow up. */
-    if (discord_interaction_defer(c, in, false) != 0)
+    fprintf(stderr, "artixy: slash /%s from %llu\n", in->command ? in->command : "?",
+            (unsigned long long)in->author_id);
+    int drc = discord_interaction_defer(c, in, false);
+    fprintf(stderr, "artixy: defer rc=%d\n", drc);
+    if (drc != 0)
         return;
     if (!in->command)
         return;

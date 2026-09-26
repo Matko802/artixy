@@ -23,6 +23,20 @@ static void on_sigint(int sig) {
         discord_stop(g_client);
 }
 
+/* Mirror stderr to artixy.log in the working directory (bot mode only).
+ * Systems without a journal (plain Pi OS) would otherwise lose all logs. */
+static void setup_file_log(void) {
+    FILE *f = fopen("artixy.log", "a");
+    if (!f) {
+        fprintf(stderr, "artixy: warning: cannot open artixy.log\n");
+        return;
+    }
+    setvbuf(f, NULL, _IOLBF, 0);
+    dup2(fileno(f), STDERR_FILENO);
+    /* keep f open for process lifetime */
+    (void)f;
+}
+
 static void on_config_change(const file_config_t *cfg) {
     vm_set_connect_uri(cfg->libvirt_uri);
 }
@@ -153,6 +167,9 @@ int main(int argc, char **argv) {
         return 0;
     }
     bool check_rest = argc > 1 && strcmp(argv[1], "--check-rest") == 0;
+
+    if (!check_rest)
+        setup_file_log();
 
     config_ensure_template();
 
