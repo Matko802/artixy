@@ -39,6 +39,65 @@ void disc_message_free(disc_message_t *m) {
     memset(m, 0, sizeof *m);
 }
 
+static char *dup_str(const char *s) {
+    if (!s)
+        return NULL;
+    return xstrdup(s);
+}
+
+int disc_message_clone(const disc_message_t *src, disc_message_t *dst) {
+    memset(dst, 0, sizeof *dst);
+    dst->id = src->id;
+    dst->channel_id = src->channel_id;
+    dst->guild_id = src->guild_id;
+    dst->author_id = src->author_id;
+    dst->author_name = dup_str(src->author_name);
+    dst->global_name = dup_str(src->global_name);
+    dst->member_nick = dup_str(src->member_nick);
+    dst->author_bot = src->author_bot;
+    dst->from_webhook = src->from_webhook;
+    dst->content = dup_str(src->content);
+    if ((src->author_name && !dst->author_name) ||
+        (src->content && !dst->content))
+        goto fail;
+    if (src->n_mentions) {
+        dst->mentions = xmalloc(src->n_mentions * sizeof *dst->mentions);
+        if (!dst->mentions)
+            goto fail;
+        memcpy(dst->mentions, src->mentions,
+               src->n_mentions * sizeof *dst->mentions);
+        dst->n_mentions = src->n_mentions;
+    }
+    if (src->n_attachments) {
+        dst->attachments =
+            xmalloc(src->n_attachments * sizeof *dst->attachments);
+        if (!dst->attachments)
+            goto fail;
+        memset(dst->attachments, 0,
+               src->n_attachments * sizeof *dst->attachments);
+        for (size_t i = 0; i < src->n_attachments; i++) {
+            dst->attachments[i].id = src->attachments[i].id;
+            dst->attachments[i].filename =
+                dup_str(src->attachments[i].filename);
+            dst->attachments[i].url = dup_str(src->attachments[i].url);
+            dst->attachments[i].size = src->attachments[i].size;
+        }
+        dst->n_attachments = src->n_attachments;
+    }
+    dst->has_reference = src->has_reference;
+    dst->ref_channel_id = src->ref_channel_id;
+    dst->ref_message_id = src->ref_message_id;
+    dst->has_ref_msg = src->has_ref_msg;
+    dst->ref_msg_id = src->ref_msg_id;
+    dst->ref_msg_author_id = src->ref_msg_author_id;
+    dst->ref_msg_author_name = dup_str(src->ref_msg_author_name);
+    dst->ref_msg_content = dup_str(src->ref_msg_content);
+    return 0;
+fail:
+    disc_message_free(dst);
+    return -1;
+}
+
 void disc_interaction_free(disc_interaction_t *in) {
     if (!in)
         return;
@@ -56,6 +115,77 @@ void disc_interaction_free(disc_interaction_t *in) {
     free(in->resolved_users);
     free_attachments(in->resolved_attachments, in->n_resolved_attachments);
     memset(in, 0, sizeof *in);
+}
+
+int disc_interaction_clone(const disc_interaction_t *src,
+                           disc_interaction_t *dst) {
+    memset(dst, 0, sizeof *dst);
+    dst->id = src->id;
+    dst->token = dup_str(src->token);
+    dst->type = src->type;
+    dst->channel_id = src->channel_id;
+    dst->guild_id = src->guild_id;
+    dst->author_id = src->author_id;
+    dst->author_name = dup_str(src->author_name);
+    dst->member_nick = dup_str(src->member_nick);
+    dst->command = dup_str(src->command);
+    if ((src->token && !dst->token) ||
+        (src->author_name && !dst->author_name))
+        goto fail;
+    if (src->n_options) {
+        dst->options = xmalloc(src->n_options * sizeof *dst->options);
+        if (!dst->options)
+            goto fail;
+        memset(dst->options, 0, src->n_options * sizeof *dst->options);
+        for (size_t i = 0; i < src->n_options; i++) {
+            dst->options[i].name = dup_str(src->options[i].name);
+            dst->options[i].type = src->options[i].type;
+            dst->options[i].str_val = dup_str(src->options[i].str_val);
+            dst->options[i].int_val = src->options[i].int_val;
+            dst->options[i].bool_val = src->options[i].bool_val;
+            dst->options[i].user_id = src->options[i].user_id;
+            dst->options[i].attachment_id = src->options[i].attachment_id;
+            if (!dst->options[i].name)
+                goto fail;
+        }
+        dst->n_options = src->n_options;
+    }
+    if (src->n_resolved_users) {
+        dst->resolved_users =
+            xmalloc(src->n_resolved_users * sizeof *dst->resolved_users);
+        if (!dst->resolved_users)
+            goto fail;
+        memset(dst->resolved_users, 0,
+               src->n_resolved_users * sizeof *dst->resolved_users);
+        for (size_t i = 0; i < src->n_resolved_users; i++) {
+            dst->resolved_users[i].id = src->resolved_users[i].id;
+            dst->resolved_users[i].username =
+                dup_str(src->resolved_users[i].username);
+        }
+        dst->n_resolved_users = src->n_resolved_users;
+    }
+    if (src->n_resolved_attachments) {
+        dst->resolved_attachments = xmalloc(src->n_resolved_attachments *
+                                            sizeof *dst->resolved_attachments);
+        if (!dst->resolved_attachments)
+            goto fail;
+        memset(dst->resolved_attachments, 0,
+               src->n_resolved_attachments * sizeof *dst->resolved_attachments);
+        for (size_t i = 0; i < src->n_resolved_attachments; i++) {
+            dst->resolved_attachments[i].id = src->resolved_attachments[i].id;
+            dst->resolved_attachments[i].filename =
+                dup_str(src->resolved_attachments[i].filename);
+            dst->resolved_attachments[i].url =
+                dup_str(src->resolved_attachments[i].url);
+            dst->resolved_attachments[i].size =
+                src->resolved_attachments[i].size;
+        }
+        dst->n_resolved_attachments = src->n_resolved_attachments;
+    }
+    return 0;
+fail:
+    disc_interaction_free(dst);
+    return -1;
 }
 
 static uint64_t get_snowflake(json_t *obj, const char *key) {

@@ -148,17 +148,21 @@ bool config_valid_model_name(const char *s) {
 /* path + template                                                      */
 /* ------------------------------------------------------------------ */
 
+/* Thread-local: handlers run on worker threads (see main.c). */
+static _Thread_local char config_path_buf[4096];
+
 const char *config_path(void) {
-    static char buf[4096];
+    char *buf = config_path_buf;
+    size_t cap = sizeof config_path_buf;
     const char *xdg = getenv("XDG_CONFIG_HOME");
     if (xdg && *xdg) {
-        snprintf(buf, sizeof buf, "%s/artixy/config.jsonc", xdg);
+        snprintf(buf, cap, "%s/artixy/config.jsonc", xdg);
     } else {
         const char *home = getenv("HOME");
         if (!home || !*home) {
-            snprintf(buf, sizeof buf, "config.jsonc");
+            snprintf(buf, cap, "config.jsonc");
         } else {
-            snprintf(buf, sizeof buf, "%s/.config/artixy/config.jsonc", home);
+            snprintf(buf, cap, "%s/.config/artixy/config.jsonc", home);
         }
     }
     return buf;

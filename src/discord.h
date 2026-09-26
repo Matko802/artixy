@@ -55,6 +55,8 @@ typedef struct {
 } disc_message_t;
 
 void disc_message_free(disc_message_t *m);
+/* Deep copy (for handing events to worker threads). Returns 0 on success. */
+int disc_message_clone(const disc_message_t *src, disc_message_t *dst);
 
 /* Interaction option value. */
 typedef struct {
@@ -91,6 +93,9 @@ typedef struct {
 } disc_interaction_t;
 
 void disc_interaction_free(disc_interaction_t *in);
+/* Deep copy (for handing events to worker threads). Returns 0 on success. */
+int disc_interaction_clone(const disc_interaction_t *src,
+                           disc_interaction_t *dst);
 
 /*
  * Parse event JSON (jansson objects, already stripped of envelope).

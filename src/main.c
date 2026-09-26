@@ -8,6 +8,7 @@
 #include "util.h"
 
 #include <curl/curl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,17 +22,76 @@ static void on_sigint(int sig) {
         discord_stop(g_client);
 }
 
+/*
+ * Event handlers run on detached worker threads, NOT the gateway thread.
+ * Rationale: slow commands (AI answers, /start's 90s agent wait, uploads)
+ * must never stall heartbeats or delay other interactions past Discord's
+ * 3s acknowledgement window. All shared state is mutex-guarded and all
+ * per-call scratch is thread-local; events are deep-copied because the
+ * gateway reuses/frees its buffers on return.
+ */
+typedef struct {
+    discord_client_t *c;
+    bot_state_t *st;
+    bool is_interaction;
+    disc_message_t msg;
+    disc_interaction_t inter;
+} event_job_t;
+
+static void *event_worker(void *arg) {
+    event_job_t *job = arg;
+    if (job->is_interaction) {
+        handle_interaction(job->c, job->st, &job->inter);
+        disc_interaction_free(&job->inter);
+    } else {
+        events_handle_message(job->c, job->st, &job->msg);
+        disc_message_free(&job->msg);
+    }
+    free(job);
+    return NULL;
+}
+
+static void spawn_event_worker(event_job_t *job) {
+    pthread_t th;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&th, &at, event_worker, job) != 0) {
+        /* fallback: run inline (gateway stalls, but nothing is lost) */
+        event_worker(job);
+    }
+    pthread_attr_destroy(&at);
+}
+
 static void on_message(discord_client_t *c, const disc_message_t *m, void *ud) {
-    bot_state_t *st = ud;
-    events_handle_message(c, st, m);
+    event_job_t *job = xmalloc(sizeof *job);
+    if (!job)
+        return;
+    job->c = c;
+    job->st = ud;
+    job->is_interaction = false;
+    if (disc_message_clone(m, &job->msg) != 0) {
+        free(job);
+        return;
+    }
+    spawn_event_worker(job);
 }
 
 static void on_interaction(discord_client_t *c, const disc_interaction_t *in,
                            void *ud) {
-    bot_state_t *st = ud;
     if (in->type != 2)
         return;
-    handle_interaction(c, st, in);
+    event_job_t *job = xmalloc(sizeof *job);
+    if (!job)
+        return;
+    job->c = c;
+    job->st = ud;
+    job->is_interaction = true;
+    if (disc_interaction_clone(in, &job->inter) != 0) {
+        free(job);
+        return;
+    }
+    spawn_event_worker(job);
 }
 
 /* Boot art (ported 1:1 from the Rust/Go builds). */

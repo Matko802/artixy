@@ -8,9 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Scratch for the trimmed argument. Callers must consume *arg_out before
- * the next cmd_parse_prefix call (single-threaded use in handlers). */
-static char argbuf[8192];
+/* Scratch for the trimmed argument. Thread-local: command handlers run
+ * on worker threads (see main.c). Consume before the next parse on this
+ * thread. */
+static _Thread_local char argbuf[8192];
 
 const char *artixy_help_text =
     "artixy — type commands as a plain message or as slash. One VM, no names needed.\n"

@@ -6,6 +6,7 @@
 #include "../src/util.h"
 
 #include <jansson.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,8 +106,7 @@ TEST(parse_interaction_json) {
     disc_interaction_free(&in);
 }
 
-TEST(parse_interaction_user_option) {
-    const char *raw = "{"
+TEST(parse_interaction_user_option) {    const char *raw = "{"
                       "\"id\":\"1\",\"token\":\"tok\",\"type\":2,\"channel_id\":\"10\","
                       "\"user\":{\"id\":\"30\",\"username\":\"zed\"},"
                       "\"data\":{\"name\":\"user\",\"resolved\":"
@@ -126,6 +126,107 @@ TEST(parse_interaction_user_option) {
     disc_interaction_free(&in);
 }
 
+TEST(clone_message_roundtrip) {
+    const char *raw = "{"
+                      "\"id\":\"111\",\"channel_id\":\"222\","
+                      "\"author\":{\"id\":\"444\",\"username\":\"bob\"},"
+                      "\"content\":\"hi\","
+                      "\"mentions\":[{\"id\":\"555\"}],"
+                      "\"attachments\":[{\"id\":\"666\",\"filename\":\"f.txt\","
+                      "\"url\":\"http://x/f\",\"size\":12}]}";
+    json_error_t e;
+    json_t *o = json_loads(raw, 0, &e);
+    CHECK(o != NULL);
+    disc_message_t m, c;
+    CHECK(disc_parse_message(o, &m) == 0);
+    json_decref(o);
+    CHECK(disc_message_clone(&m, &c) == 0);
+    CHECK(c.id == 111 && c.author_id == 444);
+    CHECK_STR_EQ(c.content, "hi");
+    CHECK(c.n_mentions == 1 && c.mentions[0] == 555);
+    CHECK(c.n_attachments == 1);
+    CHECK_STR_EQ(c.attachments[0].url, "http://x/f");
+    disc_message_free(&m);
+    /* clone survives source free */
+    CHECK_STR_EQ(c.author_name, "bob");
+    disc_message_free(&c);
+}
+
+TEST(clone_interaction_roundtrip) {
+    const char *raw = "{"
+                      "\"id\":\"1\",\"token\":\"tok\",\"type\":2,"
+                      "\"channel_id\":\"10\","
+                      "\"user\":{\"id\":\"30\",\"username\":\"zed\"},"
+                      "\"data\":{\"name\":\"run\",\"options\":"
+                      "[{\"name\":\"cmd\",\"type\":3,\"value\":\"ls\"}]}}";
+    json_error_t e;
+    json_t *o = json_loads(raw, 0, &e);
+    CHECK(o != NULL);
+    disc_interaction_t in, c;
+    CHECK(disc_parse_interaction(o, &in) == 0);
+    json_decref(o);
+    CHECK(disc_interaction_clone(&in, &c) == 0);
+    CHECK_STR_EQ(c.token, "tok");
+    CHECK_STR_EQ(c.command, "run");
+    CHECK(c.n_options == 1);
+    CHECK_STR_EQ(c.options[0].str_val, "ls");
+    disc_interaction_free(&in);
+    CHECK_STR_EQ(c.author_name, "zed");
+    disc_interaction_free(&c);
+}
+
+static const char stress_raw[] =
+    "{\"id\":\"111\",\"channel_id\":\"222\","
+    "\"author\":{\"id\":\"444\",\"username\":\"bob\"},"
+    "\"content\":\"/status\","
+    "\"mentions\":[{\"id\":\"555\"}],"
+    "\"referenced_message\":{\"id\":\"999\","
+    "\"author\":{\"id\":\"777\",\"username\":\"artixy\"},"
+    "\"content\":\"hi\"}}";
+
+static void *stress_worker(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 300; i++) {
+        json_error_t e;
+        json_t *o = json_loads(stress_raw, 0, &e);
+        if (!o)
+            return (void *)1;
+        disc_message_t m, c;
+        if (disc_parse_message(o, &m) != 0) {
+            json_decref(o);
+            return (void *)1;
+        }
+        json_decref(o);
+        if (disc_message_clone(&m, &c) != 0) {
+            disc_message_free(&m);
+            return (void *)1;
+        }
+        if (c.author_id != 444 || c.ref_msg_author_id != 777) {
+            disc_message_free(&m);
+            disc_message_free(&c);
+            return (void *)1;
+        }
+        disc_message_free(&m);
+        disc_message_free(&c);
+    }
+    return NULL;
+}
+
+TEST(clone_thread_stress) {
+    pthread_t th[8];
+    for (int i = 0; i < 8; i++) {
+        if (pthread_create(&th[i], NULL, stress_worker, NULL) != 0) {
+            CHECK(0); /* thread spawn failed */
+            return;
+        }
+    }
+    for (int i = 0; i < 8; i++) {
+        void *ret = NULL;
+        pthread_join(th[i], &ret);
+        CHECK(ret == NULL);
+    }
+}
+
 int main(void) {
     RUN(prefix_basic);
     RUN(prefix_rejects);
@@ -133,5 +234,8 @@ int main(void) {
     RUN(parse_message_json);
     RUN(parse_interaction_json);
     RUN(parse_interaction_user_option);
+    RUN(clone_message_roundtrip);
+    RUN(clone_interaction_roundtrip);
+    RUN(clone_thread_stress);
     TEST_REPORT();
 }
