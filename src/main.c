@@ -34,6 +34,14 @@ static void on_interaction(discord_client_t *c, const disc_interaction_t *in,
     handle_interaction(c, st, in);
 }
 
+/* Boot art (ported 1:1 from the Rust/Go builds). */
+static const char boot_art[] =
+    "          .        :-------:\n"
+    "        ^/ \\^      :Im here:\n"
+    "        \xe2\x97\x8f   \xe2\x97\x8f     <:-------:\n"
+    "       /  \xcf\x89  \\\n"
+    "      /_/   \\_\\";
+
 static void on_ready(discord_client_t *c, uint64_t bot_id, uint64_t app_id,
                      void *ud) {
     bot_state_t *st = ud;
@@ -57,9 +65,8 @@ static void on_ready(discord_client_t *c, uint64_t bot_id, uint64_t app_id,
     uint64_t ch = st->notify_channel;
     pthread_rwlock_unlock(&st->mu);
     if (has) {
-        char boot[256];
-        snprintf(boot, sizeof boot, "```\n%s\n```",
-                 "artixy online (C build)");
+        char boot[512];
+        snprintf(boot, sizeof boot, "```\n%s\n```", boot_art);
         discord_send_message(c, ch, boot, NULL, 0, NULL);
     }
 }
