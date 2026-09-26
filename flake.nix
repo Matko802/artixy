@@ -1,5 +1,5 @@
 {
-  description = "artixy - Discord bot managing an Artix VM via libvirt (Go)";
+  description = "artixy - Discord bot managing an Artix VM via libvirt (C)";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -16,16 +16,27 @@
     in
     {
       packages = forAllSystems (pkgs: {
-        default = pkgs.buildGoModule {
+        default = pkgs.stdenv.mkDerivation {
           pname = "artixy";
-          version = "0.2.0";
+          version = "0.3.0";
           src = ./.;
-          # vendor/ is committed, so no hash needed and the build is sandbox-safe.
-          vendorHash = null;
-          ldflags = [
-            "-s"
-            "-w"
+          nativeBuildInputs = [ pkgs.gnumake pkgs.pkg-config ];
+          buildInputs = [
+            pkgs.jansson
+            pkgs.curl
+            pkgs.libvterm-neovim
           ];
+          buildPhase = ''
+            make
+          '';
+          checkPhase = ''
+            make test
+          '';
+          doCheck = true;
+          installPhase = ''
+            mkdir -p $out/bin
+            install -Dm755 artixy $out/bin/artixy
+          '';
           meta = {
             mainProgram = "artixy";
             description = "Discord bot managing an Artix VM via libvirt";
@@ -36,15 +47,16 @@
         };
       });
 
-      overlays.default = final: _prev: {
-        artixy = self.packages.${final.system}.default;
-      };
-
       devShells = forAllSystems (pkgs:
         pkgs.mkShell {
           buildInputs = [
-            pkgs.go
-            pkgs.gopls
+            pkgs.gcc
+            pkgs.gnumake
+            pkgs.pkg-config
+            pkgs.jansson
+            pkgs.curl
+            pkgs.libvterm-neovim
+            pkgs.valgrind
           ];
         });
     };

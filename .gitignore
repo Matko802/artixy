@@ -2,6 +2,17 @@
 /artixy-go-test
 /artixy-linux-arm64
 /result
+*.o
+*.d
+tests/test_config
+tests/test_discord
+tests/test_vm
+tests/test_bot
+tests/test_ai
+tests/test_live
+tests/test_termrender
+tests/fuzz_jsonc
+tests/fuzz_scrub
 .env
 *.env
 !.env.example

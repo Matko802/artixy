@@ -1,0 +1,93 @@
+#!/bin/sh
+# Fake virsh for unit tests. Understands just enough of the CLI for vm.c.
+# State: $FAKE_STATE/count (guest-exec-status call counter).
+# Knobs: $FAKE_PING_FAIL=1, $FAKE_EMPTY_FIRST=1.
+if [ "$1" != "--connect" ]; then
+  echo "fake virsh: expected --connect first" >&2
+  exit 1
+fi
+shift 2
+cmd="$1"
+case "$cmd" in
+  list)
+    echo " Id   Name    State"
+    echo "------------------------"
+    echo " -    artix   shut off"
+    exit 0
+    ;;
+  domstate)
+    if [ "$2" = "artix" ]; then
+      echo "shut off"
+      exit 0
+    fi
+    echo "error: failed to get domain '$2'" >&2
+    exit 1
+    ;;
+  dominfo)
+    echo "Id:             -"
+    echo "Name:           artix"
+    echo "State:          shut off"
+    exit 0
+    ;;
+  start|shutdown|reboot)
+    exit 0
+    ;;
+  qemu-agent-command)
+    payload="$3"
+    case "$payload" in
+      *guest-ping*)
+        if [ "$FAKE_PING_FAIL" = "1" ]; then
+          echo "error: agent not responding" >&2
+          exit 1
+        fi
+        exit 0
+        ;;
+      *guest-exec-status*)
+        case "$payload" in
+          *'"pid":9999'*)
+            # Transport encoding of the base64 text "ZGF0YTEyMw=="
+            # (which itself decodes to "data123"): the real agent
+            # base64-encodes whatever the guest command printed.
+            echo '{"return":{"exited":true,"exitcode":0,"out-data":"WkdGMFlURXlNdz09","err-data":""}}'
+            exit 0
+            ;;
+        esac
+        n=0
+        if [ -f "$FAKE_STATE/count" ]; then
+          n=$(cat "$FAKE_STATE/count")
+        fi
+        n=$((n + 1))
+        echo "$n" > "$FAKE_STATE/count"
+        if [ "$n" -lt 3 ]; then
+          echo '{"return":{"exited":false}}'
+        else
+          echo '{"return":{"exited":true,"exitcode":0,"out-data":"aGVsbG8K","err-data":""}}'
+        fi
+        exit 0
+        ;;
+      *guest-exec*)
+        if [ "$FAKE_EMPTY_FIRST" = "1" ] && [ ! -f "$FAKE_STATE/empty_done" ]; then
+          touch "$FAKE_STATE/empty_done"
+          exit 0
+        fi
+        case "$payload" in
+          *base64*)
+            echo '{"return":{"pid":9999}}'
+            ;;
+          *)
+            echo '{"return":{"pid":4242}}'
+            ;;
+        esac
+        exit 0
+        ;;
+      *)
+        echo "fake virsh: unknown agent payload" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "fake virsh: unknown command $cmd" >&2
+    exit 1
+    ;;
+esac
