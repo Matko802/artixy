@@ -23,7 +23,7 @@
           nativeBuildInputs = [ pkgs.gnumake pkgs.pkg-config ];
           buildInputs = [
             pkgs.jansson
-            pkgs.curl
+            pkgs.curlFull
             pkgs.libvterm-neovim
           ];
           buildPhase = ''
@@ -54,7 +54,7 @@
             pkgs.gnumake
             pkgs.pkg-config
             pkgs.jansson
-            pkgs.curl
+            pkgs.curlFull
             pkgs.libvterm-neovim
             pkgs.valgrind
           ];
