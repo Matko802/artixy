@@ -1,6 +1,6 @@
 CC ?= gcc
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -O2 -g
-CPPFLAGS += -Isrc -Ithird_party -D_POSIX_C_SOURCE=200809L $(shell pkg-config --cflags jansson libcurl vterm)
+CPPFLAGS += -Isrc -Ithird_party -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(shell pkg-config --cflags jansson libcurl vterm)
 LDFLAGS ?=
 LDLIBS = $(shell pkg-config --libs jansson libcurl vterm) -lpthread -lm
 
