@@ -3,7 +3,6 @@ module github.com/Matko802/artixy
 go 1.24
 
 require (
-	github.com/BurntSushi/toml v1.6.0
 	github.com/bwmarrin/discordgo v0.29.0
 	golang.org/x/image v0.18.0
 )

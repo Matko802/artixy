@@ -640,10 +640,6 @@ func cmdAsk(b *Bot, ctx *CmdCtx, question string) {
 	}
 	for _, c := range ai.ChunkReply(answer) {
 		ctx.Reply(c)
-		// slash: first reply uses interaction, rest need followups — simplified: send as channel messages
-		if ctx.IsSlash {
-			break
-		}
 	}
 	_ = time.Now
 }

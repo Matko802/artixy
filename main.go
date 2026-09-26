@@ -78,7 +78,8 @@ func main() {
 			Blocked: append([]uint64(nil), fileCfg.BlockedIDs...),
 			Admins:  append([]uint64(nil), fileCfg.AdminIDs...),
 		},
-		VM: vmName,
+		VM:         vmName,
+		LibvirtURI: config.ResolveLibvirtURI(fileCfg.LibvirtURI),
 		Settings: config.BotSettings{
 			NotifyChannel: fileCfg.NotifyChannel,
 			WarMode:       fileCfg.WarMode,
@@ -128,7 +129,10 @@ func main() {
 		}
 	})
 
-	go config.WatchConfig(data)
+	vm.SetConnectionURI(data.LibvirtURI)
+	go config.WatchConfig(data, func(cfg *config.FileConfig) {
+		vm.SetConnectionURI(config.ResolveLibvirtURI(cfg.LibvirtURI))
+	})
 
 	if err := dg.Open(); err != nil {
 		msg := err.Error()

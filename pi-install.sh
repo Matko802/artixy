@@ -10,7 +10,7 @@
 #   - ssh access to pi@raspberrypi.local (password or key)
 #   - Go toolchain on this machine (nix develop / system go)
 #   - libvirt + qemu-guest-agent tools installed ON THE PI if you use VM commands
-#     (sudo apt install -y libvirt-clients), plus ~/.config/artixy/config.toml
+#     (sudo apt install -y libvirt-clients), plus ~/.config/artixy/config.jsonc
 #     with discord_token / owner_id / vm_name.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -49,9 +49,9 @@ ssh "$PI" "systemctl --user status artixy --no-pager | head -n 15 || true"
 
 cat <<EOF
 Done. Next on the Pi (ssh $PI):
-  1. Edit ~/.config/artixy/config.toml (discord_token, owner_id, vm_name).
+  1. Edit ~/.config/artixy/config.jsonc (discord_token, owner_id, vm_name).
      Copy yours from this machine if you like:
-       scp ~/.config/artixy/config.toml $PI:~/.config/artixy/config.toml
-       ssh $PI "chmod 600 ~/.config/artixy/config.toml"
+       scp ~/.config/artixy/config.jsonc $PI:~/.config/artixy/config.jsonc
+       ssh $PI "chmod 600 ~/.config/artixy/config.jsonc"
   2. systemctl --user restart artixy && journalctl --user -u artixy -f
 EOF

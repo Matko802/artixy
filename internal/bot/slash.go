@@ -88,6 +88,22 @@ func (b *Bot) HandleInteraction(s *discordgo.Session, ic *discordgo.InteractionC
 	if ic.Type != discordgo.InteractionApplicationCommand {
 		return
 	}
+	// Acknowledge within Discord's 3s window first ("thinking..."); every
+	// command reply below goes out as a followup. Without this, slow
+	// commands (AI answers, /start, uploads) die with
+	// "The application did not respond".
+	if err := s.InteractionRespond(ic.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	}); err != nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			_, _ = s.FollowupMessageCreate(ic.Interaction, false, &discordgo.WebhookParams{
+				Content: "Something broke on my side — check the bot log.",
+			})
+		}
+	}()
 	data := ic.ApplicationCommandData()
 	opts := map[string]*discordgo.ApplicationCommandInteractionDataOption{}
 	for _, o := range data.Options {
@@ -159,9 +175,8 @@ func (b *Bot) HandleInteraction(s *discordgo.Session, ic *discordgo.InteractionC
 		action := optStr(opts, "action")
 		tid, tname := "", ""
 		if o, ok := opts["user"]; ok && o != nil {
-			tid = o.UserValue(nil).ID
-			if u := o.UserValue(nil); u != nil {
-				tname = u.Username
+			if u := o.UserValue(b.Session); u != nil {
+				tid, tname = u.ID, u.Username
 			}
 		}
 		cmdUser(b, ctx, action, tid, tname)
@@ -169,7 +184,7 @@ func (b *Bot) HandleInteraction(s *discordgo.Session, ic *discordgo.InteractionC
 		action := optStr(opts, "action")
 		tid := ""
 		if o, ok := opts["user"]; ok && o != nil {
-			if u := o.UserValue(nil); u != nil {
+			if u := o.UserValue(b.Session); u != nil {
 				tid = u.ID
 			}
 		}

@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/artixy
-# Token lives in ~/.config/artixy/config.toml; .env is optional overrides.
+# Token lives in ~/.config/artixy/config.jsonc; .env is optional overrides.
 EnvironmentFile=-%h/artixy/.env
 ExecStart=%h/artixy/artixy
 Restart=on-failure

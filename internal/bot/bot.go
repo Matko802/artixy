@@ -56,7 +56,7 @@ ai
 /ai think:true|false — model reasoning, off is fast (default)
 /ai forget:true — forget this channel
 
-Warning: managers can power the machine on/off. Keep the token secret: config.toml only, never git.`
+Warning: managers can power the machine on/off. Keep the token secret: config.jsonc only, never git.`
 
 type Bot struct {
 	Session *discordgo.Session
@@ -134,9 +134,11 @@ type CmdCtx struct {
 
 func (c *CmdCtx) Reply(text string) {
 	if c.IsSlash {
-		_ = c.Bot.Session.InteractionRespond(c.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{Content: truncate(text, 2000)},
+		// HandleInteraction already deferred the response, so every reply
+		// is a followup — this keeps slow commands (AI, /start, uploads)
+		// inside Discord's 3s interaction window.
+		_, _ = c.Bot.Session.FollowupMessageCreate(c.Interaction, false, &discordgo.WebhookParams{
+			Content: truncate(text, 2000),
 		})
 		return
 	}
@@ -145,12 +147,9 @@ func (c *CmdCtx) Reply(text string) {
 
 func (c *CmdCtx) ReplyEphemeral(text string) {
 	if c.IsSlash {
-		_ = c.Bot.Session.InteractionRespond(c.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: truncate(text, 2000),
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
+		_, _ = c.Bot.Session.FollowupMessageCreate(c.Interaction, false, &discordgo.WebhookParams{
+			Content: truncate(text, 2000),
+			Flags:   discordgo.MessageFlagsEphemeral,
 		})
 		return
 	}
@@ -165,13 +164,7 @@ func (c *CmdCtx) ReplyEphemeral(text string) {
 
 func (c *CmdCtx) ReplyWithFiles(text string, files []FileData) {
 	if c.IsSlash {
-		// discordgo slash followup with files: respond then followup
-		err := c.Bot.Session.InteractionRespond(c.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-		})
-		if err != nil {
-			return
-		}
+		// Already deferred by HandleInteraction — reply via followup.
 		dfs := make([]*discordgo.File, 0, len(files))
 		for _, f := range files {
 			dfs = append(dfs, &discordgo.File{Name: f.Name, Reader: bytesReader(f.Data)})
@@ -222,12 +215,9 @@ func (b *Bot) PostText(channelID, content string) *discordgo.Message {
 func (b *Bot) PostDenied(ctx *CmdCtx, content string) {
 	mention := fmt.Sprintf("<@%s> %s", ctx.AuthorID, content)
 	if ctx.IsSlash {
-		_ = b.Session.InteractionRespond(ctx.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: mention,
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
+		_, _ = b.Session.FollowupMessageCreate(ctx.Interaction, false, &discordgo.WebhookParams{
+			Content: mention,
+			Flags:   discordgo.MessageFlagsEphemeral,
 		})
 		return
 	}
@@ -305,10 +295,10 @@ func IsSensitiveSendName(name string) bool {
 	if n == "" || strings.HasPrefix(n, ".") {
 		return true
 	}
-	if n == "config.toml" || n == ".env" || n == "token" {
+	if n == "config.jsonc" || n == ".env" || n == "token" {
 		return true
 	}
-	if strings.Contains(n, ".env") || strings.Contains(n, "config.toml") {
+	if strings.Contains(n, ".env") || strings.Contains(n, "config.jsonc") {
 		return true
 	}
 	for _, suf := range []string{".pem", ".key", ".p12", ".pfx", ".token"} {

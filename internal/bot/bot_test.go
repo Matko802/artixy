@@ -30,7 +30,7 @@ func TestUploadAllow(t *testing.T) {
 }
 
 func TestSensitive(t *testing.T) {
-	for _, n := range []string{".env", "config.toml", "id_rsa", "api_token.txt"} {
+	for _, n := range []string{".env", "config.jsonc", "id_rsa", "api_token.txt"} {
 		if !IsSensitiveSendName(n) {
 			t.Fatalf("%s should be refused", n)
 		}

@@ -7,12 +7,42 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Matko802/artixy/internal/config"
 )
 
 const VirshTimeoutSecs = 30
+
+// ConnectionURI is the libvirt connection URI passed as
+// `virsh --connect <uri>`. Default is the local system daemon.
+// Set to e.g. "qemu+ssh://user@host/system?keyfile=/path&no_verify=1"
+// to manage a VM on another machine (how the Raspberry Pi build
+// controls the PC's guest).
+var (
+	connMu  sync.RWMutex
+	connURI = "qemu:///system"
+)
+
+// SetConnectionURI updates the libvirt URI (empty values ignored).
+func SetConnectionURI(u string) {
+	if strings.TrimSpace(u) == "" {
+		return
+	}
+	connMu.Lock()
+	connURI = strings.TrimSpace(u)
+	connMu.Unlock()
+}
+
+func getConnectionURI() string {
+	connMu.RLock()
+	defer connMu.RUnlock()
+	if strings.TrimSpace(connURI) == "" {
+		return "qemu:///system"
+	}
+	return connURI
+}
 
 func cmdOutput(bin string, args []string, secs uint64) ([]byte, []byte, error) {
 	if secs < 1 {
@@ -36,7 +66,7 @@ func cmdOutput(bin string, args []string, secs uint64) ([]byte, []byte, error) {
 }
 
 func virshOutput(args []string) ([]byte, []byte, error) {
-	full := append([]string{"--connect", "qemu:///system"}, args...)
+	full := append([]string{"--connect", getConnectionURI()}, args...)
 	return cmdOutput("virsh", full, VirshTimeoutSecs)
 }
 
