@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <jansson.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -20,6 +21,25 @@ static _Thread_local char errbuf[1024];
 
 const char *vm_error(void) {
     return errbuf;
+}
+
+/* Connection URI override (remote management). Defaults to local system. */
+static pthread_mutex_t uri_mu = PTHREAD_MUTEX_INITIALIZER;
+static char connect_uri[1024] = VM_VIRSH_CONNECT;
+
+void vm_set_connect_uri(const char *uri) {
+    pthread_mutex_lock(&uri_mu);
+    if (!uri || !*uri)
+        snprintf(connect_uri, sizeof connect_uri, "%s", VM_VIRSH_CONNECT);
+    else
+        snprintf(connect_uri, sizeof connect_uri, "%s", uri);
+    pthread_mutex_unlock(&uri_mu);
+}
+
+static void current_uri(char *out, size_t n) {
+    pthread_mutex_lock(&uri_mu);
+    snprintf(out, n, "%s", connect_uri[0] ? connect_uri : VM_VIRSH_CONNECT);
+    pthread_mutex_unlock(&uri_mu);
 }
 
 static void set_error(const char *fmt, ...) {
@@ -225,10 +245,12 @@ static char *trim(char *s) {
 }
 
 static int virsh_output(char *const args[], cmd_result_t *r) {
-    /* argv: virsh --connect qemu:///system <args...> */
+    /* argv: virsh --connect <uri> <args...> */
     size_t n = 0;
     while (args[n])
         n++;
+    char uri[1024];
+    current_uri(uri, sizeof uri);
     char **argv = xmalloc((n + 4) * sizeof *argv);
     if (!argv) {
         set_error("out of memory");
@@ -236,7 +258,7 @@ static int virsh_output(char *const args[], cmd_result_t *r) {
     }
     argv[0] = "virsh";
     argv[1] = "--connect";
-    argv[2] = (char *)VM_VIRSH_CONNECT;
+    argv[2] = uri;
     for (size_t i = 0; i <= n; i++)
         argv[3 + i] = args[i];
     int rc = cmd_run("virsh", argv, VM_VIRSH_TIMEOUT_S, r);

@@ -621,8 +621,8 @@ static int rest_perform(discord_client_t *c, const char *method, const char *url
     }
 
     if (http_code < 200 || http_code >= 300) {
-        fprintf(stderr, "artixy: REST %s failed HTTP %ld: %s\n", method, http_code,
-                body.data ? body.data : "(empty)");
+        fprintf(stderr, "artixy: REST %s %s failed HTTP %ld: %s\n", method,
+                url, http_code, body.data ? body.data : "(empty)");
         free(body.data);
         return -1;
     }
@@ -704,8 +704,8 @@ static int rest_multipart(discord_client_t *c, const char *method, const char *p
             return -1;
         }
         if (code < 200 || code >= 300) {
-            fprintf(stderr, "artixy: REST %s failed HTTP %ld: %s\n", method, code,
-                    body.data ? body.data : "(empty)");
+            fprintf(stderr, "artixy: REST %s %s failed HTTP %ld: %s\n", method,
+                    url, code, body.data ? body.data : "(empty)");
             free(body.data);
             return -1;
         }

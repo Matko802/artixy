@@ -400,6 +400,8 @@ static conn_result_t serve(discord_client_t *c, const char *base_url, gw_t *g,
                 g->seq = (long long)json_integer_value(sj);
             json_t *tj = json_object_get(m, "t");
             const char *t = json_is_string(tj) ? json_string_value(tj) : "";
+            if (strcmp(t, "READY") != 0 && strcmp(t, "RESUMED") != 0)
+                fprintf(stderr, "artixy: dispatch t=%s\n", t);
             json_t *d = json_object_get(m, "d");
             if (strcmp(t, "READY") == 0 && json_is_object(d)) {
                 json_t *sid = json_object_get(d, "session_id");

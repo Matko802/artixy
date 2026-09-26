@@ -219,6 +219,7 @@ TEST(persist_roundtrip) {
           strcmp(strmap_get(&c2.shells, "22"), "fish") == 0);
     CHECK(c2.war_mode);
     CHECK(c2.has_notify_channel && c2.notify_channel == 99);
+    CHECK(c2.libvirt_uri && strcmp(c2.libvirt_uri, "qemu:///system") == 0);
     file_config_free(&c2);
     /* parse the persisted file as strict JSON (comments allowed but must
      * still be valid JSONC our loader accepts — reload proves it) */

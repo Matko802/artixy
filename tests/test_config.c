@@ -62,6 +62,7 @@ TEST(template_parses_with_defaults) {
     CHECK_STR_EQ(c.ollama_host, "http://127.0.0.1:11434");
     CHECK(!c.has_owner_id);
     CHECK(c.discord_token == NULL);
+    CHECK(c.libvirt_uri && strcmp(c.libvirt_uri, "qemu:///system") == 0);
     struct stat st;
     char path[8192];
     snprintf(path, sizeof path, "%s/artixy/config.jsonc", dir);

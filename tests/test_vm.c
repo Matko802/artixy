@@ -146,9 +146,18 @@ TEST(kill_tree_script) {
     vm_guest_kill_tree("artix", 4242);
 }
 
+TEST(connect_uri_override) {
+    /* default must survive NULL/empty resets */
+    vm_set_connect_uri(NULL);
+    vm_set_connect_uri("");
+    vm_set_connect_uri("qemu+ssh://u@h/system");
+    vm_set_connect_uri(NULL);
+}
+
 int main(void) {
     RUN(b64_roundtrip);
     RUN(b64_rejects_garbage);
+    RUN(connect_uri_override);
     RUN(virsh_list_and_state);
     RUN(virsh_failure_message);
     RUN(agent_ping_and_wait);

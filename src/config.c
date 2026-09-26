@@ -178,8 +178,12 @@ static const char *config_template =
     "  \"owner_id\": 0,\n"
     "  // Bot token from https://discord.com/developers/applications. Keep secret, never git.\n"
     "  \"discord_token\": \"\",\n"
-    "  // libvirt domain name, e.g. \"artix\". VM commands error out until this is set.\n"
-    "  \"vm_name\": \"\",\n"
+  "  // libvirt domain name, e.g. \"artix\". VM commands error out until this is set.\n"
+  "  \"vm_name\": \"\",\n"
+  "  // libvirt connection URI. Local default talks to this machine's daemon.\n"
+  "  // For a bot on another host (e.g. Pi) managing this machine's VM:\n"
+  "  // \"libvirt_uri\": \"qemu+ssh://matko@fishy.local/system?keyfile=/home/matko/.ssh/artixy_libvirt&no_verify=1\",\n"
+  "  \"libvirt_uri\": \"qemu:///system\",\n"
     "  \"blocked_ids\": [],\n"
     "  \"war_mode\": false,\n"
     "  \"sayas_enabled\": false,\n"
@@ -315,6 +319,7 @@ void file_config_free(file_config_t *c) {
     free(c->blocked_ids);
     free(c->discord_token);
     free(c->vm_name);
+    free(c->libvirt_uri);
     free(c->managers);
     free(c->admin_ids);
     strmap_free(&c->linux);
@@ -423,6 +428,24 @@ int config_load(file_config_t *out) {
     v = json_object_get(root, "vm_name");
     if (json_is_string(v))
         out->vm_name = dup_nonempty(json_string_value(v));
+    v = json_object_get(root, "libvirt_uri");
+    if (json_is_string(v)) {
+        /* trim whitespace; empty falls back to the local default */
+        const char *s = json_string_value(v);
+        while (*s == ' ' || *s == '\t')
+            s++;
+        char *tmp = xstrdup(s);
+        if (tmp) {
+            size_t tl = strlen(tmp);
+            while (tl > 0 && (tmp[tl - 1] == ' ' || tmp[tl - 1] == '\t'))
+                tmp[--tl] = '\0';
+            out->libvirt_uri = tmp;
+        }
+    }
+    if (!out->libvirt_uri || !*out->libvirt_uri) {
+        free(out->libvirt_uri);
+        out->libvirt_uri = xstrdup("qemu:///system");
+    }
     v = json_object_get(root, "war_mode");
     if (json_is_boolean(v))
         out->war_mode = json_is_true(v);
@@ -485,7 +508,8 @@ int config_load(file_config_t *out) {
     if (json_is_boolean(v))
         out->ai_think = json_is_true(v);
 
-    if (!out->ai_model || !out->ollama_host || !out->ai_prompt)
+    if (!out->ai_model || !out->ollama_host || !out->ai_prompt ||
+        !out->libvirt_uri)
         goto bad;
     json_decref(root);
     lock_private(config_path());
@@ -502,8 +526,10 @@ defaults:
     out->ai_model = xstrdup(config_default_model());
     out->ollama_host = xstrdup(config_default_host());
     out->ai_prompt = xstrdup("");
+    out->libvirt_uri = xstrdup("qemu:///system");
     out->ai_temperature = 0.8;
-    if (!out->ai_model || !out->ollama_host || !out->ai_prompt) {
+    if (!out->ai_model || !out->ollama_host || !out->ai_prompt ||
+        !out->libvirt_uri) {
         file_config_free(out);
         return -1;
     }

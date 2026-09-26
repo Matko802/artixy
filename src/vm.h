@@ -4,10 +4,14 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Local system libvirt daemon (local-only by design). */
+/* Local system libvirt daemon (default; override with vm_set_connect_uri
+ * for remote management, e.g. qemu+ssh://user@host/system). */
 #define VM_VIRSH_CONNECT "qemu:///system"
 /* Per-command timeout for plain virsh calls. */
 #define VM_VIRSH_TIMEOUT_S 30u
+
+/* Override the `virsh --connect` URI (empty/NULL restores default). */
+void vm_set_connect_uri(const char *uri);
 
 /* Human-readable description of the last failure (thread-local). */
 const char *vm_error(void);

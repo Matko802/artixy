@@ -6,6 +6,7 @@
 #include "events.h"
 #include "live.h"
 #include "util.h"
+#include "vm.h"
 
 #include <curl/curl.h>
 #include <pthread.h>
@@ -20,6 +21,10 @@ static void on_sigint(int sig) {
     (void)sig;
     if (g_client)
         discord_stop(g_client);
+}
+
+static void on_config_change(const file_config_t *cfg) {
+    vm_set_connect_uri(cfg->libvirt_uri);
 }
 
 /*
@@ -105,6 +110,12 @@ static const char boot_art[] =
 static void on_ready(discord_client_t *c, uint64_t bot_id, uint64_t app_id,
                      void *ud) {
     bot_state_t *st = ud;
+    static bool first_ready = false;
+    bool first = false;
+    if (!first_ready) {
+        first_ready = true;
+        first = true;
+    }
     fprintf(stderr, "artixy: logged in (bot=%llu app=%llu)\n",
             (unsigned long long)bot_id, (unsigned long long)app_id);
     char vmname[256] = "";
@@ -124,7 +135,7 @@ static void on_ready(discord_client_t *c, uint64_t bot_id, uint64_t app_id,
     bool has = st->has_notify;
     uint64_t ch = st->notify_channel;
     pthread_rwlock_unlock(&st->mu);
-    if (has) {
+    if (has && first) {
         char boot[512];
         snprintf(boot, sizeof boot, "```\n%s\n```", boot_art);
         discord_send_message(c, ch, boot, NULL, 0, NULL);
@@ -226,7 +237,8 @@ int main(int argc, char **argv) {
         return 1;
     }
     file_config_free(&cfg);
-    if (bot_state_watch(&state) != 0)
+    vm_set_connect_uri(state.libvirt_uri);
+    if (bot_state_watch(&state, on_config_change) != 0)
         fprintf(stderr, "artixy: warning: config watcher failed to start\n");
     live_map_t *live = live_new();
     if (!live)

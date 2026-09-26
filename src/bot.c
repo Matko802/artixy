@@ -67,6 +67,8 @@ void bot_state_apply(bot_state_t *st, const file_config_t *cfg) {
     st->admins = dup_u64(cfg->admin_ids, cfg->n_admins);
     st->n_admins = cfg->n_admins;
     snprintf(st->vm, sizeof st->vm, "%s", cfg->vm_name ? cfg->vm_name : "");
+    snprintf(st->libvirt_uri, sizeof st->libvirt_uri, "%s",
+             cfg->libvirt_uri ? cfg->libvirt_uri : "qemu:///system");
     st->has_notify = cfg->has_notify_channel;
     st->notify_channel = cfg->notify_channel;
     st->war_mode = cfg->war_mode;
@@ -164,7 +166,7 @@ int bot_persist(bot_state_t *st) {
     {
         file_config_t tmp;
         if (config_load(&tmp) == 0) {
-            /* keep file's owner/token/vm; overlay live state below */
+            /* keep file's owner/token/vm/uri; overlay live state below */
             cur.has_owner_id = tmp.has_owner_id;
             cur.owner_id = tmp.owner_id;
             free(cur.discord_token);
@@ -173,6 +175,9 @@ int bot_persist(bot_state_t *st) {
             free(cur.vm_name);
             cur.vm_name = tmp.vm_name;
             tmp.vm_name = NULL;
+            free(cur.libvirt_uri);
+            cur.libvirt_uri = tmp.libvirt_uri;
+            tmp.libvirt_uri = NULL;
             file_config_free(&tmp);
         }
     }
@@ -263,6 +268,10 @@ static char *bot_config_serialize(const file_config_t *c) {
         json_object_set_new(o, "vm_name", json_string(c->vm_name));
     else
         json_object_set_new(o, "vm_name", json_string(""));
+    if (c->libvirt_uri)
+        json_object_set_new(o, "libvirt_uri", json_string(c->libvirt_uri));
+    else
+        json_object_set_new(o, "libvirt_uri", json_string("qemu:///system"));
     json_object_set_new(o, "war_mode", json_boolean(c->war_mode));
     json_object_set_new(o, "sayas_enabled", json_boolean(c->sayas_enabled));
     if (c->has_notify_channel)
@@ -311,8 +320,16 @@ static time_t file_mtime(const char *path, bool *ok) {
     return st.st_mtime;
 }
 
+typedef struct {
+    bot_state_t *st;
+    void (*on_change)(const file_config_t *cfg);
+} watch_ctx_t;
+
 static void *watch_thread(void *arg) {
-    bot_state_t *st = arg;
+    watch_ctx_t *w = arg;
+    bot_state_t *st = w->st;
+    void (*on_change)(const file_config_t *) = w->on_change;
+    free(w);
     bool has_last = false;
     time_t last = 0;
     for (;;) {
@@ -336,19 +353,28 @@ static void *watch_thread(void *arg) {
         if (config_load(&cfg) != 0)
             continue; /* parse error already reported; keep settings */
         bot_state_apply(st, &cfg);
+        if (on_change)
+            on_change(&cfg);
         file_config_free(&cfg);
         fprintf(stderr, "config: hot-applied\n");
     }
     return NULL;
 }
 
-int bot_state_watch(bot_state_t *st) {
+int bot_state_watch(bot_state_t *st, void (*on_change)(const file_config_t *cfg)) {
+    watch_ctx_t *w = xmalloc(sizeof *w);
+    if (!w)
+        return -1;
+    w->st = st;
+    w->on_change = on_change;
     pthread_t th;
     pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    int rc = pthread_create(&th, &at, watch_thread, st);
+    int rc = pthread_create(&th, &at, watch_thread, w);
     pthread_attr_destroy(&at);
+    if (rc != 0)
+        free(w);
     return rc;
 }
 

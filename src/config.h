@@ -29,6 +29,7 @@ typedef struct {
     size_t n_blocked;
     char *discord_token; /* NULL when absent/empty */
     char *vm_name;       /* NULL when absent/empty */
+    char *libvirt_uri;   /* never NULL after load (defaults to local) */
     bool war_mode;
     bool sayas_enabled;
     bool has_notify_channel;
@@ -52,7 +53,6 @@ void file_config_free(file_config_t *c);
 
 /* Resolved config path. Returned pointer is valid until next call. */
 const char *config_path(void);
-
 /* Create a commented template at config_path() if missing. */
 void config_ensure_template(void);
 

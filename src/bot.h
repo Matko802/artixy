@@ -23,6 +23,7 @@ typedef struct {
     uint64_t *admins;
     size_t n_admins;
     char vm[256];
+    char libvirt_uri[1024];
     /* settings */
     bool has_notify;
     uint64_t notify_channel;
@@ -44,8 +45,9 @@ void bot_state_free(bot_state_t *st);
 /* Replace live state from a freshly loaded file config. */
 void bot_state_apply(bot_state_t *st, const file_config_t *cfg);
 
-/* Background hot-reload watcher (2s poll). Returns 0 on thread start. */
-int bot_state_watch(bot_state_t *st);
+/* Background hot-reload watcher (2s poll). on_change (may be NULL) runs
+ * after every successful apply. Returns 0 on thread start. */
+int bot_state_watch(bot_state_t *st, void (*on_change)(const file_config_t *cfg));
 
 /* Access checks (by string or numeric id). */
 bool bot_is_blocked(bot_state_t *st, uint64_t id);
